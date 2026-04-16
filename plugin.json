@@ -1,0 +1,179 @@
+{
+  "name": "work-docs-library",
+  "version": "1.0.0",
+  "description": "通用化技术文档知识库管理插件，支持 PDF/Word/Excel 提取、向量索引、语义搜索与 Agent 批量总结",
+  "tools": [
+    {
+      "name": "ingest",
+      "description": "提取并存储文档到知识库，生成 embedding 和 chunk",
+      "command": ["venv/bin/python3", "scripts/plugin_router.py", "ingest"],
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string",
+            "description": "文件或目录路径"
+          },
+          "dry_run": {
+            "type": "boolean",
+            "description": "预览模式，不调用 API",
+            "default": false
+          },
+          "auto_chapter": {
+            "type": "boolean",
+            "description": "使用 PDF 自动检测的目录关联章节",
+            "default": false
+          }
+        },
+        "required": ["path"]
+      }
+    },
+    {
+      "name": "search",
+      "description": "基于 FAISS 的语义向量搜索",
+      "command": ["venv/bin/python3", "scripts/plugin_router.py", "search"],
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "text": {
+            "type": "string",
+            "description": "搜索文本"
+          },
+          "top_k": {
+            "type": "integer",
+            "description": "返回结果数量",
+            "default": 5
+          }
+        },
+        "required": ["text"]
+      }
+    },
+    {
+      "name": "query",
+      "description": "按页码、章节标题或关键词查询 chunk",
+      "command": ["venv/bin/python3", "scripts/plugin_router.py", "query"],
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "doc_id": {
+            "type": "string",
+            "description": "文档 ID"
+          },
+          "page": {
+            "type": "string",
+            "description": "页码范围，如 50-60"
+          },
+          "chapter": {
+            "type": "string",
+            "description": "章节标题子串匹配"
+          },
+          "chapter_regex": {
+            "type": "string",
+            "description": "章节标题正则匹配"
+          },
+          "keyword": {
+            "type": "string",
+            "description": "关键词匹配"
+          },
+          "top_k": {
+            "type": "integer",
+            "description": "返回结果数量",
+            "default": 10
+          }
+        }
+      }
+    },
+    {
+      "name": "status",
+      "description": "列出已导入知识库的所有文档",
+      "command": ["venv/bin/python3", "scripts/plugin_router.py", "status"],
+      "parameters": {
+        "type": "object",
+        "properties": {}
+      }
+    },
+    {
+      "name": "toc",
+      "description": "显示文档目录或按标题搜索文档",
+      "command": ["venv/bin/python3", "scripts/plugin_router.py", "toc"],
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "doc_id": {
+            "type": "string",
+            "description": "文档 ID，显示完整目录"
+          },
+          "match": {
+            "type": "string",
+            "description": "标题模糊匹配关键字"
+          }
+        }
+      }
+    },
+    {
+      "name": "auto_summarize",
+      "description": "自动批量总结：过滤低价值页、生成 batch txt、断点续传",
+      "command": ["venv/bin/python3", "scripts/plugin_router.py", "auto_summarize"],
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "doc_id": {
+            "type": "string",
+            "description": "文档 ID"
+          },
+          "output_dir": {
+            "type": "string",
+            "description": "输出目录",
+            "default": "./auto_batches"
+          },
+          "batch_size": {
+            "type": "integer",
+            "description": "每批最大 chunk 数",
+            "default": 10
+          },
+          "target_chars": {
+            "type": "integer",
+            "description": "每批目标字符数",
+            "default": 25000
+          },
+          "filter": {
+            "type": "boolean",
+            "description": "是否先过滤低价值 chunk",
+            "default": false
+          }
+        },
+        "required": ["doc_id"]
+      }
+    },
+    {
+      "name": "progress",
+      "description": "显示文档的总结进度",
+      "command": ["venv/bin/python3", "scripts/plugin_router.py", "progress"],
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "doc_id": {
+            "type": "string",
+            "description": "文档 ID"
+          }
+        },
+        "required": ["doc_id"]
+      }
+    },
+    {
+      "name": "reprocess",
+      "description": "强制重新处理文档",
+      "command": ["venv/bin/python3", "scripts/plugin_router.py", "reprocess"],
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "doc_id": {
+            "type": "string",
+            "description": "文档 ID"
+          }
+        },
+        "required": ["doc_id"]
+      }
+    }
+  ]
+}

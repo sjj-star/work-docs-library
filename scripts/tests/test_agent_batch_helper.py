@@ -160,14 +160,14 @@ def test_cmd_auto_creates_batches_and_checkpoint(patched_config, sample_doc_with
     agent_batch_helper.cmd_auto(args)
     captured = capsys.readouterr()
 
-    # Should create 2 batches (3 chunks, batch_size=2 -> batch_001 with 2, batch_002 with 1 merged into 001 because orphan)
-    # Actually smart_batch merges orphan < min_chunks=3 into previous, so 1 batch of 3
-    assert (out_dir / "batch_001.txt").exists()
-    # Checkpoint should NOT exist because there is no batch_001.json to apply, so it stops at batch 1
-    assert (out_dir / "checkpoint.json").exists()
-    checkpoint = json.loads((out_dir / "checkpoint.json").read_text(encoding="utf-8"))
+    work_dir = out_dir / "d1"
+    # Should create 1 batch of 3 (orphan merged)
+    assert (work_dir / "batch_001.txt").exists()
+    assert (work_dir / "checkpoint.json").exists()
+    checkpoint = json.loads((work_dir / "checkpoint.json").read_text(encoding="utf-8"))
     assert checkpoint["doc_id"] == "d1"
     assert checkpoint["applied_batches"] == 0
+    assert "batch_map" in checkpoint
     assert "batch_001.txt" in checkpoint["pending_batches"]
 
 
@@ -175,21 +175,7 @@ def test_cmd_auto_applies_existing_json_and_resumes(patched_config, sample_doc_w
     db = KnowledgeDB()
     rows = db.get_embedded_but_unsummarized_chunks("d1")
     out_dir = patched_config / "auto_batches"
-    out_dir.mkdir(parents=True, exist_ok=True)
 
-    # Pre-create batch txt manually to bypass auto dump size logic
-    # We create a single-batch scenario by making batch_001.txt and batch_001.json
-    batch_txt = out_dir / "batch_001.txt"
-    batch_json = out_dir / "batch_002.json"
-    batch_txt.write_text("dummy", encoding="utf-8")
-
-    # Write a second batch JSON that should be applied
-    batch_json.write_text(json.dumps([
-        {"chunk_db_id": rows[0][0], "summary": "Auto summary", "keywords": "kw1,kw2"}
-    ]), encoding="utf-8")
-
-    # However auto will regenerate batches based on current DB rows.
-    # Let's just let auto run normally with small batch size
     args = type("Args", (), {
         "doc_id": "d1",
         "output_dir": str(out_dir),
@@ -198,14 +184,15 @@ def test_cmd_auto_applies_existing_json_and_resumes(patched_config, sample_doc_w
         "filter": False,
         "parallel": 1,
     })()
+
+    # First run: creates batch_001.txt and checkpoint
     agent_batch_helper.cmd_auto(args)
     captured = capsys.readouterr()
-
-    # Since no JSON exists for batch_001, it should stop there.
+    work_dir = out_dir / "d1"
     assert "Progress: 0/1 batch(es) applied" in captured.out or "batch_001.txt" in captured.out
 
-    # Now create JSON for batch_001 and rerun
-    (out_dir / "batch_001.json").write_text(json.dumps([
+    # Create JSON for batch_001 and rerun
+    (work_dir / "batch_001.json").write_text(json.dumps([
         {"chunk_db_id": rows[0][0], "summary": "S1", "keywords": "a"},
         {"chunk_db_id": rows[1][0], "summary": "S2", "keywords": "b"},
         {"chunk_db_id": rows[2][0], "summary": "S3", "keywords": "c"},
@@ -218,7 +205,7 @@ def test_cmd_auto_applies_existing_json_and_resumes(patched_config, sample_doc_w
     ck = db.get_chunk_by_db_id(rows[0][0])
     assert ck.status == "done"
     assert ck.summary == "S1"
-    assert not (out_dir / "checkpoint.json").exists()
+    assert not (work_dir / "checkpoint.json").exists()
 
 
 def test_cmd_auto_with_filter(patched_config, sample_doc_with_chunks, capsys, caplog):
@@ -276,8 +263,9 @@ def test_cmd_auto_detects_incomplete_batch_after_partial_json(patched_config, ca
     captured = capsys.readouterr()
     assert "batch_001.txt" in captured.out
 
+    work_dir = out_dir / "d2"
     # Simulate a partial JSON that covers only 2 of the 4 chunks
-    partial_json = out_dir / "batch_001.json"
+    partial_json = work_dir / "batch_001.json"
     partial_data = [{"chunk_db_id": cids[i], "summary": "S", "keywords": "k"} for i in range(2)]
     partial_json.write_text(json.dumps(partial_data), encoding="utf-8")
 
@@ -286,11 +274,10 @@ def test_cmd_auto_detects_incomplete_batch_after_partial_json(patched_config, ca
     captured = capsys.readouterr()
 
     # Should detect incomplete batch and warn instead of declaring done
-    assert "Batch 1 still has 2 unprocessed chunk(s)" in captured.out or "Auto batch incomplete" in caplog.text
-    assert "Please remove batch_001.json and rerun" in captured.out or "Auto JSON may be stale or incomplete" in caplog.text
+    assert "Auto batch incomplete" in caplog.text
 
     # Checkpoint should be written with only the 2 applied ids
-    checkpoint = json.loads((out_dir / "checkpoint.json").read_text(encoding="utf-8"))
+    checkpoint = json.loads((work_dir / "checkpoint.json").read_text(encoding="utf-8"))
     assert set(checkpoint["done_chunk_ids"]) == set(cids[:2])
 
 
@@ -322,7 +309,7 @@ def test_content_keywords_prefix_ratio_avoids_footer_false_positive(patched_conf
     assert ck2.status == "skipped"
 
 
-def test_cmd_auto_detects_stale_json_after_batch_reorg(patched_config, capsys, caplog):
+def test_cmd_auto_cleans_orphan_files_and_keeps_stable_batch_map(patched_config, capsys, caplog):
     db = KnowledgeDB()
     doc = Document(
         doc_id="d3", title="Test", source_path=str(patched_config / "c.pdf"), file_type="pdf",
@@ -348,10 +335,16 @@ def test_cmd_auto_detects_stale_json_after_batch_reorg(patched_config, capsys, c
         "parallel": 1,
     })()
 
-    # First run: 5 chunks with batch_size=3 -> [3,2] then merge orphan -> [5]
+    # First run: 5 chunks -> [5] after orphan merge
     agent_batch_helper.cmd_auto(args)
     captured = capsys.readouterr()
     assert "batch_001.txt" in captured.out
+
+    work_dir = out_dir / "d3"
+    checkpoint1 = json.loads((work_dir / "checkpoint.json").read_text(encoding="utf-8"))
+    batch_map1 = checkpoint1["batch_map"]
+    assert len(batch_map1) == 1
+    assert len(batch_map1[0]) == 5
 
     # Manually apply first 3 chunks so they become done
     for cid in cids[:3]:
@@ -359,20 +352,21 @@ def test_cmd_auto_detects_stale_json_after_batch_reorg(patched_config, capsys, c
         db.update_chunk_keywords(cid, "k")
         db.update_chunk_status(cid, "done")
 
-    # Re-run auto: pending=2 -> [2]
+    # Re-run auto: should reuse the same batch_map
     agent_batch_helper.cmd_auto(args)
     captured = capsys.readouterr()
     assert "batch_001.txt" in captured.out
 
-    # Now place a stale JSON from the old [3,2] grouping (covers 3 chunks)
-    stale_json = out_dir / "batch_001.json"
-    stale_data = [{"chunk_db_id": cids[i], "summary": "S", "keywords": "k"} for i in range(3)]
-    stale_json.write_text(json.dumps(stale_data), encoding="utf-8")
+    checkpoint2 = json.loads((work_dir / "checkpoint.json").read_text(encoding="utf-8"))
+    assert checkpoint2["batch_map"] == batch_map1
 
-    # Re-run auto again
+    # Create an orphan batch_002.json (index exceeds batch_map length)
+    orphan_json = work_dir / "batch_002.json"
+    orphan_json.write_text(json.dumps([
+        {"chunk_db_id": cids[3], "summary": "S", "keywords": "k"}
+    ]), encoding="utf-8")
+
+    # Re-run auto: orphan should be auto-cleaned
     agent_batch_helper.cmd_auto(args)
     captured = capsys.readouterr()
-
-    # Should detect stale JSON because its ids are not a subset of the current batch
-    assert "contains chunk ids not in current batch 1" in captured.out or "Auto stale chunk ids" in caplog.text
-    assert "Please remove stale JSON files and rerun" in captured.out or "Auto please remove stale JSON files" in caplog.text
+    assert not orphan_json.exists()
