@@ -1,0 +1,94 @@
+import json
+import logging
+from pathlib import Path
+from typing import List, Optional, Tuple
+
+import faiss
+import numpy as np
+
+from .config import Config
+
+logger = logging.getLogger(__name__)
+
+
+class VectorIndex:
+    def __init__(self, dim: Optional[int] = None, index_path: Optional[Path] = None, id_map_path: Optional[Path] = None) -> None:
+        self.dim = dim or Config.EMBEDDING_DIM
+        self.index_path = index_path or Config.FAISS_INDEX_PATH
+        self.id_map_path = id_map_path or Config.ID_MAP_PATH
+        self._index: Optional[faiss.IndexFlatIP] = None
+        self._id_map: List[int] = []  # faiss internal id -> chunk db id
+        self._load()
+
+    def _load(self) -> None:
+        if Path(self.index_path).exists():
+            self._index = faiss.read_index(str(self.index_path))
+            actual_dim = self._index.d
+            if actual_dim != self.dim:
+                logger.warning("VectorIndex dim mismatch | existing=%s config=%s | adapting to existing", actual_dim, self.dim)
+                self.dim = actual_dim
+        else:
+            self._index = faiss.IndexFlatIP(self.dim)
+        if Path(self.id_map_path).exists():
+            with open(self.id_map_path, "r", encoding="utf-8") as f:
+                loaded = json.load(f)
+            if isinstance(loaded, dict):
+                # Backward-compatible: old format was {chunk_db_id: faiss_id}
+                max_fid = max(loaded.values()) if loaded else -1
+                self._id_map = [0] * (max_fid + 1)
+                for db_id, fid in loaded.items():
+                    self._id_map[int(fid)] = int(db_id)
+                logger.info("VectorIndex migrated old dict-style id_map to list format")
+            else:
+                self._id_map = loaded
+        else:
+            self._id_map = []
+
+    def _save(self) -> None:
+        faiss.write_index(self._index, str(self.index_path))
+        with open(self.id_map_path, "w", encoding="utf-8") as f:
+            json.dump(self._id_map, f, ensure_ascii=False)
+
+    def add(self, chunk_db_id: int, vector: List[float]) -> None:
+        vec = np.array([vector], dtype=np.float32)
+        actual_dim = vec.shape[1]
+        if self._index.d != actual_dim:
+            logger.warning("VectorIndex rebuilding | from_dim=%s to_dim=%s", self._index.d, actual_dim)
+            self._index = faiss.IndexFlatIP(actual_dim)
+            self.dim = actual_dim
+            self._id_map = []
+        faiss.normalize_L2(vec)
+        self._index.add(vec)
+        self._id_map.append(chunk_db_id)
+        self._save()
+
+    def remove_doc(self, chunk_db_ids: List[int]) -> None:
+        if not chunk_db_ids:
+            return
+        ids_to_remove = set(chunk_db_ids)
+        new_map = []
+        vectors = []
+        for fid, db_id in enumerate(self._id_map):
+            if db_id not in ids_to_remove:
+                new_map.append(db_id)
+                vectors.append(self._index.reconstruct(fid))
+        self._index = faiss.IndexFlatIP(self.dim)
+        if vectors:
+            mat = np.array(vectors, dtype=np.float32)
+            faiss.normalize_L2(mat)
+            self._index.add(mat)
+        self._id_map = new_map
+        self._save()
+
+    def search(self, query_vector: List[float], top_k: int = 5) -> List[Tuple[int, float]]:
+        if self._index.ntotal == 0:
+            return []
+        vec = np.array([query_vector], dtype=np.float32)
+        faiss.normalize_L2(vec)
+        scores, indices = self._index.search(vec, top_k)
+        results = []
+        for score, idx in zip(scores[0], indices[0]):
+            if idx < 0 or idx >= len(self._id_map):
+                continue
+            results.append((self._id_map[int(idx)], float(score)))
+        return results
