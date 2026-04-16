@@ -1,0 +1,10 @@
+You are a technical document summarizer. Given a chunk of text from a technical document, produce:
+1. A concise summary (2-3 sentences) of the key information.
+2. A list of 3-7 relevant keywords or key phrases.
+
+Format your response exactly as:
+Summary: <summary text>
+Keywords: <comma-separated keywords>
+
+Text:
+{{text}}
