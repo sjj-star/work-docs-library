@@ -216,6 +216,242 @@ def _apply_json_file(json_path: Path) -> int:
     return updated
 
 
+def _cleanup_orphan_files(out_dir: Path, batch_map: list) -> int:
+    """Remove stale .txt/.json files that do not match the current batch_map."""
+    cleaned = 0
+    valid_batch_ids = {i + 1 for i in range(len(batch_map))}
+    batch_id_to_set = {i + 1: set(ids) for i, ids in enumerate(batch_map)}
+
+    for fpath in list(out_dir.glob("batch_*.txt")) + list(out_dir.glob("batch_*.json")):
+        m = re.match(r"batch_(\d{3})\.(txt|json)$", fpath.name)
+        if not m:
+            continue
+        idx = int(m.group(1))
+        ext = m.group(2)
+
+        if idx not in valid_batch_ids:
+            fpath.unlink(missing_ok=True)
+            cleaned += 1
+            continue
+
+        if ext == "json" and fpath.exists():
+            try:
+                with open(fpath, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                if isinstance(data, list):
+                    json_ids = {item.get("chunk_db_id") for item in data if isinstance(item, dict) and item.get("chunk_db_id") is not None}
+                    if not json_ids.issubset(batch_id_to_set[idx]):
+                        fpath.unlink(missing_ok=True)
+                        cleaned += 1
+                        # Also delete the paired txt so it gets rewritten cleanly
+                        txt_path = fpath.with_suffix(".txt")
+                        if txt_path.exists():
+                            txt_path.unlink(missing_ok=True)
+                            cleaned += 1
+            except Exception:
+                # If JSON is unreadable, treat as orphan
+                fpath.unlink(missing_ok=True)
+                cleaned += 1
+
+    return cleaned
+
+
+def run_auto_summarize(
+    doc_id: str,
+    out_dir: Path,
+    batch_size: int = 10,
+    target_chars: int = 25000,
+    do_filter: bool = False,
+):
+    """
+    Shared core for the auto-summarize pipeline.
+
+    Returns a dict:
+      - state: "pending" | "fully_summarized"
+      - doc_id: str
+      - applied_batches: int
+      - total_batches: int
+      - next_batch_txt: str   (only when state="pending")
+      - next_batch_json: str  (only when state="pending")
+      - pending_batches: list[dict]  (only when state="pending")
+      - message: str
+      - cleaned_count: int
+    """
+    db = KnowledgeDB()
+    out_dir.mkdir(parents=True, exist_ok=True)
+    checkpoint_path = out_dir / "checkpoint.json"
+
+    # Step 1: filter
+    if do_filter:
+        rows = db.get_embedded_but_unsummarized_chunks(doc_id)
+        skipped = 0
+        for row in rows:
+            db_id, _, _, content, ctype, _, _, ch_title = row
+            if _is_low_value(content, ch_title, chunk_type=ctype):
+                db.update_chunk_status(db_id, "skipped")
+                skipped += 1
+        logger.info("Auto filtered low-value chunks | doc_id=%s | skipped=%s", doc_id, skipped)
+
+    # Step 2: get pending rows
+    rows = db.get_embedded_but_unsummarized_chunks(doc_id)
+    current_embedded_ids = {r[0] for r in rows}
+
+    # Step 3: load checkpoint and decide batch_map
+    checkpoint = {}
+    if checkpoint_path.exists():
+        try:
+            checkpoint = json.loads(checkpoint_path.read_text(encoding="utf-8"))
+        except Exception:
+            checkpoint = {}
+
+    batch_map = None
+    done_ids = set()
+    if checkpoint.get("doc_id") == doc_id:
+        cp_batch_map = checkpoint.get("batch_map")
+        if cp_batch_map and isinstance(cp_batch_map, list):
+            cp_all_ids = set()
+            for batch_ids in cp_batch_map:
+                cp_all_ids.update(batch_ids)
+            # If current embedded ids are a subset of the checkpoint's known ids,
+            # the batch_map is still valid (some may have been done/skipped).
+            if current_embedded_ids.issubset(cp_all_ids):
+                batch_map = cp_batch_map
+                done_ids = set(checkpoint.get("done_chunk_ids", []))
+                logger.info("Resumed from checkpoint | doc_id=%s | batches=%s | done=%s", doc_id, len(batch_map), len(done_ids))
+
+    if batch_map is None:
+        # Generate fresh batch_map from current embedded rows
+        batches = _smart_batch(rows, target_chars=target_chars, max_chunks=batch_size, min_chunks=3)
+        batch_map = []
+        for batch in batches:
+            batch_map.append([row[0] for row in batch])
+        done_ids = set()
+        logger.info("Created new batch map | doc_id=%s | batches=%s | chunks=%s", doc_id, len(batch_map), sum(len(b) for b in batch_map))
+
+    total_batches = len(batch_map)
+
+    # Build a lookup from chunk_db_id -> full row
+    row_by_id = {r[0]: r for r in rows}
+
+    # Step 4: cleanup orphan files
+    cleaned = _cleanup_orphan_files(out_dir, batch_map)
+    if cleaned:
+        logger.info("Cleaned up orphan intermediate files | count=%s", cleaned)
+
+    # Step 5: write txt files for all batches that still have pending chunks
+    for i, batch_ids in enumerate(batch_map, start=1):
+        pending_ids = [bid for bid in batch_ids if bid in row_by_id and bid not in done_ids]
+        if not pending_ids:
+            continue
+        batch = [row_by_id[bid] for bid in pending_ids]
+        txt_path = out_dir / f"batch_{i:03d}.txt"
+        enriched = _enrich_batch_with_images(batch, db)
+        _write_batch_txt(txt_path, enriched)
+
+    # Step 6: apply existing JSONs sequentially
+    applied_count = 0
+    next_to_process = total_batches + 1
+    for i, batch_ids in enumerate(batch_map, start=1):
+        json_path = out_dir / f"batch_{i:03d}.json"
+        batch_id_set = set(batch_ids)
+
+        if json_path.exists():
+            try:
+                with open(json_path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+            except Exception as e:
+                logger.warning("Auto failed to read %s: %s. Stopping.", json_path.name, e)
+                next_to_process = i
+                break
+
+            if not isinstance(data, list):
+                logger.warning("Auto %s is not a JSON list. Stopping.", json_path.name)
+                next_to_process = i
+                break
+
+            json_ids = {item.get("chunk_db_id") for item in data if isinstance(item, dict) and item.get("chunk_db_id") is not None}
+
+            if not json_ids.issubset(batch_id_set):
+                stale = sorted(json_ids - batch_id_set)
+                logger.warning("Auto stale chunk ids in %s | batch=%s | stale=%s", json_path.name, i, stale)
+                # Since _cleanup_orphan_files should have caught this, this is a safety net.
+                # We clean it now and stop.
+                json_path.unlink(missing_ok=True)
+                next_to_process = i
+                break
+
+            count = _apply_json_file(json_path)
+            applied_count += 1
+            done_ids.update(json_ids)
+            logger.info("Auto applied %s | chunks=%s", json_path.name, count)
+            try:
+                json_path.unlink()
+            except Exception:
+                pass
+
+            remaining_in_batch = batch_id_set - done_ids
+            if remaining_in_batch:
+                logger.warning("Auto batch incomplete | batch=%s | remaining=%s", i, sorted(remaining_in_batch))
+                next_to_process = i
+                break
+        else:
+            next_to_process = i
+            break
+
+    # Step 7: remaining work or fully summarized
+    if next_to_process <= total_batches:
+        pending_files = [f"batch_{j:03d}.txt" for j in range(next_to_process, total_batches + 1)]
+        checkpoint = {
+            "doc_id": doc_id,
+            "batch_map": batch_map,
+            "done_chunk_ids": sorted(done_ids),
+            "total_batches": total_batches,
+            "applied_batches": applied_count,
+            "pending_batches": pending_files,
+        }
+        checkpoint_path.write_text(
+            json.dumps(checkpoint, indent=2, ensure_ascii=False), encoding="utf-8"
+        )
+        txt_path = out_dir / f"batch_{next_to_process:03d}.txt"
+        json_path = out_dir / f"batch_{next_to_process:03d}.json"
+        pending_batches = []
+        for j in range(next_to_process, total_batches + 1):
+            pending_batches.append({
+                "txt": str(out_dir / f"batch_{j:03d}.txt"),
+                "json": str(out_dir / f"batch_{j:03d}.json"),
+            })
+        logger.info("Auto progress | applied=%s/%s | next_batch=%s", applied_count, total_batches, txt_path.name)
+        return {
+            "state": "pending",
+            "doc_id": doc_id,
+            "applied_batches": applied_count,
+            "total_batches": total_batches,
+            "next_batch_txt": str(txt_path),
+            "next_batch_json": str(json_path),
+            "pending_batches": pending_batches,
+            "message": f"Progress: {applied_count}/{total_batches} batch(es) applied. Next batch: {txt_path.name}",
+            "cleaned_count": cleaned,
+        }
+
+    # All done
+    if checkpoint_path.exists():
+        checkpoint_path.unlink()
+    cleaned_end = 0
+    for txt_path in out_dir.glob("batch_*.txt"):
+        txt_path.unlink()
+        cleaned_end += 1
+    if cleaned_end:
+        logger.info("Auto cleaned up intermediate files | count=%s", cleaned_end)
+    return {
+        "state": "fully_summarized",
+        "doc_id": doc_id,
+        "applied_batches": applied_count,
+        "total_batches": total_batches,
+        "message": f"All {total_batches} batch(es) applied. Document {doc_id} is fully summarized.",
+        "cleaned_count": cleaned + cleaned_end,
+    }
+
+
 def cmd_list(args):
     db = KnowledgeDB()
     rows = db.get_embedded_but_unsummarized_chunks(args.doc_id)
@@ -303,146 +539,33 @@ def cmd_progress(args):
     print(f"  failed  : {failed:>4} {bar(failed, total)}")
 
 
+def _resolve_output_dir(base_dir: str, doc_id: str) -> Path:
+    """Append doc_id as subdirectory if the provided path does not already end with it."""
+    p = Path(base_dir)
+    # If the last path component is already the doc_id, use as-is
+    if p.name == doc_id:
+        return p
+    return p / doc_id
+
+
 def cmd_auto(args):
-    db = KnowledgeDB()
-    out_dir = Path(args.output_dir)
-    out_dir.mkdir(parents=True, exist_ok=True)
-    checkpoint_path = out_dir / "checkpoint.json"
+    out_dir = _resolve_output_dir(args.output_dir, args.doc_id)
+    result = run_auto_summarize(
+        doc_id=args.doc_id,
+        out_dir=out_dir,
+        batch_size=args.batch_size,
+        target_chars=args.target_chars,
+        do_filter=args.filter,
+    )
 
-    if args.filter:
-        rows = db.get_embedded_but_unsummarized_chunks(args.doc_id)
-        skipped = 0
-        for row in rows:
-            db_id, doc_id, chunk_id, content, ctype, ps, pe, ch_title = row
-            if _is_low_value(content, ch_title, chunk_type=ctype):
-                db.update_chunk_status(db_id, "skipped")
-                skipped += 1
-        logger.info("Auto filtered low-value chunks | doc_id=%s | skipped=%s", args.doc_id, skipped)
-
-    rows = db.get_embedded_but_unsummarized_chunks(args.doc_id)
-
-    # Load checkpoint to resume from previous progress using chunk_db_ids as ground truth
-    done_ids = set()
-    if checkpoint_path.exists():
-        try:
-            cp = json.loads(checkpoint_path.read_text(encoding="utf-8"))
-            if cp.get("doc_id") == args.doc_id:
-                done_ids = set(cp.get("done_chunk_ids", []))
-            else:
-                done_ids = set()
-        except Exception:
-            done_ids = set()
-
-    pending_rows = [r for r in rows if r[0] not in done_ids]
-    total_pending = len(pending_rows)
-
-    if total_pending == 0:
-        logger.info("Auto complete | doc_id=%s has no pending chunks", args.doc_id)
-        if checkpoint_path.exists():
-            checkpoint_path.unlink()
-        # Also cleanup any stale intermediate .txt files
-        cleaned = 0
-        for txt_path in out_dir.glob("batch_*.txt"):
-            txt_path.unlink()
-            cleaned += 1
-        if cleaned:
-            logger.info("Auto cleaned up intermediate files | count=%s", cleaned)
+    if result["state"] == "pending":
+        print(f"\nNext batch to summarize: {Path(result['next_batch_txt']).name}")
+        print(f"  1. Have Agent read '{Path(result['next_batch_txt']).resolve()}'")
+        print(f"  2. Write result to '{Path(result['next_batch_json']).resolve()}' (JSON array)")
+        print(f"  3. Rerun: python agent_batch_helper.py auto --doc-id {args.doc_id} --output-dir {args.output_dir}")
         return
 
-    batches = _smart_batch(pending_rows, target_chars=args.target_chars, max_chunks=args.batch_size, min_chunks=3)
-    total_batches = len(batches)
-    logger.info("Auto created batches | doc_id=%s | batches=%s | pending_chunks=%s", args.doc_id, total_batches, total_pending)
-
-    # Write all batch txt files (enrich with image hints for Agent vision)
-    db = KnowledgeDB()
-    for i, batch in enumerate(batches, start=1):
-        txt_path = out_dir / f"batch_{i:03d}.txt"
-        enriched = _enrich_batch_with_images(batch, db)
-        _write_batch_txt(txt_path, enriched)
-
-    # Apply existing JSONs sequentially with validation
-    applied_count = 0
-    next_to_process = total_batches + 1
-    for i, batch in enumerate(batches, start=1):
-        txt_path = out_dir / f"batch_{i:03d}.txt"
-        json_path = out_dir / f"batch_{i:03d}.json"
-        batch_ids = {row[0] for row in batch}
-
-        if json_path.exists():
-            try:
-                with open(json_path, "r", encoding="utf-8") as f:
-                    data = json.load(f)
-            except Exception as e:
-                logger.warning("Auto failed to read %s: %s. Stopping.", json_path.name, e)
-                next_to_process = i
-                break
-
-            if not isinstance(data, list):
-                logger.warning("Auto %s is not a JSON list. Stopping.", json_path.name)
-                next_to_process = i
-                break
-
-            json_ids = {item.get("chunk_db_id") for item in data if isinstance(item, dict) and item.get("chunk_db_id") is not None}
-
-            if not json_ids.issubset(batch_ids):
-                stale = sorted(json_ids - batch_ids)
-                logger.warning("Auto stale chunk ids in %s | batch=%s | stale=%s", json_path.name, i, stale)
-                logger.warning("Auto please remove stale JSON files and rerun")
-                next_to_process = i
-                break
-
-            count = _apply_json_file(json_path)
-            applied_count += 1
-            done_ids.update(json_ids)
-            logger.info("Auto applied %s | chunks=%s", json_path.name, count)
-            try:
-                json_path.unlink()
-            except Exception:
-                pass
-
-            remaining_in_batch = batch_ids - done_ids
-            if remaining_in_batch:
-                logger.warning("Auto batch incomplete | batch=%s | remaining=%s", i, sorted(remaining_in_batch))
-                logger.warning("Auto JSON may be stale or incomplete. Please remove %s and rerun", json_path.name)
-                next_to_process = i
-                break
-        else:
-            next_to_process = i
-            break
-
-    # If there is remaining work, write checkpoint and exit
-    if next_to_process <= total_batches:
-        pending_files = [f"batch_{j:03d}.txt" for j in range(next_to_process, total_batches + 1)]
-        checkpoint = {
-            "doc_id": args.doc_id,
-            "done_chunk_ids": sorted(done_ids),
-            "total_batches": total_batches,
-            "applied_batches": applied_count,
-            "pending_batches": pending_files,
-        }
-        checkpoint_path.write_text(
-            json.dumps(checkpoint, indent=2, ensure_ascii=False), encoding="utf-8"
-        )
-        txt_path = out_dir / f"batch_{next_to_process:03d}.txt"
-        json_path = out_dir / f"batch_{next_to_process:03d}.json"
-        logger.info("Auto progress | applied=%s/%s | next_batch=%s", applied_count, total_batches, txt_path.name)
-        print(f"\nNext batch to summarize: {txt_path.name}")
-        print(f"  1. Have Agent read '{txt_path.resolve()}'")
-        print(f"  2. Write result to '{json_path.resolve()}' (JSON array)")
-        print(f"  3. Rerun: python agent_batch_helper.py auto --doc-id {args.doc_id} --output-dir {out_dir}")
-        return
-
-    # All batches applied
-    print(f"[Auto] All {total_batches} batch(es) applied. Document {args.doc_id} is fully summarized.")
-    if checkpoint_path.exists():
-        checkpoint_path.unlink()
-    # Cleanup intermediate .txt files to avoid disk clutter
-    cleaned = 0
-    for txt_path in out_dir.glob("batch_*.txt"):
-        txt_path.unlink()
-        cleaned += 1
-    if cleaned:
-        logger.info("Auto cleaned up intermediate files | count=%s", cleaned)
+    print(result["message"])
 
 
 def main():
