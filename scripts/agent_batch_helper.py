@@ -130,27 +130,49 @@ def _is_low_value(content: str, chapter_title: str, chunk_type: str = "text") ->
 
 
 def _smart_batch(rows, target_chars: int = 25000, max_chunks: int = 12, min_chunks: int = 3):
-    """Group rows into content-aware batches."""
-    batches = []
-    current = []
-    current_chars = 0
+    """Group rows into chapter-aware batches.
 
+    Priority:
+    1. Keep chunks from the same chapter together if they fit within target_chars/max_chunks.
+    2. If a chapter is too large, split it at semantic boundaries (respecting target/max).
+    3. Merge very small orphan tails into the previous batch.
+    """
+    if not rows:
+        return []
+
+    # Group rows by chapter_title (preserve order)
+    from collections import OrderedDict
+    chapter_groups = OrderedDict()
     for row in rows:
         db_id, doc_id, chunk_id, content, ctype, ps, pe, ch_title = row
-        # Start new batch if approaching limits and current batch is viable
-        if current and (current_chars + len(content) > target_chars or len(current) >= max_chunks):
-            batches.append(current)
-            current = []
-            current_chars = 0
-        current.append(row)
-        current_chars += len(content)
+        chapter_groups.setdefault(ch_title, []).append(row)
 
-    if current:
-        # Merge orphan tail into previous batch if too small
-        if len(current) < min_chunks and batches:
-            batches[-1].extend(current)
-        else:
+    batches = []
+    for ch_title, group_rows in chapter_groups.items():
+        group_chars = sum(len(r[3]) for r in group_rows)
+        # If the whole chapter fits comfortably, keep it as one batch
+        if group_chars <= target_chars and len(group_rows) <= max_chunks:
+            batches.append(group_rows)
+            continue
+
+        # Otherwise split the chapter sequentially
+        current = []
+        current_chars = 0
+        for row in group_rows:
+            _, _, _, content, _, _, _, _ = row
+            if current and (current_chars + len(content) > target_chars or len(current) >= max_chunks):
+                batches.append(current)
+                current = []
+                current_chars = 0
+            current.append(row)
+            current_chars += len(content)
+        if current:
             batches.append(current)
+
+    # Merge orphan tail if the last batch is too small
+    if len(batches) >= 2 and len(batches[-1]) < min_chunks:
+        batches[-2].extend(batches[-1])
+        batches.pop()
 
     return batches
 
@@ -162,21 +184,33 @@ def _enrich_batch_with_images(batch, db):
         db_id, doc_id, chunk_id, content, ctype, ps, pe, ch_title = row
         ck = db.get_chunk_by_db_id(db_id)
         if ck and ck.metadata.get("images"):
-            # Only prompt Agent if script-layer vision has not yet processed these images
+            # Always include image paths so Agent can choose to view them.
+            # Mark as REQUIRED if script-layer vision has not processed them.
             needs_agent_vision = not all("vision_desc" in img for img in ck.metadata["images"])
-            if needs_agent_vision:
-                content += (
-                    "\n\n[AGENT VISION REQUIRED: The following images are on this page. "
-                    "Please read them and incorporate insights into the summary.]\n"
-                )
-                for img in ck.metadata["images"]:
-                    content += f"- {img['path']}\n"
+            prefix = (
+                "\n\n[AGENT VISION REQUIRED: The following images are on this page. "
+                "You MUST read them via ReadMediaFile and incorporate insights into the summary.]\n"
+                if needs_agent_vision else
+                "\n\n[IMAGES ON THIS PAGE]\n"
+            )
+            content += prefix
+            for img in ck.metadata["images"]:
+                content += f"- {img['path']}\n"
         enriched.append((db_id, doc_id, chunk_id, content, ctype, ps, pe, ch_title))
     return enriched
 
 
-def _write_batch_txt(out_path: Path, batch):
+def _write_batch_txt(out_path: Path, batch, chapter_context: dict = None):
     lines = []
+    # Optional: inject chapter-level context at the top of the batch file
+    if chapter_context:
+        lines.append("--- BATCH CHAPTER CONTEXT ---")
+        lines.append(f"Chapter: {chapter_context.get('chapter_title', '')}")
+        if chapter_context.get('previous_summary'):
+            lines.append(f"Previous chunk summary: {chapter_context['previous_summary'][:300]}")
+        lines.append("-" * 80)
+        lines.append("")
+
     for db_id, doc_id, chunk_id, content, ctype, ps, pe, ch_title in batch:
         lines.append(f"--- CHUNK_DB_ID={db_id} | {chunk_id} | {ch_title} P{ps} ---")
         lines.append(content)
@@ -211,6 +245,20 @@ def _apply_json_file(json_path: Path) -> int:
             if isinstance(kws, list):
                 kws = ",".join(str(k) for k in kws)
             db.update_chunk_keywords(cid, str(kws))
+
+        # Update structured metadata fields (entities, relationships, answered_questions, vision_insights)
+        ck = db.get_chunk_by_db_id(cid)
+        if ck:
+            meta = ck.metadata or {}
+            for key in ("entities", "relationships", "answered_questions", "vision_insights"):
+                if key in item:
+                    meta[key] = item[key]
+            with db._connect() as conn:
+                conn.execute(
+                    "UPDATE chunks SET metadata = ? WHERE id = ?",
+                    (json.dumps(meta, ensure_ascii=False), cid),
+                )
+
         db.update_chunk_status(cid, "done")
         updated += 1
     return updated
@@ -249,9 +297,11 @@ def _cleanup_orphan_files(out_dir: Path, batch_map: list) -> int:
                             txt_path.unlink(missing_ok=True)
                             cleaned += 1
             except Exception:
-                # If JSON is unreadable, treat as orphan
-                fpath.unlink(missing_ok=True)
-                cleaned += 1
+                # If JSON is unreadable, it may be a transient race condition
+                # (e.g. another Agent is currently writing the file).
+                # Skip deletion and let the next run retry.
+                logger.warning("Skipped orphan cleanup for unreadable JSON | file=%s", fpath.name)
+                continue
 
     return cleaned
 
@@ -346,7 +396,28 @@ def run_auto_summarize(
         batch = [row_by_id[bid] for bid in pending_ids]
         txt_path = out_dir / f"batch_{i:03d}.txt"
         enriched = _enrich_batch_with_images(batch, db)
-        _write_batch_txt(txt_path, enriched)
+
+        # Build chapter context: look for the most recent done chunk in the same chapter
+        chapter_context = {}
+        if batch:
+            first_row = batch[0]
+            ch_title = first_row[7]  # chapter_title
+            chapter_context["chapter_title"] = ch_title
+            # Find done chunks in the same chapter with lower page number
+            first_ps = first_row[5]
+            with db._connect() as conn:
+                row_ctx = conn.execute(
+                    """
+                    SELECT id, summary FROM chunks
+                    WHERE doc_id = ? AND chapter_title = ? AND status = 'done' AND page_start < ?
+                    ORDER BY page_start DESC, id DESC LIMIT 1
+                    """,
+                    (doc_id, ch_title, first_ps),
+                ).fetchone()
+            if row_ctx and row_ctx["summary"]:
+                chapter_context["previous_summary"] = row_ctx["summary"]
+
+        _write_batch_txt(txt_path, enriched, chapter_context=chapter_context)
 
     # Step 6: apply existing JSONs sequentially
     applied_count = 0
@@ -355,17 +426,21 @@ def run_auto_summarize(
         json_path = out_dir / f"batch_{i:03d}.json"
         batch_id_set = set(batch_ids)
 
+        # Skip batches that are already fully done
+        if batch_id_set.issubset(done_ids):
+            continue
+
         if json_path.exists():
             try:
                 with open(json_path, "r", encoding="utf-8") as f:
                     data = json.load(f)
             except Exception as e:
-                logger.warning("Auto failed to read %s: %s. Stopping.", json_path.name, e)
+                logger.error("Auto JSON read failure | file=%s | error=%s | action=stop_and_require_fix", json_path.name, e)
                 next_to_process = i
                 break
 
             if not isinstance(data, list):
-                logger.warning("Auto %s is not a JSON list. Stopping.", json_path.name)
+                logger.error("Auto JSON format error | file=%s | expected=list | action=stop_and_require_fix", json_path.name)
                 next_to_process = i
                 break
 
@@ -373,9 +448,7 @@ def run_auto_summarize(
 
             if not json_ids.issubset(batch_id_set):
                 stale = sorted(json_ids - batch_id_set)
-                logger.warning("Auto stale chunk ids in %s | batch=%s | stale=%s", json_path.name, i, stale)
-                # Since _cleanup_orphan_files should have caught this, this is a safety net.
-                # We clean it now and stop.
+                logger.error("Auto stale chunk ids | file=%s | batch=%s | stale=%s | action=removed_stale_json", json_path.name, i, stale)
                 json_path.unlink(missing_ok=True)
                 next_to_process = i
                 break
@@ -391,7 +464,7 @@ def run_auto_summarize(
 
             remaining_in_batch = batch_id_set - done_ids
             if remaining_in_batch:
-                logger.warning("Auto batch incomplete | batch=%s | remaining=%s", i, sorted(remaining_in_batch))
+                logger.error("Auto batch incomplete | file=%s | batch=%s | missing_chunk_ids=%s | action=stop_and_require_fix", json_path.name, i, sorted(remaining_in_batch))
                 next_to_process = i
                 break
         else:
@@ -449,6 +522,196 @@ def run_auto_summarize(
         "total_batches": total_batches,
         "message": f"All {total_batches} batch(es) applied. Document {doc_id} is fully summarized.",
         "cleaned_count": cleaned + cleaned_end,
+    }
+
+
+def run_synthesize_chapters(
+    doc_id: str,
+    out_dir: Path,
+):
+    """
+    Chapter-level synthesis pipeline.
+
+    Returns a dict:
+      - state: "pending" | "fully_synthesized"
+      - doc_id: str
+      - applied_chapters: int
+      - total_chapters: int
+      - next_chapter_txt: str   (only when state="pending")
+      - next_chapter_json: str  (only when state="pending")
+      - pending_chapters: list[dict]  (only when state="pending")
+      - message: str
+    """
+    db = KnowledgeDB()
+    out_dir.mkdir(parents=True, exist_ok=True)
+    checkpoint_path = out_dir / "chapter_checkpoint.json"
+
+    # Step 1: gather done chunks by chapter
+    with db._connect() as conn:
+        rows = conn.execute(
+            """
+            SELECT id, chunk_id, content, summary, metadata, page_start, page_end, chapter_title
+            FROM chunks
+            WHERE doc_id = ? AND status = 'done'
+            ORDER BY page_start, id
+            """,
+            (doc_id,),
+        ).fetchall()
+
+    chapter_rows = {}
+    for r in rows:
+        ch = r["chapter_title"] or "(Untitled)"
+        chapter_rows.setdefault(ch, []).append(r)
+
+    chapter_order = list(chapter_rows.keys())
+    total_chapters = len(chapter_order)
+
+    # Step 2: determine which chapters are already synthesized
+    done_chapters = set()
+    for ch in chapter_order:
+        cs = db.get_chapter_summary(doc_id, ch)
+        if cs and cs.get("status") == "done":
+            done_chapters.add(ch)
+
+    # Step 3: load checkpoint
+    checkpoint = {}
+    if checkpoint_path.exists():
+        try:
+            checkpoint = json.loads(checkpoint_path.read_text(encoding="utf-8"))
+        except Exception:
+            checkpoint = {}
+
+    # Validate checkpoint
+    if checkpoint.get("doc_id") != doc_id or checkpoint.get("chapter_order") != chapter_order:
+        checkpoint = {"doc_id": doc_id, "chapter_order": chapter_order, "applied_chapters": []}
+
+    applied_chapters = set(checkpoint.get("applied_chapters", []))
+    done_chapters.update(applied_chapters)
+
+    # Step 4: write synthesis txt files for pending chapters
+    for idx, ch in enumerate(chapter_order, start=1):
+        if ch in done_chapters:
+            continue
+        txt_path = out_dir / f"chapter_synthesis_{idx:03d}.txt"
+        lines = []
+        lines.append(f"--- CHAPTER SYNTHESIS | {ch} ---")
+        lines.append("")
+        for r in chapter_rows[ch]:
+            lines.append(f"--- CHUNK_DB_ID={r['id']} | {r['chunk_id']} | P{r['page_start']}-{r['page_end']} ---")
+            lines.append(f"Summary: {r['summary'] or ''}")
+            meta = json.loads(r["metadata"] or "{}")
+            if meta.get("entities"):
+                lines.append(f"Entities: {json.dumps(meta['entities'], ensure_ascii=False)}")
+            if meta.get("relationships"):
+                lines.append(f"Relationships: {json.dumps(meta['relationships'], ensure_ascii=False)}")
+            if meta.get("vision_insights"):
+                lines.append(f"Vision Insights: {meta['vision_insights']}")
+            lines.append("")
+            # Optionally include truncated raw content for deep context
+            content_preview = r["content"][:800].replace("\n", " ")
+            lines.append(f"Content Preview: {content_preview}...")
+            lines.append("\n" + "-" * 60 + "\n")
+        txt_path.write_text("\n".join(lines), encoding="utf-8")
+
+    # Step 5: apply existing JSONs sequentially
+    next_to_process = total_chapters + 1
+    applied_count = len(done_chapters)
+    for idx, ch in enumerate(chapter_order, start=1):
+        json_path = out_dir / f"chapter_synthesis_{idx:03d}.json"
+        if ch in done_chapters:
+            # Clean up stale json if it exists
+            if json_path.exists():
+                json_path.unlink(missing_ok=True)
+            continue
+
+        if json_path.exists():
+            try:
+                with open(json_path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+            except Exception as e:
+                logger.warning("Synthesis failed to read %s: %s. Stopping.", json_path.name, e)
+                next_to_process = idx
+                break
+
+            if not isinstance(data, dict):
+                logger.warning("Synthesis %s is not a JSON object. Stopping.", json_path.name)
+                next_to_process = idx
+                break
+
+            # Write chapter summary
+            db.upsert_chapter_summary(doc_id, ch, {
+                "start_page": chapter_rows[ch][0]["page_start"] if chapter_rows[ch] else None,
+                "end_page": chapter_rows[ch][-1]["page_end"] if chapter_rows[ch] else None,
+                "summary": data.get("summary", ""),
+                "concepts": data.get("concepts", []),
+                "relationships": data.get("relationships", []),
+                "key_figures": data.get("key_figures", []),
+                "key_tables": data.get("key_tables", []),
+                "status": "done",
+            })
+
+            # Update concept_index
+            for concept in data.get("concepts", []):
+                db.upsert_concept(
+                    doc_id=doc_id,
+                    concept_name=concept.get("name", ""),
+                    definition=concept.get("definition", ""),
+                    first_mentioned_page=concept.get("pages", [None])[0],
+                    related_concepts=[rel.get("to") for rel in data.get("relationships", []) if rel.get("from") == concept.get("name")],
+                )
+
+            applied_chapters.add(ch)
+            applied_count += 1
+            logger.info("Synthesis applied %s | chapter=%s", json_path.name, ch)
+            try:
+                json_path.unlink()
+            except Exception:
+                pass
+        else:
+            next_to_process = idx
+            break
+
+    # Step 6: remaining work or fully synthesized
+    if next_to_process <= total_chapters:
+        checkpoint = {
+            "doc_id": doc_id,
+            "chapter_order": chapter_order,
+            "applied_chapters": sorted(applied_chapters),
+        }
+        checkpoint_path.write_text(
+            json.dumps(checkpoint, indent=2, ensure_ascii=False), encoding="utf-8"
+        )
+        txt_path = out_dir / f"chapter_synthesis_{next_to_process:03d}.txt"
+        json_path = out_dir / f"chapter_synthesis_{next_to_process:03d}.json"
+        pending_chapters = []
+        for j in range(next_to_process, total_chapters + 1):
+            pending_chapters.append({
+                "txt": str(out_dir / f"chapter_synthesis_{j:03d}.txt"),
+                "json": str(out_dir / f"chapter_synthesis_{j:03d}.json"),
+            })
+        logger.info("Synthesis progress | applied=%s/%s | next=%s", applied_count, total_chapters, txt_path.name)
+        return {
+            "state": "pending",
+            "doc_id": doc_id,
+            "applied_chapters": applied_count,
+            "total_chapters": total_chapters,
+            "next_chapter_txt": str(txt_path),
+            "next_chapter_json": str(json_path),
+            "pending_chapters": pending_chapters,
+            "message": f"Progress: {applied_count}/{total_chapters} chapter(s) synthesized. Next: {txt_path.name}",
+        }
+
+    # All done
+    if checkpoint_path.exists():
+        checkpoint_path.unlink()
+    for p in list(out_dir.glob("chapter_synthesis_*.txt")) + list(out_dir.glob("chapter_synthesis_*.json")):
+        p.unlink(missing_ok=True)
+    return {
+        "state": "fully_synthesized",
+        "doc_id": doc_id,
+        "applied_chapters": applied_count,
+        "total_chapters": total_chapters,
+        "message": f"All {total_chapters} chapter(s) synthesized. Document {doc_id} chapter synthesis complete.",
     }
 
 
@@ -568,6 +831,23 @@ def cmd_auto(args):
     print(result["message"])
 
 
+def cmd_synthesize(args):
+    out_dir = _resolve_output_dir(args.output_dir, args.doc_id)
+    result = run_synthesize_chapters(
+        doc_id=args.doc_id,
+        out_dir=out_dir,
+    )
+
+    if result["state"] == "pending":
+        print(f"\nNext chapter to synthesize: {Path(result['next_chapter_txt']).name}")
+        print(f"  1. Have Agent read '{Path(result['next_chapter_txt']).resolve()}'")
+        print(f"  2. Write result to '{Path(result['next_chapter_json']).resolve()}' (JSON object)")
+        print(f"  3. Rerun: python agent_batch_helper.py synthesize --doc-id {args.doc_id} --output-dir {args.output_dir}")
+        return
+
+    print(result["message"])
+
+
 def main():
     Config.setup_logging()
     try:
@@ -608,6 +888,11 @@ def main():
     p_auto.add_argument("--filter", action="store_true", help="First filter low-value chunks")
     p_auto.add_argument("--parallel", type=int, default=1, help="Reserved for future concurrent Agent support")
     p_auto.set_defaults(func=cmd_auto)
+
+    p_synth = sub.add_parser("synthesize", help="Chapter-level synthesis pipeline after chunk summaries are done")
+    p_synth.add_argument("--doc-id", required=True)
+    p_synth.add_argument("--output-dir", default="./auto_batches", help="Directory for chapter synthesis .txt/.json files")
+    p_synth.set_defaults(func=cmd_synthesize)
 
     args = parser.parse_args()
     args.func(args)
