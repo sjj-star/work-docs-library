@@ -75,6 +75,10 @@
             "type": "string",
             "description": "关键词匹配"
           },
+          "concept": {
+            "type": "string",
+            "description": "概念名查询（需要配合 doc_id）"
+          },
           "top_k": {
             "type": "integer",
             "description": "返回结果数量",
@@ -140,6 +144,26 @@
             "type": "boolean",
             "description": "是否先过滤低价值 chunk",
             "default": false
+          }
+        },
+        "required": ["doc_id"]
+      }
+    },
+    {
+      "name": "synthesize_chapters",
+      "description": "章节级综合：在 chunk 总结完成后，按章节生成结构化摘要、概念定义与关系图",
+      "command": ["venv/bin/python3", "scripts/plugin_router.py", "synthesize_chapters"],
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "doc_id": {
+            "type": "string",
+            "description": "文档 ID"
+          },
+          "output_dir": {
+            "type": "string",
+            "description": "输出目录",
+            "default": "./auto_batches"
           }
         },
         "required": ["doc_id"]
