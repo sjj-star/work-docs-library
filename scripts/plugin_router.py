@@ -30,8 +30,8 @@ from core.pipeline import IngestionPipeline
 from core.vector_index import VectorIndex
 
 
-def _chunk_to_dict(ck, preview_len: int = 500):
-    return {
+def _chunk_to_dict(ck, db, preview_len: int = 500):
+    result = {
         "doc_id": ck.doc_id,
         "chunk_id": ck.chunk_id,
         "chunk_type": ck.chunk_type,
@@ -42,6 +42,16 @@ def _chunk_to_dict(ck, preview_len: int = 500):
         "summary": ck.summary,
         "keywords": ck.keywords,
     }
+    # Attach chapter context if available
+    if ck.chapter_title:
+        cs = db.get_chapter_summary(ck.doc_id, ck.chapter_title)
+        if cs:
+            result["chapter_context"] = {
+                "summary": cs.get("summary", "")[:600],
+                "concepts": cs.get("concepts", [])[:5],
+                "key_figures": cs.get("key_figures", []),
+            }
+    return result
 
 
 def tool_ingest(params: dict):
@@ -82,13 +92,7 @@ def tool_search(params: dict):
                 continue
             results.append({
                 "score": round(score, 4),
-                "doc_id": chunk.doc_id,
-                "chapter_title": chunk.chapter_title,
-                "page_start": chunk.page_start,
-                "page_end": chunk.page_end,
-                "content_preview": chunk.content[:500],
-                "summary": chunk.summary,
-                "keywords": chunk.keywords,
+                **_chunk_to_dict(chunk, db, preview_len=500),
             })
         return {"success": True, "results": results}
     finally:
@@ -123,10 +127,14 @@ def tool_query(params: dict):
         results = db.query_by_chapter_regex(doc_id, chapter_regex)
     elif keyword:
         results = db.query_by_keyword(keyword)
+    elif params.get("concept"):
+        if not doc_id:
+            return {"success": False, "error": "concept query requires doc_id."}
+        results = db.query_by_concept(doc_id, params.get("concept"))
     else:
-        return {"success": False, "error": "Provide page, chapter, chapter_regex, or keyword."}
+        return {"success": False, "error": "Provide page, chapter, chapter_regex, keyword, or concept."}
 
-    return {"success": True, "results": [_chunk_to_dict(ck) for ck in results[:top_k]]}
+    return {"success": True, "results": [_chunk_to_dict(ck, db) for ck in results[:top_k]]}
 
 
 def tool_status(params: dict):
@@ -254,6 +262,18 @@ def tool_auto_summarize(params: dict):
     return {"success": True, **result}
 
 
+def tool_synthesize_chapters(params: dict):
+    Config.ensure_dirs()
+    doc_id = params["doc_id"]
+    out_dir = Path(params.get("output_dir", "./auto_batches"))
+    out_dir = abh._resolve_output_dir(out_dir, doc_id)
+    result = abh.run_synthesize_chapters(
+        doc_id=doc_id,
+        out_dir=out_dir,
+    )
+    return {"success": True, **result}
+
+
 TOOL_MAP = {
     "ingest": tool_ingest,
     "search": tool_search,
@@ -261,6 +281,7 @@ TOOL_MAP = {
     "status": tool_status,
     "toc": tool_toc,
     "auto_summarize": tool_auto_summarize,
+    "synthesize_chapters": tool_synthesize_chapters,
     "progress": tool_progress,
     "reprocess": tool_reprocess,
 }
