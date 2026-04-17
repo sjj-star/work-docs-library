@@ -93,6 +93,8 @@ class IngestionPipeline:
                 ).fetchall()
             self.vec.remove_doc([r["id"] for r in old_chunks])
             self.db.delete_chunks_by_doc(raw_doc.doc_id)
+            self.db.delete_chapter_summaries_by_doc(raw_doc.doc_id)
+            self.db.delete_concepts_by_doc(raw_doc.doc_id)
 
         chunks = raw_doc.chunks if raw_doc.chunks else []
         if not chunks:
