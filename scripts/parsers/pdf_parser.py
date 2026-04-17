@@ -49,6 +49,10 @@ class PDFParser:
     CLIP_PADDING_HORIZONTAL = 15
     CLIP_PADDING_BOTTOM = 15
 
+    # Small-font callout detection
+    CALLOUT_SMALL_FONT_MAX = 9.0
+    CALLOUT_SMALL_FONT_RATIO = 0.72
+
     # Aspect-ratio filters to skip tables and near-full-page noise
     TABLE_SKIP_WIDTH_RATIO = 0.72
     TABLE_SKIP_ASPECT = 6.5
@@ -109,20 +113,46 @@ class PDFParser:
         """
         text_dict = page.get_text("dict")
         text_blocks = []
+        block_font_sizes = []
         for block in text_dict.get("blocks", []):
             if "lines" not in block:
                 continue
             txt = "".join(s["text"] for line in block["lines"] for s in line["spans"]).strip()
             if not txt:
                 continue
-            text_blocks.append((txt, fitz.Rect(block["bbox"])))
+            # Compute average font size for the block
+            sizes = []
+            for line in block["lines"]:
+                for span in line["spans"]:
+                    sizes.extend([span["size"]] * len(span["text"]))
+            avg_size = sum(sizes) / len(sizes) if sizes else 12.0
+            text_blocks.append((txt, fitz.Rect(block["bbox"]), avg_size))
+            block_font_sizes.append(avg_size)
 
         text_blocks.sort(key=lambda x: x[1].y0)
 
+        # Determine a dynamic small-font threshold from median body text size
+        median_font = 12.0
+        if block_font_sizes:
+            sorted_sizes = sorted(block_font_sizes)
+            n = len(sorted_sizes)
+            median_font = sorted_sizes[n // 2] if n % 2 else (sorted_sizes[n // 2 - 1] + sorted_sizes[n // 2]) / 2
+        small_font_threshold = min(self.CALLOUT_SMALL_FONT_MAX, median_font * self.CALLOUT_SMALL_FONT_RATIO)
+
         figure_captions = []
-        for txt, rect in text_blocks:
+        for txt, rect, _ in text_blocks:
             if re.match(self.FIGURE_CAPTION_RE, txt):
                 figure_captions.append((txt, rect))
+
+        def _is_small_font_callout(rect, avg_size, caption_rect, is_above):
+            """Skip small-font note blocks sitting close to the caption."""
+            if avg_size > small_font_threshold:
+                return False
+            if is_above:
+                gap = caption_rect.y0 - rect.y1
+            else:
+                gap = rect.y0 - caption_rect.y1
+            return gap < self.CALLOUT_GAP_THRESHOLD * 2
 
         if not figure_captions:
             return []
@@ -140,7 +170,7 @@ class PDFParser:
             # Probe upward for upper boundary.
             upper_boundary = page_rect.y0
             upper_hit_caption = False
-            for txt, rect in reversed(text_blocks):
+            for txt, rect, avg_size in reversed(text_blocks):
                 if rect == caption_rect:
                     continue
                 if rect.y1 > caption_rect.y0 - self.CAPTION_OVERLAP_TOLERANCE:
@@ -150,6 +180,8 @@ class PDFParser:
                     txt.startswith(self.CALLOUT_PREFIXES)
                     or txt.startswith(self.CALLOUT_NOTE_PREFIX)
                 ):
+                    continue
+                if _is_small_font_callout(rect, avg_size, caption_rect, is_above=True):
                     continue
                 if re.match(self.FIGURE_CAPTION_RE, txt):
                     upper_boundary = rect.y1
@@ -175,7 +207,7 @@ class PDFParser:
             # Probe downward for lower boundary.
             lower_boundary = page_rect.y1
             lower_hit_caption = False
-            for txt, rect in text_blocks:
+            for txt, rect, avg_size in text_blocks:
                 if rect == caption_rect:
                     continue
                 if rect.y0 < caption_rect.y1 + self.CAPTION_OVERLAP_TOLERANCE:
@@ -185,6 +217,8 @@ class PDFParser:
                     txt.startswith(self.CALLOUT_PREFIXES)
                     or txt.startswith(self.CALLOUT_NOTE_PREFIX)
                 ):
+                    continue
+                if _is_small_font_callout(rect, avg_size, caption_rect, is_above=False):
                     continue
                 if re.match(self.FIGURE_CAPTION_RE, txt):
                     lower_boundary = rect.y0
@@ -210,30 +244,59 @@ class PDFParser:
             # Score drawing density within the two candidate bands.
             upward_area = 0.0
             downward_area = 0.0
+            upward_drawings = []
+            downward_drawings = []
             for dr in drawing_rects:
                 if _is_header_footer_rect(dr, is_drawing=True):
                     continue
                 if dr.y1 > upper_boundary and dr.y0 < caption_rect.y0:
                     upward_area += dr.width * dr.height
+                    upward_drawings.append(dr)
                 if dr.y0 < lower_boundary and dr.y1 > caption_rect.y1:
                     downward_area += dr.width * dr.height
+                    downward_drawings.append(dr)
 
-            if downward_area > upward_area * 1.2:
+            def _drawing_centroid(drawings):
+                if not drawings:
+                    return None
+                ys = []
+                for dr in drawings:
+                    ys.extend([dr.y0, dr.y1])
+                ys.sort()
+                return ys[len(ys) // 2]
+
+            up_centroid = _drawing_centroid(upward_drawings)
+            down_centroid = _drawing_centroid(downward_drawings)
+
+            # Decision tree
+            if not downward_drawings and upward_drawings:
+                region_rect = fitz.Rect(page_rect.x0, upper_boundary, page_rect.x1, caption_rect.y1)
+            elif not upward_drawings and downward_drawings:
+                region_rect = fitz.Rect(page_rect.x0, caption_rect.y0, page_rect.x1, lower_boundary)
+            elif downward_area > upward_area * 1.2:
                 region_rect = fitz.Rect(page_rect.x0, caption_rect.y0, page_rect.x1, lower_boundary)
             elif upward_area > downward_area * 1.2:
                 region_rect = fitz.Rect(page_rect.x0, upper_boundary, page_rect.x1, caption_rect.y1)
             else:
-                # Tie-break: prefer the side without an adjacent caption boundary.
+                # Primary tie-break: adjacent caption boundary (no body text in between)
                 if upper_hit_caption and not lower_hit_caption:
                     region_rect = fitz.Rect(page_rect.x0, caption_rect.y0, page_rect.x1, lower_boundary)
                 elif lower_hit_caption and not upper_hit_caption:
                     region_rect = fitz.Rect(page_rect.x0, upper_boundary, page_rect.x1, caption_rect.y1)
+                elif up_centroid is not None and down_centroid is not None:
+                    up_dist = abs(caption_rect.y0 - up_centroid)
+                    down_dist = abs(caption_rect.y1 - down_centroid)
+                    if up_dist < down_dist:
+                        region_rect = fitz.Rect(page_rect.x0, upper_boundary, page_rect.x1, caption_rect.y1)
+                    elif down_dist < up_dist:
+                        region_rect = fitz.Rect(page_rect.x0, caption_rect.y0, page_rect.x1, lower_boundary)
+                    else:
+                        region_rect = fitz.Rect(page_rect.x0, caption_rect.y0, page_rect.x1, lower_boundary)
                 else:
-                    # Both or neither sides hit a caption; default to downward.
                     region_rect = fitz.Rect(page_rect.x0, caption_rect.y0, page_rect.x1, lower_boundary)
 
             region_items = []
-            for txt, rect in text_blocks:
+            for txt, rect, _ in text_blocks:
                 if (
                     rect.intersects(region_rect)
                     and not _is_header_footer_rect(rect, is_drawing=False)
@@ -263,7 +326,7 @@ class PDFParser:
             # Skip clips that are clearly tables by caption text or aspect ratio fallback.
             has_table_caption = any(
                 re.match(self.TABLE_CAPTION_RE, t)
-                for t, r in text_blocks
+                for t, r, _ in text_blocks
                 if r.intersects(clip) and not (r != caption_rect and re.match(self.FIGURE_CAPTION_RE, t))
             )
             if has_table_caption:
@@ -287,6 +350,10 @@ class PDFParser:
 
         return clips
 
+    # Semantic chunking thresholds
+    MERGE_MAX_CHARS = 6000
+    MERGE_MAX_PAGES = 3
+
     def parse(self, path: str, extract_images: bool = True, output_dir: str | None = None) -> Document:
         doc = fitz.open(path)
         title = Path(path).stem
@@ -297,8 +364,7 @@ class PDFParser:
 
         file_hash = hashlib.md5(Path(path).read_bytes()).hexdigest()
 
-        chunks: List[Chunk] = []
-        page_images: dict[int, List[dict]] = {}
+        page_records = []  # (page_num, text, images)
 
         if output_dir is not None:
             base_img_dir = Path(output_dir)
@@ -313,18 +379,10 @@ class PDFParser:
         for page_num in range(total_pages):
             page = doc.load_page(page_num)
             text = page.get_text().strip()
-            if text:
-                chunks.append(Chunk(
-                    doc_id="",
-                    chunk_id=f"page_{page_num + 1}",
-                    content=text,
-                    chunk_type="text",
-                    page_start=page_num + 1,
-                    page_end=page_num + 1,
-                ))
+            large_images = []
+
             if extract_images:
                 img_list = page.get_images(full=True)
-                large_images = []
                 for img_index, img in enumerate(img_list, start=1):
                     xref = img[0]
                     try:
@@ -332,14 +390,12 @@ class PDFParser:
                         image_bytes = base_image["image"]
                         pil_img = Image.open(io.BytesIO(image_bytes))
 
-                        # Skip tiny decorative images (dots, bullets, etc.)
                         if (
                             pil_img.width < self.MIN_IMAGE_WIDTH
                             or pil_img.height < self.MIN_IMAGE_HEIGHT
                         ):
                             continue
 
-                        # Skip nearly-blank decorative images (lines, separators, empty boxes)
                         if self._is_low_content_image(pil_img):
                             continue
 
@@ -360,9 +416,6 @@ class PDFParser:
                             f"Failed to extract image xref={xref} on page {page_num + 1}: {e}"
                         )
 
-                # Also locate diagrams by their Figure captions and render
-                # the diagram region. This runs regardless of whether large
-                # embedded raster images were found, so mixed pages are handled.
                 try:
                     clips = self._find_figure_regions(page, page.rect)
                     for clip_index, clip_rect in enumerate(clips, start=1):
@@ -384,39 +437,84 @@ class PDFParser:
                         f"Failed to render page {page_num + 1}: {e}"
                     )
 
-                if large_images:
-                    page_images[page_num + 1] = large_images
-
-        # Merge image references into same-page text chunks
-        for ck in chunks:
-            if ck.chunk_type == "text" and ck.page_start in page_images:
-                imgs = page_images[ck.page_start]
-                img_block = "\n\n[IMAGES ON THIS PAGE]\n" + "\n".join(
-                    f"- Image {i + 1} (Path: {img['path']})"
-                    for i, img in enumerate(imgs)
-                )
-                ck.content += img_block
-                ck.metadata["images"] = imgs
-                del page_images[ck.page_start]
-
-        # Create text chunks for pages that contain only images (no text)
-        for page_num in sorted(page_images.keys()):
-            imgs = page_images[page_num]
-            content = "\n\n[IMAGES ON THIS PAGE]\n" + "\n".join(
-                f"- Image {i + 1} (Path: {img['path']})"
-                for i, img in enumerate(imgs)
-            )
-            chunks.append(Chunk(
-                doc_id="",
-                chunk_id=f"page_{page_num}",
-                content=content,
-                chunk_type="text",
-                page_start=page_num,
-                page_end=page_num,
-                metadata={"images": imgs},
-            ))
+            page_records.append((page_num + 1, text, large_images))
 
         doc.close()
+
+        # Determine chapter for each page
+        def _page_chapter(page_num: int):
+            for ch in chapters:
+                if ch.start_page <= page_num <= ch.end_page:
+                    return ch.title
+            return "(Untitled)"
+
+        # Semantic grouping: merge adjacent pages if same chapter and within limits
+        chunks: List[Chunk] = []
+        current_pages = []
+        current_texts = []
+        current_images = []
+        current_chars = 0
+
+        def _flush_pages():
+            nonlocal current_pages, current_texts, current_images, current_chars
+            if not current_pages:
+                return
+            start_page = current_pages[0]
+            end_page = current_pages[-1]
+            # Build content
+            contents = []
+            for pn, txt, imgs in zip(current_pages, current_texts, current_images):
+                parts = [txt] if txt else []
+                if imgs:
+                    img_block = "\n\n[IMAGES ON THIS PAGE]\n" + "\n".join(
+                        f"- Image {i + 1} (Path: {img['path']})"
+                        for i, img in enumerate(imgs)
+                    )
+                    parts.append(img_block)
+                if parts:
+                    contents.append("\n\n".join(parts))
+            full_content = "\n\n[PAGE BREAK]\n\n".join(contents) if len(contents) > 1 else (contents[0] if contents else "")
+            all_images = [img for imgs in current_images for img in imgs]
+            meta = {}
+            if all_images:
+                meta["images"] = all_images
+            chunks.append(Chunk(
+                doc_id="",
+                chunk_id=f"pages_{start_page}-{end_page}",
+                content=full_content,
+                chunk_type="text",
+                page_start=start_page,
+                page_end=end_page,
+                metadata=meta,
+            ))
+            current_pages = []
+            current_texts = []
+            current_images = []
+            current_chars = 0
+
+        for page_num, text, imgs in page_records:
+            ch_title = _page_chapter(page_num)
+            prev_ch = _page_chapter(current_pages[-1]) if current_pages else None
+
+            should_flush = False
+            if current_pages:
+                if ch_title != prev_ch:
+                    should_flush = True
+                elif current_chars + len(text) > self.MERGE_MAX_CHARS:
+                    should_flush = True
+                elif len(current_pages) >= self.MERGE_MAX_PAGES:
+                    should_flush = True
+
+            if should_flush:
+                _flush_pages()
+
+            current_pages.append(page_num)
+            current_texts.append(text)
+            current_images.append(imgs)
+            current_chars += len(text)
+
+        _flush_pages()
+
         return Document(
             doc_id=file_hash,
             title=title,
