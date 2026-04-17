@@ -23,8 +23,10 @@ def test_parse_pdf_text_only(tmp_path):
     assert doc.title == "sample"
     assert doc.total_pages == 2
     assert doc.file_type == "pdf"
-    assert len(doc.chunks) == 2
+    # With semantic chunking, short adjacent pages in the same chapter are merged
+    assert len(doc.chunks) == 1
     assert "Page one content" in doc.chunks[0].content
+    assert "Page two content" in doc.chunks[0].content
     assert doc.chunks[0].chunk_type == "text"
 
 
@@ -360,6 +362,40 @@ def test_find_figure_regions_caption_above_diagram(tmp_path):
     # The diagram is at y=160..260; caption at y=120. Clip should span from caption down to diagram.
     assert clips[0].y0 <= 120
     assert clips[0].y1 >= 260
+
+
+def test_find_figure_regions_small_font_notes_between_diagram_and_caption(tmp_path):
+    """Small-font callout notes between diagram and caption should not truncate the clip."""
+    pdf_path = tmp_path / "small_font_notes.pdf"
+    doc = fitz.open()
+    page = doc.new_page()
+    # Body text at top (normal font)
+    page.insert_text(
+        (72, 72),
+        "Section introduction paragraph with enough width to look like body text.",
+        fontsize=12,
+    )
+    # Diagram drawings above the caption
+    page.draw_rect(fitz.Rect(72, 150, 500, 300), color=(0, 0, 0))
+    # Small-font notes between diagram and caption (no A./Note: prefix)
+    page.insert_text((72, 320), "Small note line 1 that explains the figure details.", fontsize=6)
+    page.insert_text((72, 335), "Small note line 2 continuing the explanation text.", fontsize=6)
+    page.insert_text((72, 350), "Small note line 3 with more fine print content.", fontsize=6)
+    # Caption at the bottom
+    page.insert_text((72, 520), "Figure 1-1. Example Diagram")
+    doc.save(str(pdf_path))
+    doc.close()
+
+    parser = PDFParser()
+    doc = fitz.open(str(pdf_path))
+    page = doc[0]
+    clips = parser._find_figure_regions(page, page.rect)
+    doc.close()
+
+    assert len(clips) == 1
+    # The clip must include the diagram at y=150, not stop at the small-font notes at y=320+
+    assert clips[0].y0 <= 150
+    assert clips[0].y1 >= 520
 
 
 def test_find_figure_regions_separates_adjacent_captions_above(tmp_path):

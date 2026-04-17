@@ -70,11 +70,12 @@ def test_process_one_pdf_with_embedding(patched_config, monkeypatch):
     doc = db.get_document(doc_id)
     assert doc.status == "done"
     chunks = db.query_by_page(doc_id, 1, 2)
-    assert len(chunks) == 2
+    # Semantic chunking merges short adjacent pages in the same chapter
+    assert len(chunks) == 1
     assert chunks[0].status == "embedded"
 
     vi = VectorIndex()
-    assert vi._index.ntotal == 2
+    assert vi._index.ntotal == 1
 
 
 def test_skip_unchanged_file(patched_config, monkeypatch):
