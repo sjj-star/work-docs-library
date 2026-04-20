@@ -58,9 +58,14 @@ def tool_ingest(params: dict):
     path = params.get("path")
     dry_run = params.get("dry_run", False)
     auto_chapter = params.get("auto_chapter", False)
+    agent_mode = params.get("agent_mode", False)
 
     Config.ensure_dirs()
-    pipe = IngestionPipeline()
+    if agent_mode:
+        from core.compatibility_pipeline import CompatibilityIngestionPipeline
+        pipe = CompatibilityIngestionPipeline()
+    else:
+        pipe = IngestionPipeline()
     try:
         doc_ids = pipe.ingest(path, dry_run=dry_run, auto_chapter=auto_chapter)
         if not doc_ids:
@@ -251,7 +256,7 @@ def tool_auto_summarize(params: dict):
     target_chars = params.get("target_chars", 25000)
     do_filter = params.get("filter", False)
 
-    out_dir = abh._resolve_output_dir(out_dir, doc_id)
+    out_dir = abh._resolve_output_dir(out_dir, doc_id).resolve()
     result = abh.run_auto_summarize(
         doc_id=doc_id,
         out_dir=out_dir,
@@ -259,6 +264,15 @@ def tool_auto_summarize(params: dict):
         target_chars=target_chars,
         do_filter=do_filter,
     )
+    # Ensure returned paths are absolute
+    for key in ("next_batch_txt", "next_batch_json"):
+        if key in result:
+            result[key] = str(Path(result[key]).resolve())
+    if "pending_batches" in result:
+        for item in result["pending_batches"]:
+            for k in ("txt", "json"):
+                if k in item:
+                    item[k] = str(Path(item[k]).resolve())
     return {"success": True, **result}
 
 
@@ -266,11 +280,20 @@ def tool_synthesize_chapters(params: dict):
     Config.ensure_dirs()
     doc_id = params["doc_id"]
     out_dir = Path(params.get("output_dir", "./auto_batches"))
-    out_dir = abh._resolve_output_dir(out_dir, doc_id)
+    out_dir = abh._resolve_output_dir(out_dir, doc_id).resolve()
     result = abh.run_synthesize_chapters(
         doc_id=doc_id,
         out_dir=out_dir,
     )
+    # Ensure returned paths are absolute
+    for key in ("next_chapter_txt", "next_chapter_json"):
+        if key in result:
+            result[key] = str(Path(result[key]).resolve())
+    if "pending_chapters" in result:
+        for item in result["pending_chapters"]:
+            for k in ("txt", "json"):
+                if k in item:
+                    item[k] = str(Path(item[k]).resolve())
     return {"success": True, **result}
 
 

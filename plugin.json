@@ -6,7 +6,11 @@
     {
       "name": "ingest",
       "description": "提取并存储文档到知识库，生成 embedding 和 chunk",
-      "command": ["venv/bin/python3", "scripts/plugin_router.py", "ingest"],
+      "command": [
+        "venv/bin/python3",
+        "scripts/plugin_router.py",
+        "ingest"
+      ],
       "parameters": {
         "type": "object",
         "properties": {
@@ -23,15 +27,26 @@
             "type": "boolean",
             "description": "使用 PDF 自动检测的目录关联章节",
             "default": false
+          },
+          "agent_mode": {
+            "type": "boolean",
+            "description": "强制使用 Agent Skill Flow，仅嵌入不自动总结（即使配置了 LLM）",
+            "default": false
           }
         },
-        "required": ["path"]
+        "required": [
+          "path"
+        ]
       }
     },
     {
       "name": "search",
       "description": "基于 FAISS 的语义向量搜索",
-      "command": ["venv/bin/python3", "scripts/plugin_router.py", "search"],
+      "command": [
+        "venv/bin/python3",
+        "scripts/plugin_router.py",
+        "search"
+      ],
       "parameters": {
         "type": "object",
         "properties": {
@@ -45,13 +60,19 @@
             "default": 5
           }
         },
-        "required": ["text"]
+        "required": [
+          "text"
+        ]
       }
     },
     {
       "name": "query",
       "description": "按页码、章节标题或关键词查询 chunk",
-      "command": ["venv/bin/python3", "scripts/plugin_router.py", "query"],
+      "command": [
+        "venv/bin/python3",
+        "scripts/plugin_router.py",
+        "query"
+      ],
       "parameters": {
         "type": "object",
         "properties": {
@@ -90,7 +111,11 @@
     {
       "name": "status",
       "description": "列出已导入知识库的所有文档",
-      "command": ["venv/bin/python3", "scripts/plugin_router.py", "status"],
+      "command": [
+        "venv/bin/python3",
+        "scripts/plugin_router.py",
+        "status"
+      ],
       "parameters": {
         "type": "object",
         "properties": {}
@@ -99,7 +124,11 @@
     {
       "name": "toc",
       "description": "显示文档目录或按标题搜索文档",
-      "command": ["venv/bin/python3", "scripts/plugin_router.py", "toc"],
+      "command": [
+        "venv/bin/python3",
+        "scripts/plugin_router.py",
+        "toc"
+      ],
       "parameters": {
         "type": "object",
         "properties": {
@@ -117,7 +146,11 @@
     {
       "name": "auto_summarize",
       "description": "自动批量总结：过滤低价值页、生成 batch txt、断点续传",
-      "command": ["venv/bin/python3", "scripts/plugin_router.py", "auto_summarize"],
+      "command": [
+        "venv/bin/python3",
+        "scripts/plugin_router.py",
+        "auto_summarize"
+      ],
       "parameters": {
         "type": "object",
         "properties": {
@@ -146,13 +179,19 @@
             "default": false
           }
         },
-        "required": ["doc_id"]
+        "required": [
+          "doc_id"
+        ]
       }
     },
     {
       "name": "synthesize_chapters",
       "description": "章节级综合：在 chunk 总结完成后，按章节生成结构化摘要、概念定义与关系图",
-      "command": ["venv/bin/python3", "scripts/plugin_router.py", "synthesize_chapters"],
+      "command": [
+        "venv/bin/python3",
+        "scripts/plugin_router.py",
+        "synthesize_chapters"
+      ],
       "parameters": {
         "type": "object",
         "properties": {
@@ -166,13 +205,19 @@
             "default": "./auto_batches"
           }
         },
-        "required": ["doc_id"]
+        "required": [
+          "doc_id"
+        ]
       }
     },
     {
       "name": "progress",
       "description": "显示文档的总结进度",
-      "command": ["venv/bin/python3", "scripts/plugin_router.py", "progress"],
+      "command": [
+        "venv/bin/python3",
+        "scripts/plugin_router.py",
+        "progress"
+      ],
       "parameters": {
         "type": "object",
         "properties": {
@@ -181,13 +226,19 @@
             "description": "文档 ID"
           }
         },
-        "required": ["doc_id"]
+        "required": [
+          "doc_id"
+        ]
       }
     },
     {
       "name": "reprocess",
       "description": "强制重新处理文档",
-      "command": ["venv/bin/python3", "scripts/plugin_router.py", "reprocess"],
+      "command": [
+        "venv/bin/python3",
+        "scripts/plugin_router.py",
+        "reprocess"
+      ],
       "parameters": {
         "type": "object",
         "properties": {
@@ -196,8 +247,14 @@
             "description": "文档 ID"
           }
         },
-        "required": ["doc_id"]
+        "required": [
+          "doc_id"
+        ]
       }
     }
-  ]
+  ],
+  "runtime": {
+    "host": "kimi-code",
+    "host_version": "1.36.0"
+  }
 }
