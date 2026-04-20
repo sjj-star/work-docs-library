@@ -94,6 +94,8 @@
 
 **索引**：`idx_chunks_doc(doc_id)`、`idx_chunks_type(chunk_type)`、`idx_chunks_chapter(doc_id, chapter_title)`
 
+> **⚠️ 状态语义差异**：`documents.status="done"` 在 LLM API Flow 中表示**全阶段完成**（嵌入+总结+概念索引）；在 Agent Skill Flow 中表示**嵌入完成**（后续摘要由外部 Agent 通过 `agent_batch_helper.py` 补充）。两者都使用 `"done"` 作为 skip-unchanged 的判定条件，但 LLM API Flow 的 `chunks.status="done"` 也同步完成，而 Agent Flow 的 `chunks.status` 可能长期停留在 `"embedded"` 直到 Agent 回写。
+
 ### `chapter_summaries` — 章节级 LLM 摘要
 | 字段 | 开发注意 |
 |------|----------|

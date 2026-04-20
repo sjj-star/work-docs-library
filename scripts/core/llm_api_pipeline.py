@@ -256,16 +256,25 @@ class LLMAPIIngestionPipeline:
     def _persist_llm_outputs(self, doc_id: str, enhanced_doc: Document) -> None:
         """持久化 LLM 增强结果到数据库（支持增量更新，跳过已 done 的 chunks）"""
         import json
+        import re
         
         # 获取当前 chunk 状态映射
         with self.db._connect() as conn:
             rows = conn.execute(
-                "SELECT id, chunk_id, status, metadata FROM chunks WHERE doc_id = ?",
+                "SELECT id, chunk_id, status, metadata, page_start, content FROM chunks WHERE doc_id = ?",
                 (doc_id,)
             ).fetchall()
-        chunk_status_map = {r["chunk_id"]: {"db_id": r["id"], "status": r["status"], "metadata": json.loads(r["metadata"] or "{}")} for r in rows}
+        chunk_status_map = {r["chunk_id"]: {"db_id": r["id"], "status": r["status"], "metadata": json.loads(r["metadata"] or "{}"), "page_start": r["page_start"], "content": r["content"]} for r in rows}
         
-        # 1. 写入章节摘要
+        # 获取文档级结构化数据
+        entities = enhanced_doc.metadata.get("entities", [])
+        relationships = enhanced_doc.metadata.get("relationships", [])
+        answered_questions = enhanced_doc.metadata.get("answered_questions", [])
+        keywords = enhanced_doc.metadata.get("keywords", [])
+        keywords_str = ",".join(keywords) if isinstance(keywords, list) else str(keywords)
+        doc_summary = enhanced_doc.metadata.get("llm_summary", "")
+        
+        # 1. 写入章节摘要（包含结构化字段）
         chapter_summaries = enhanced_doc.metadata.get("chapter_summaries", [])
         chapter_summary_map = {}
         for cs in chapter_summaries:
@@ -273,6 +282,26 @@ class LLMAPIIngestionPipeline:
             if not ch_title:
                 continue
             chapter_summary_map[ch_title] = cs.get("summary", "")
+            
+            # 提取章节相关的 concepts（从 entities 转换）
+            ch_concepts = []
+            for ent in entities[:10]:
+                if isinstance(ent, dict):
+                    ch_concepts.append({
+                        "name": ent.get("name", ""),
+                        "definition": ent.get("definition", ent.get("description", "")),
+                        "pages": [cs.get("start_page")] if cs.get("start_page") else []
+                    })
+            
+            # 提取章节内容中的 key_figures 和 key_tables
+            ch_text = ""
+            for chunk in enhanced_doc.chunks:
+                if chunk.chapter_title == ch_title and chunk.chunk_type == "text":
+                    ch_text += chunk.content + "\n"
+            
+            key_figures = self._extract_figures_from_text(ch_text)
+            key_tables = self._extract_tables_from_text(ch_text)
+            
             self.db.upsert_chapter_summary(
                 doc_id,
                 ch_title,
@@ -280,19 +309,15 @@ class LLMAPIIngestionPipeline:
                     "start_page": cs.get("start_page"),
                     "end_page": cs.get("end_page"),
                     "summary": cs.get("summary", ""),
-                    "concepts": [],
-                    "relationships": [],
-                    "key_figures": [],
-                    "key_tables": [],
+                    "concepts": ch_concepts,
+                    "relationships": relationships[:10] if relationships else [],
+                    "key_figures": key_figures,
+                    "key_tables": key_tables,
                     "status": "done",
                 }
             )
         
-        # 2. 为每个 embedded chunk 写入 summary / keywords / status=done
-        keywords = enhanced_doc.metadata.get("keywords", [])
-        keywords_str = ",".join(keywords) if isinstance(keywords, list) else str(keywords)
-        doc_summary = enhanced_doc.metadata.get("llm_summary", "")
-        
+        # 2. 为每个 embedded chunk 写入 summary / keywords / status=done / metadata
         for ck in enhanced_doc.chunks:
             info = chunk_status_map.get(ck.chunk_id)
             if not info:
@@ -308,6 +333,18 @@ class LLMAPIIngestionPipeline:
                 self.db.update_chunk_summary(db_id, chunk_summary)
             if keywords_str:
                 self.db.update_chunk_keywords(db_id, keywords_str)
+            
+            # 写入结构化元数据到 chunk metadata
+            meta = info["metadata"]
+            if entities:
+                meta["entities"] = entities
+            if relationships:
+                meta["relationships"] = relationships
+            if answered_questions:
+                meta["answered_questions"] = answered_questions
+            if meta:
+                self.db.update_chunk_metadata(db_id, meta)
+            
             self.db.update_chunk_status(db_id, "done")
         
         # 3. 持久化图像分析结果到 chunk metadata
@@ -327,19 +364,52 @@ class LLMAPIIngestionPipeline:
             else:
                 imgs.append({"path": ia.get("path", ""), "vision_desc": ia.get("analysis", "")})
             meta["images"] = imgs
+            if "vision_insights" in ia:
+                meta["vision_insights"] = ia["vision_insights"]
             self.db.update_chunk_metadata(db_id, meta)
         
-        # 4. 从关键词生成简单概念索引
-        for kw in keywords:
-            if kw and isinstance(kw, str):
-                self.db.upsert_concept(
-                    doc_id=doc_id,
-                    concept_name=kw,
-                    definition=f"关键词: {kw}",
-                )
+        # 4. 从 entities 生成高质量概念索引（回退到关键词）
+        concept_sources = []
+        for ent in entities:
+            if isinstance(ent, dict) and ent.get("name"):
+                concept_sources.append({
+                    "name": ent["name"],
+                    "definition": ent.get("definition", ent.get("description", f"实体: {ent['name']}")),
+                })
+        if not concept_sources:
+            for kw in keywords:
+                if kw and isinstance(kw, str):
+                    concept_sources.append({"name": kw, "definition": f"关键词: {kw}"})
         
-        logger.info("LLM output persisted | doc_id=%s | chapters=%s | images=%s | keywords=%s",
-                   doc_id, len(chapter_summaries), len(image_analyses), len(keywords))
+        # 计算 first_mentioned_page
+        for concept in concept_sources:
+            first_page = None
+            for ck in enhanced_doc.chunks:
+                if ck.chunk_type == "text" and concept["name"] in ck.content:
+                    info = chunk_status_map.get(ck.chunk_id)
+                    if info and info.get("page_start") is not None:
+                        first_page = info["page_start"]
+                        break
+            
+            # 计算 related_concepts（从 relationships 推导）
+            related = []
+            for rel in relationships:
+                if isinstance(rel, dict):
+                    if rel.get("from") == concept["name"] and rel.get("to"):
+                        related.append(rel["to"])
+                    elif rel.get("to") == concept["name"] and rel.get("from"):
+                        related.append(rel["from"])
+            
+            self.db.upsert_concept(
+                doc_id=doc_id,
+                concept_name=concept["name"],
+                definition=concept["definition"],
+                first_mentioned_page=first_page,
+                related_concepts=related[:5],
+            )
+        
+        logger.info("LLM output persisted | doc_id=%s | chapters=%s | images=%s | keywords=%s | entities=%s | concepts=%s",
+                   doc_id, len(chapter_summaries), len(image_analyses), len(keywords), len(entities), len(concept_sources))
     
     def _llm_enhance_document(self, raw_doc: Document) -> Document:
         """使用 LLM 增强文档内容"""
@@ -358,15 +428,18 @@ class LLMAPIIngestionPipeline:
         # 3. 生成章节摘要（如果有章节）
         chapter_summaries = self._generate_chapter_summaries(raw_doc)
         
-        # 4. 智能关键词提取
-        keywords = self._extract_keywords(raw_doc)
+        # 4. 智能关键词/实体/关系提取
+        structured = self._extract_structured_metadata(raw_doc)
         
         # 5. 更新文档元数据
         raw_doc.metadata.update({
             "llm_summary": text_summary,
             "image_analyses": image_analyses,
             "chapter_summaries": chapter_summaries,
-            "keywords": keywords,
+            "keywords": structured["keywords"],
+            "entities": structured["entities"],
+            "relationships": structured["relationships"],
+            "answered_questions": structured["answered_questions"],
             "processing_mode": "LLM_API_FLOW",
             "llm_model": Config.LLM_MODEL,
             "llm_provider": Config.LLM_PROVIDER,
@@ -568,45 +641,100 @@ class LLMAPIIngestionPipeline:
         
         return chapter_summaries
     
-    def _extract_keywords(self, doc: Document) -> List[str]:
-        """智能关键词提取"""
-        if not self.llm_client:
+    def _extract_figures_from_text(self, text: str) -> List[str]:
+        """从文本中提取图表引用（Figure/Fig./图）"""
+        if not text:
             return []
+        import re
+        figures = []
+        # 匹配 Figure/Fig./图 后跟编号和标题
+        for m in re.finditer(r'(?:Figure|Fig\.?|图)\s*[\d\-\.]+(?:\s*[:：\-]\s*|\s+)([^\n\.]+)', text, re.IGNORECASE):
+            caption = m.group(0).strip()
+            if caption and caption not in figures:
+                figures.append(caption)
+        return figures[:5]
+    
+    def _extract_tables_from_text(self, text: str) -> List[str]:
+        """从文本中提取表格引用（Table/表）"""
+        if not text:
+            return []
+        import re
+        tables = []
+        for m in re.finditer(r'(?:Table|表)\s*[\d\-\.]+(?:\s*[:：\-]\s*|\s+)([^\n\.]+)', text, re.IGNORECASE):
+            caption = m.group(0).strip()
+            if caption and caption not in tables:
+                tables.append(caption)
+        return tables[:5]
+    
+    def _parse_llm_json(self, text: str) -> Optional[Dict[str, Any]]:
+        """安全解析 LLM 返回的 JSON，支持 markdown 代码块包裹"""
+        import json
+        cleaned = text.strip()
+        # 移除可能的 markdown 代码块标记
+        if cleaned.startswith("```"):
+            lines = cleaned.splitlines()
+            if lines and lines[0].startswith("```"):
+                lines = lines[1:]
+            if lines and lines[-1].startswith("```"):
+                lines = lines[:-1]
+            cleaned = "\n".join(lines).strip()
+        try:
+            return json.loads(cleaned)
+        except json.JSONDecodeError:
+            return None
+    
+    def _extract_structured_metadata(self, doc: Document) -> Dict[str, Any]:
+        """提取结构化元数据：关键词、实体、关系、已回答问题"""
+        if not self.llm_client:
+            return {"keywords": [], "entities": [], "relationships": [], "answered_questions": []}
         
         try:
-            # 收集文档标题和章节标题作为关键词基础
-            keyword_sources = [doc.title] if doc.title else []
+            sources = [doc.title] if doc.title else []
             for chapter in doc.chapters:
-                keyword_sources.append(chapter.title)
+                sources.append(chapter.title)
             
-            # 使用 LLM 提取关键词
-            keyword_text = "\n".join(keyword_sources)
-            if len(keyword_text) < 50:
-                # 如果内容太少，添加一些文本内容
-                for chunk in doc.chunks[:3]:  # 只取前3个chunk
+            text = "\n".join(sources)
+            if len(text) < 50:
+                for chunk in doc.chunks[:3]:
                     if chunk.chunk_type == "text":
-                        keyword_text += "\n" + chunk.content[:500]
-                        if len(keyword_text) > 1000:
+                        text += "\n" + chunk.content[:500]
+                        if len(text) > 1000:
                             break
             
-            keyword_prompt = f"""从技术文档中提取5-8个最重要的关键词，用逗号分隔：
+            prompt = f"""分析以下技术文档，提取结构化元数据。文档内容：
+{text[:2000]}
 
-{keyword_text[:2000]}"""
+请以 JSON 格式返回（不要包含 markdown 代码块）：
+{{"keywords": ["关键词1", "关键词2"], "entities": [{{"name": "实体名", "type": "component", "definition": "一句话定义"}}], "relationships": [{{"from": "实体A", "to": "实体B", "relation": "contains", "detail": "关系描述"}}], "answered_questions": ["文档回答了什么问题1", "回答了什么问题2"]}}
+
+要求：
+- keywords: 5-8 个最重要的技术关键词
+- entities: 文档中的核心技术实体（组件、协议、概念等），每个包含 name、type、definition
+- relationships: 实体间的关键关系，每个包含 from、to、relation、detail
+- answered_questions: 文档能够回答的 3-5 个核心问题
+- 所有内容用中文"""
             
-            keyword_response = self.llm_client.chat([{"role": "user", "content": keyword_prompt}])
+            response = self.llm_client.chat([{"role": "user", "content": prompt}])
+            data = self._parse_llm_json(response)
+            if data and isinstance(data, dict):
+                return {
+                    "keywords": data.get("keywords", [])[:10] if isinstance(data.get("keywords"), list) else [],
+                    "entities": data.get("entities", []) if isinstance(data.get("entities"), list) else [],
+                    "relationships": data.get("relationships", []) if isinstance(data.get("relationships"), list) else [],
+                    "answered_questions": data.get("answered_questions", [])[:5] if isinstance(data.get("answered_questions"), list) else [],
+                }
             
-            # 解析关键词
+            # 回退：只提取关键词
             keywords = []
-            for line in keyword_response.splitlines():
+            for line in response.splitlines():
                 if "," in line:
                     keywords = [k.strip() for k in line.split(",") if k.strip()]
                     break
-            
-            return keywords[:10]  # 限制数量
+            return {"keywords": keywords[:10], "entities": [], "relationships": [], "answered_questions": []}
             
         except Exception as e:
-            logger.error(f"关键词提取失败 | error={e}")
-            return []
+            logger.error(f"结构化元数据提取失败 | error={e}")
+            return {"keywords": [], "entities": [], "relationships": [], "answered_questions": []}
     
     def _recursive_chapter_summarization(self, doc: Document) -> str:
         """
@@ -651,7 +779,7 @@ class LLMAPIIngestionPipeline:
             
             if chapter_summary:
                 chapter_summaries.append({
-                    "chapter": chapter.title,
+                    "chapter_title": chapter.title,
                     "summary": chapter_summary,
                     "index": i
                 })
@@ -729,7 +857,7 @@ class LLMAPIIngestionPipeline:
             return ""
         
         combined = "\n\n".join([
-            f"第{s['index'] + 1}章 {s['chapter']}:\n{s['summary']}"
+            f"第{s['index'] + 1}章 {s.get('chapter_title', s.get('chapter', ''))}:\n{s['summary']}"
             for s in chapter_summaries
         ])
         
@@ -762,7 +890,7 @@ class LLMAPIIngestionPipeline:
         for i, group in enumerate(groups):
             group_summary = self._direct_summary_aggregation(group)
             group_summaries.append({
-                "chapter": f"组{i+1}",
+                "chapter_title": f"组{i+1}",
                 "summary": group_summary,
                 "index": i
             })
