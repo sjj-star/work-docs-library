@@ -262,6 +262,13 @@ class KnowledgeDB:
         with self._connect() as conn:
             conn.execute("UPDATE chunks SET status = 'done' WHERE id = ?", (db_id,))
 
+    def update_chunk_metadata(self, db_id: int, metadata: dict) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                "UPDATE chunks SET metadata = ? WHERE id = ?",
+                (json.dumps(metadata, ensure_ascii=False), db_id),
+            )
+
     def query_by_page(self, doc_id: str, page_start: int, page_end: int) -> List[Chunk]:
         sql = """
             SELECT * FROM chunks WHERE doc_id = ?

@@ -24,7 +24,7 @@ class CompatibilityIngestionPipeline:
     
     def __init__(self, db: Optional[KnowledgeDB] = None, vec: Optional[VectorIndex] = None) -> None:
         self.db = db or KnowledgeDB()
-        self.vec = vec or VectorIndex()
+        self.vec = vec or VectorIndex(dim=Config.EMBEDDING_DIMENSION)
         self.embedder: Optional[EmbeddingClient] = None
         try:
             # 使用新的独立 Embedding 客户端

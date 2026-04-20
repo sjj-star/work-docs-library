@@ -370,3 +370,36 @@ def test_cmd_auto_cleans_orphan_files_and_keeps_stable_batch_map(patched_config,
     agent_batch_helper.cmd_auto(args)
     captured = capsys.readouterr()
     assert not orphan_json.exists()
+
+
+def test_cleanup_orphan_skips_recently_modified_stale_json(patched_config, sample_doc_with_chunks):
+    """_cleanup_orphan_files should skip deleting stale JSONs modified within 3 seconds
+    to avoid race conditions with background Agents still writing the file."""
+    db = KnowledgeDB()
+    rows = db.get_embedded_but_unsummarized_chunks("d1")
+    cids = [r[0] for r in rows]
+
+    out_dir = patched_config / "auto_batches" / "d3"
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    # Create a batch_map with only cids[0] and cids[1]
+    batch_map = [[cids[0], cids[1]]]
+
+    # Create a stale batch_001.json whose chunk_db_id is NOT in batch_map[0]
+    # but whose mtime is very recent (< 3 seconds)
+    stale_json = out_dir / "batch_001.json"
+    stale_json.write_text(json.dumps([
+        {"chunk_db_id": cids[2], "summary": "S", "keywords": "k"}
+    ]), encoding="utf-8")
+
+    # Immediately run cleanup — file is < 3s old, should be skipped
+    cleaned = agent_batch_helper._cleanup_orphan_files(out_dir, batch_map)
+    assert stale_json.exists(), "Recently modified stale JSON should NOT be deleted"
+    assert cleaned == 0
+
+    # Wait 4 seconds and re-run cleanup — now file is > 3s old, should be deleted
+    import time
+    time.sleep(4)
+    cleaned = agent_batch_helper._cleanup_orphan_files(out_dir, batch_map)
+    assert not stale_json.exists(), "Stale JSON older than 3s should be deleted"
+    assert cleaned >= 1

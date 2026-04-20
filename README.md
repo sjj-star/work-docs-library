@@ -284,6 +284,7 @@ python scripts/doc_extractor.py query --doc-id <DOC_HASH> --chapter "System Arch
 | `status` | 列出所有已导入文档 | 无 |
 | `chapter-edit` | 交互式编辑/覆盖文档的章节信息 | `--doc-id`（必填） |
 | `query` | 按页码、章节、关键词查询 chunk | `--doc-id`, `--page`, `--chapter`, `--chapter-regex`, `--keyword`, `--top-k` |
+| `get_content` | 获取完整未截断内容（按 chunk_db_id / page / chapter） | `--doc-id`, `--page`, `--chapter`, `--chunk-db-id` |
 | `search` | 基于 FAISS 的语义向量搜索 | `--text`（必填）, `--top-k` |
 | `toc` | 显示文档目录，或按标题模糊搜索文档 | `--doc-id` 或 `--match` |
 | `list-pending` | 列出已嵌入但未摘要的 chunk | `--doc-id`, `--top-k` |
@@ -595,8 +596,8 @@ PYTHONPATH=scripts ./venv/bin/python scripts/main.py --validate-config dummy_pat
 | 模块 | 职责 |
 |------|------|
 | `core/pipeline.py` | `IngestionPipeline`：扫描 → 解析 → chunk → 嵌入 → 入库 的完整流程 |
-| `core/llm_api_pipeline.py` | `LLMAPIIngestionPipeline`：LLM API Flow 专用管道，支持层次化总结和图像分析 |
-| `core/compatibility_pipeline.py` | `CompatibilityIngestionPipeline`：Agent Skill Flow 兼容管道，保持现有行为 |
+| `core/llm_api_pipeline.py` | `LLMAPIIngestionPipeline`：LLM API Flow 专用管道，两阶段处理（Phase A Parse&Embed → Phase B LLM Enhance），支持断点续传 |
+| `core/compatibility_pipeline.py` | `CompatibilityIngestionPipeline`：Agent Skill Flow 兼容管道，仅向量化 |
 
 ### 数据模型与存储
 | 模块 | 职责 |
@@ -652,8 +653,9 @@ PYTHONPATH=scripts ./venv/bin/python -m pytest scripts/tests/ -v
 | **管道测试** | 6 | ✅ 全部通过 | 文档处理流程 |
 | **文档提取器测试** | 15 | ✅ 全部通过 | CLI 功能、查询搜索 |
 | **集成测试** | 45+ | ✅ 全部通过 | 端到端流程 |
+| **Plugin Router 测试** | 12 | ✅ 全部通过 | FlowSelector、get_content、plugin.json 回归、失败恢复 |
 
-**总计**: **153+ 个测试用例**，**通过率 100%**
+**总计**: **166 个测试用例**，**通过率 100%**
 
 ### 真实文档测试
 
@@ -701,13 +703,17 @@ PYTHONPATH=scripts ./venv/bin/python -m pytest scripts/tests/ -v
 **近期修复的关键问题：**
 1. **图表提取优化**：修复 `blocked_up` bug、装饰线吞并、边缘标签截断等问题，115/115 测试通过
 2. **表格检测优化**：添加惰性检测（`find_tables()` 仅在 `table_caption` 存在时调用），解决严重超时问题
-3. **双 LLM 架构**：实现独立 LLM + Embedding 客户端，支持不同供应商，153/153 测试通过
+3. **双 LLM 架构**：实现独立 LLM + Embedding 客户端，支持不同供应商
 4. **Kimi 模型适配**：强制 `temperature=1.0`，支持思考模式，通过 `extra_body` 参数配置
-5. **BigModel 维度配置**：添加 `dimensions` 参数支持，虽然该模型实际返回固定 1536 维向量
+5. **BigModel 维度配置**：添加 `dimensions` 参数支持
 6. **测试 Mock 修复**：`test_llm_client.py` 从 `monkeypatch.setenv` 改为 `monkeypatch.setattr(Config, ...)` 解决 mock 失效
 7. **资源泄漏修复**：`VisionClient` 添加 `try/finally` 确保在异常情况下正确关闭
 8. **重试机制**：LLM 客户端 `_post` 增加 3 次指数退避重试（1s / 2s / 4s）
-9. **API 调用优化**：使用批量处理减少调用次数，降低网络开销
+9. **LLM API Flow 两阶段处理**：重构为 Phase A（Parse & Embed）+ Phase B（LLM Enhance），支持断点续传，异常时状态变为 `failed` 而非卡住 `processing`
+10. **图像分析持久化**：`_analyze_document_images()` 结果现在写入 `chunk.metadata["images"][*]["vision_desc"]`
+11. **`get_content` 工具**：新增 Plugin Tool，支持按 chapter / page / chunk_db_id 获取完整未截断内容
+12. **race condition 修复**：`_cleanup_orphan_files` 对 stale JSON 增加 3 秒 mtime 保护
+13. **`agent_mode` 参数**：`ingest` 工具支持 `agent_mode=true` 强制使用 CompatibilityIngestionPipeline
 
 ### 安全性分析
 
@@ -741,6 +747,7 @@ PYTHONPATH=scripts ./venv/bin/python -m pytest scripts/tests/ -v
 3. **FAISS 与 SQLite 非原子**：在极端情况下（进程崩溃、磁盘满），可能出现 FAISS 索引与 SQLite 元数据不一致。可通过 `reprocess` 命令重建文档来解决。
 4. **Vision API 开销**：开启 `WORKDOCS_AUTO_VISION=1` 后，每个包含图片的页面都会调用一次 Vision API，可能产生较高费用。
 5. **LLM 客户端 timeout**：当前默认 HTTP timeout 为 120 秒，虽然已增加 3 次重试，但极大文档或极慢网络仍可能超时。
+6. **后台运行限制**：当前 Kimi CLI 插件架构为单次 subprocess 调用，无法做到真正的后台运行。超长文档建议利用断点续传机制：Phase A（解析+嵌入）完成后若 Phase B（LLM 调用）中断，再次 `ingest` 即可续传，无需重新解析。
 
 ---
 

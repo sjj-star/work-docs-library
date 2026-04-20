@@ -44,6 +44,7 @@ class Document:
     extracted_at: str = field(default_factory=lambda: datetime.now().isoformat())
     file_hash: str = ""
     status: str = "pending"  # pending, processing, done, failed
+    metadata: Dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> Dict[str, Any]:
         d = asdict(self)
