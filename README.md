@@ -619,6 +619,297 @@ PYTHONPATH=scripts ./venv/bin/python scripts/main.py --validate-config dummy_pat
 | `core/chapter_editor.py` | `ChapterEditor`：基于 `input()` 的交互式章节增删改 |
 | `agent_batch_helper.py` | Agent 批量协作 CLI，支持 checkpoint/resume |
 
+---
+
+## 数据库与存储架构
+
+### Schema（4 张表）
+
+数据库位于 `knowledge_base/workdocs.db`，通过 `doc_id`（文件内容 MD5）关联。
+
+#### `documents` — 文档元数据
+| 字段 | 说明 |
+|------|------|
+| `doc_id` (PK) | 文件内容 MD5 哈希 |
+| `title` | 文档标题 |
+| `source_path` (UNIQUE) | 原始文件路径 |
+| `file_type` | `.pdf` / `.docx` / `.xlsx` |
+| `total_pages` | 总页数 |
+| `chapters` | JSON，解析出的章节列表 |
+| `chapters_override` | JSON，人工覆盖的章节（优先于 `chapters`） |
+| `file_hash` | 内容哈希（变更检测） |
+| `status` | `pending` → `processing` → `done` / `failed` / `embedded` |
+
+#### `chunks` — 内容块（核心表）
+| 字段 | 说明 |
+|------|------|
+| `id` (PK, AUTOINCREMENT) | SQLite 自增 ID，即 `chunk_db_id`，FAISS 索引也用它 |
+| `doc_id` (FK) | 所属文档 |
+| `chunk_id` | 逻辑 ID（如 `page_1_text`） |
+| **`content`** | **原始提取内容**，永不覆盖 |
+| `chunk_type` | `text` / `table` / `image_desc` / `summary` |
+| `page_start` / `page_end` | 页码范围 |
+| `chapter_title` | 所属章节（按页码范围匹配） |
+| `keywords` | 关键词（JSON 或逗号分隔） |
+| **`summary`** | **LLM 生成的摘要**（Phase B 或 Agent 回写后才填充） |
+| **`metadata`** | **JSON**：嵌入向量、图片路径、`vision_desc`、entities 等 |
+| `status` | `pending` → `embedded` → `done` / `skipped` / `failed` |
+| `created_at` | 创建时间戳 |
+
+**索引**：`idx_chunks_doc(doc_id)`、`idx_chunks_type(chunk_type)`、`idx_chunks_chapter(doc_id, chapter_title)`
+
+#### `chapter_summaries` — 章节级 LLM 摘要
+| 字段 | 说明 |
+|------|------|
+| `doc_id` + `chapter_title` | 复合定位 |
+| `summary` | 完整章节摘要 |
+| `concepts` / `relationships` / `key_figures` / `key_tables` | JSON 结构化数据 |
+| `status` | `pending` / `done` |
+
+#### `concept_index` — 概念/关键词索引
+| 字段 | 说明 |
+|------|------|
+| `doc_id` + `concept_name` (UNIQUE) | 每文档去重 |
+| `definition` | 概念定义 |
+| `first_mentioned_page` | 首次出现页码 |
+| `related_concepts` | JSON 关联概念列表 |
+
+### 表关系
+
+```
+documents (1)
+  ├──► chunks (N)              via doc_id
+  ├──► chapter_summaries (N)   via doc_id
+  └──► concept_index (N)       via doc_id
+
+FAISS index (external) mirrors chunks via chunk_db_id (chunks.id)
+```
+
+### 原始数据 vs LLM 增强数据存储
+
+```
+                    PDF/Office Parser
+                           │
+                           ▼
+              ┌────────────────────────┐
+              │    chunks.content      │  ← 原始提取内容，永不覆盖
+              │    chunks.metadata     │  ← 图片路径、embedding
+              └────────────────────────┘
+                           │
+            ┌──────────────┼──────────────┐
+            ▼              ▼              ▼
+      [LLM_API_FLOW]  [AGENT_SKILL_FLOW]  [FAISS]
+            │              │               │
+            ▼              ▼               ▼
+   chunks.summary    agent_batch_helper   向量索引
+   chunks.keywords   写入 summary/        (基于 content)
+   chapter_summaries  keywords
+   concept_index
+   metadata.images[].vision_desc
+```
+
+| 信息类型 | 存储位置 |
+|---------|---------|
+| **原始文本内容** | `chunks.content` |
+| **LLM 单块摘要** | `chunks.summary` |
+| **关键词** | `chunks.keywords` + `concept_index` 表 |
+| **章节摘要** | `chapter_summaries` 表 |
+| **图片分析** | `chunks.metadata["images"][*]["vision_desc"]` |
+| **嵌入向量** | `chunks.metadata["embedding"]`（JSON）+ FAISS 索引 |
+
+### 状态生命周期
+
+**Chunk 生命周期**：
+```
+pending ──► embedded ──► done
+   │           │           │
+   │           │           └─ After LLM enhancement (Phase B) or Agent write-back
+   │           └─ After embedding added to FAISS
+   └─ Initial state after parser inserts chunk
+
+skipped / failed ──► Error or filtered-out states
+```
+
+**Document 生命周期**：
+```
+pending ──► processing ──► done / failed / embedded
+```
+
+- `embedded`：Phase A（Parse & Embed）完成，等待 Phase B 或 Agent 处理
+- `done`：Phase B 完成或 Agent 已回写摘要
+
+---
+
+## 查询接口
+
+### Plugin 层工具
+
+| 工具 | 能力 | 底层查询 |
+|------|------|---------|
+| **`search`** | 语义搜索 | 将查询文本 embedding → FAISS 相似度搜索 → 按 `chunk_db_id` 回查数据库 |
+| **`query`** | 结构化查询 | 按 `page` 范围 / `chapter` 标题（LIKE 匹配）/ `keyword` 关键词 / `concept` 概念名 |
+| **`get_content`** | 获取完整未截断内容 | 按 `chunk_db_id` 精确查询 / 按 `page` 范围拼接 / 按 `chapter` 拼接多块 |
+| **`status`** | 列出所有文档 | `documents` 表列表 |
+| **`toc`** | 目录 | 返回 `documents.chapters` JSON |
+| **`progress`** | 处理进度 | 按 `doc_id` 统计各状态 chunk 数量 |
+| **`reprocess`** | 强制重新处理 | 删除旧 chunks/images，重新走完整流程 |
+| **`auto_summarize`** | Agent 批量总结流水线 | 导出 pending chunks 到 batch 文件 |
+| **`synthesize_chapters`** | 章节综合 | 生成结构化章节摘要 |
+
+**`search` / `query` 返回的每个结果包含**：
+- `doc_id`, `chunk_id`, `chunk_type`, `page_start/end`
+- `content_preview`（前 500 字符）
+- `summary`（LLM 摘要，如有）
+- `keywords`
+- **`chapter_context`**（如匹配到章节摘要）：包含该章节的 `summary`、`concepts`、`key_figures`、`key_tables`
+
+### KnowledgeDB 核心查询方法
+
+| 方法 | 查询类型 | SQL 过滤 |
+|------|----------|---------|
+| `query_by_page(doc_id, ps, pe)` | 页码重叠 | `page_start <= pe AND page_end >= ps` |
+| `query_by_chapter(doc_id, title)` | 子串匹配 | `chapter_title LIKE %title%` |
+| `query_by_chapter_regex(doc_id, pattern)` | 正则匹配 | Python `re.compile` 过滤 |
+| `query_by_keyword(keyword)` | 关键词搜索 | `keywords LIKE %keyword%` |
+| `query_by_concept(doc_id, concept)` | 概念搜索 | `metadata` / `summary` / `keywords` 联合 LIKE |
+| `get_chunk_by_db_id(db_id)` | 精确查询 | `id = ?` |
+| `get_embedded_but_unsummarized_chunks(doc_id?)` | Resume 辅助 | `status='embedded' AND (summary IS NULL OR summary='')` |
+| `get_pending_chunks(doc_id?)` | 状态过滤 | `status='pending'` |
+
+---
+
+## 向量索引（FAISS）
+
+- **索引类型**：`faiss.IndexFlatIP`（内积），向量做了 L2 归一化，内积等价于余弦相似度
+- **持久化**：`knowledge_base/faiss.index`（二进制）+ `knowledge_base/id_map.json`
+- **维度**：创建时固定，与 `EmbeddingClient` 探测的维度一致；不匹配会抛 `RuntimeError`
+- **id_map**：`faiss 内部序号 → chunk_db_id（chunks.id）` 的列表。旧版 dict 格式会自动迁移
+- **删除**：`remove_doc()` 采用**重建策略**（过滤后重新创建 `IndexFlatIP`），因为 flat 索引不支持原生删除
+- **嵌入对象**：**原始 `chunk.content`**（不是 LLM 增强后的内容）
+
+---
+
+## Agent Batch 机制详解
+
+`batch_*.txt` 是 **Agent Skill Flow** 的核心协作媒介——由脚本生成、由 Agent 阅读、由 Agent 产出 `batch_*.json` 回写数据库。
+
+### 整个流程
+
+```
+文档解析 + 嵌入 → chunks embedded
+         │
+         ▼
+  run_auto_summarize()
+         │
+         ├── _smart_batch() 分组
+         ├── _write_batch_txt() 生成 batch_001.txt
+         │
+         ▼
+    Agent 阅读 batch_001.txt
+         │
+         ▼
+    产出 batch_001.json
+         │
+         ▼
+    _apply_json_file() 回写 DB
+         │
+         ▼
+    chunks.status = "done"
+```
+
+### 分组策略：`_smart_batch()`
+
+```python
+def _smart_batch(rows, target_chars=25000, max_chunks=12, min_chunks=3):
+```
+
+1. **同章节优先**：尽量把同一章节的 chunk 放在同一个 batch，只要总字符数 ≤ `target_chars` 且 chunk 数 ≤ `max_chunks`
+2. **大章节拆分**：单个章节内容太多时，按顺序拆分为多个 batch
+3. **尾部合并**：最后一个 batch 若 chunk 数 < `min_chunks`，合并到前一个 batch
+
+输入：`status='embedded' AND (summary IS NULL OR summary='')` 的 chunk 行  
+输出：`[[db_id1, db_id2, ...], [db_id3, db_id4, ...], ...]`
+
+### 文件格式：`batch_001.txt`
+
+```text
+--- BATCH CHAPTER CONTEXT ---
+Chapter: System Architecture
+Previous chunk summary: The DMA controller uses a burst mechanism...
+--------------------------------------------------------------------------------
+
+--- CHUNK_DB_ID=47 | page_3_text | System Architecture P3 ---
+The AHB bus matrix supports up to 16 masters and 16 slaves...
+
+================================================================================
+
+--- CHUNK_DB_ID=48 | page_4_text | System Architecture P4 ---
+Each master port has an arbiter that grants access based on priority...
+
+================================================================================
+```
+
+| 元素 | 来源 | 作用 |
+|------|------|------|
+| `CHUNK_DB_ID=47` | `chunks.id` | Agent 回传 JSON 时必须原样带回，用于 `_apply_json_file()` 定位 |
+| `page_3_text` | `chunks.chunk_id` | 逻辑标识 |
+| `System Architecture P3` | `chapter_title` + `page_start` | 章节和页码上下文 |
+| `content` | `chunks.content` | 原始提取的文本/表格 |
+| `BATCH CHAPTER CONTEXT` | 同章节最近一个 `done` chunk 的 summary | 让 Agent 利用前文保持理解连贯性 |
+
+### 图片路径注入：`_enrich_batch_with_images()`
+
+写入 txt 前，检查每个 chunk 的 `metadata["images"]`：
+- **场景 A**：`vision_desc` 已存在（LLM API Flow 已处理）→ 仅提示图片存在
+- **场景 B**：`vision_desc` 不存在 → **强制要求** Agent 通过 `ReadMediaFile` 阅读图片并纳入摘要
+
+```text
+[AGENT VISION REQUIRED: The following images are on this page.
+ You MUST read them via ReadMediaFile and incorporate insights into the summary.]
+- knowledge_base/images/<hash>/page_3_img_1.png
+```
+
+### 断点续传：`checkpoint.json`
+
+```json
+{
+  "doc_id": "...",
+  "batch_map": [[47, 48, 49], [50, 51, 52]],
+  "done_chunk_ids": [47, 48, 49],
+  "total_batches": 5,
+  "applied_batches": 1
+}
+```
+
+- 处理到 batch_003 时中断 → 下次运行直接从 batch_003 续传
+- 若 `filter_config.json` 变更或文档重新嵌入导致 chunk ID 变化 → 自动废弃旧 checkpoint 重新分组
+
+### 文件生命周期
+
+| 阶段 | batch_001.txt | batch_001.json | checkpoint.json |
+|------|---------------|----------------|-----------------|
+| 初始生成 | ✅ | ❌ | ✅ |
+| Agent 处理中 | ✅ | ✅（Agent 写入） | ✅ |
+| 自动应用后 | ✅ | ❌（已删除） | ✅ |
+| 全部完成后 | ❌（全部删除） | ❌ | ❌ |
+
+### 从 txt 到 json 的闭环
+
+Agent 产出 `batch_001.json`：
+
+```json
+[
+  {"chunk_db_id": 47, "summary": "AHB总线矩阵支持16主16从...", "keywords": "AHB, bus matrix"},
+  {"chunk_db_id": 48, "summary": "每个主端口有优先级仲裁器...", "keywords": "arbiter, priority"}
+]
+```
+
+`run_auto_summarize()` 下次调用时：
+1. 发现 `batch_001.json` 存在
+2. `_apply_json_file()` 写入数据库：`update_chunk_summary()`、`update_chunk_keywords()`、`set_chunk_done()`
+3. 删除已应用的 `batch_001.json`
+4. 继续处理 `batch_002.txt`
+
 ### 解析器
 | 模块 | 职责 |
 |------|------|
