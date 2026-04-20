@@ -67,6 +67,68 @@
 
 ---
 
+## 配置系统
+
+### 三层优先级架构
+
+配置解析采用三层回退机制：
+
+```
+高优先级：Kimi CLI 运行时环境变量注入（如 llm.api_key）
+    ↓
+中优先级：config.json（统一配置入口，Kimi CLI 持久化凭证 + 用户手动参数）
+    ↓
+低优先级：.env 文件（开发/独立运行回退）
+    ↓
+默认：代码硬编码默认值
+```
+
+### 配置文件说明
+
+| 文件 | 作用 | 版本控制 |
+|------|------|----------|
+| `config.json` | **主配置入口**。由 `plugin.json` 的 `config_file` 指定，Kimi CLI 自动注入 OAuth token 并刷新 | ❌ `.gitignore` 忽略 |
+| `config.example.json` | 配置模板，供用户参考和复制 | ✅ 提交到仓库 |
+| `.env` / `.env.example` | 开发/独立运行回退配置 | ❌ `.gitignore` 忽略 |
+
+### `config.json` 结构
+
+```json
+{
+  "llm": {
+    "api_key": "",
+    "endpoint": "",
+    "provider": "kimi",
+    "model": "kimi-k2.5",
+    "thinking_enabled": false
+  },
+  "embedding": {
+    "api_key": "",
+    "endpoint": "",
+    "provider": "openai",
+    "model": "text-embedding-3-small",
+    "dimension": 1536
+  },
+  "image": { "max_edge": 1024, "quality": 85 },
+  "batch_size": 4,
+  "auto_vision": 0
+}
+```
+
+- `llm.api_key` 和 `llm.endpoint` 由 Kimi CLI 通过 `plugin.json` 的 `inject` 自动注入
+- 其余字段由用户手动维护，或通过 `.env` 回退填充
+- 当 `config.json` 中字段为空时，自动回退到 `.env` 中的同名环境变量
+
+### `core/config.py` 解析逻辑
+
+`_resolve_config(env_name, json_path, default)` 实现三层解析：
+1. `os.getenv(json_path)` — Kimi CLI 运行时注入（如 `llm.api_key`）
+2. `os.getenv(env_name)` — `.env` 文件（如 `WORKDOCS_LLM_API_KEY`）
+3. `_CONFIG_JSON[json_path]` — `config.json` 中的值
+4. `default` — 代码默认值
+
+---
+
 ## 数据库 Schema（开发者速查）
 
 ### `documents` — 文档元数据
@@ -189,7 +251,7 @@ work-docs-library/
 
 | 模块 | 关键类/函数 | 职责 |
 |------|-------------|------|
-| `core/config.py` | `Config` | 统一读取 `.env`，所有配置项以 `WORKDOCS_` 为前缀 |
+| `core/config.py` | `Config` | 统一配置中心，三层优先级：环境变量 > `config.json` > `.env` |
 | `core/flow_selector.py` | `FlowSelector` | 根据配置自动选择 `LLM_API_FLOW` 或 `AGENT_SKILL_FLOW` |
 | `core/models.py` | `Chapter`, `Chunk`, `Document` | 领域模型，使用 `dataclass` 定义 |
 | `core/db.py` | `KnowledgeDB` | SQLite 操作，参数化查询防注入，`_connect()` 为上下文管理器 |

@@ -1,0 +1,22 @@
+{
+  "llm": {
+    "api_key": "",
+    "endpoint": "https://api.moonshot.cn/v1",
+    "provider": "kimi",
+    "model": "kimi-k2.5",
+    "thinking_enabled": false
+  },
+  "embedding": {
+    "api_key": "your_embedding_api_key",
+    "endpoint": "https://api.openai.com/v1",
+    "provider": "openai",
+    "model": "text-embedding-3-small",
+    "dimension": 1536
+  },
+  "image": {
+    "max_edge": 1024,
+    "quality": 85
+  },
+  "batch_size": 4,
+  "auto_vision": 0
+}

@@ -2,6 +2,11 @@
   "name": "work-docs-library",
   "version": "1.0.0",
   "description": "通用化技术文档知识库管理插件，支持 PDF/Word/Excel 提取、向量索引、语义搜索与 Agent 批量总结",
+  "config_file": "config.json",
+  "inject": {
+    "llm.api_key": "api_key",
+    "llm.endpoint": "base_url"
+  },
   "tools": [
     {
       "name": "ingest",
