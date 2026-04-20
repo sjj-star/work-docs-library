@@ -40,7 +40,11 @@
 
 1. **LLM API Flow**（高质量处理模式）
    - 前提：同时配置了 LLM 对话模型和 Embedding 模型
-   - 行为：调用 `LLMAPIIngestionPipeline`，执行层次化文本总结、图像详细分析、章节摘要生成
+   - 行为：调用 `LLMAPIIngestionPipeline`，执行**两阶段处理**：
+     - **Phase A**（Parse & Embed）：解析 → 存储 chunks → 嵌入 → `status="embedded"`
+     - **Phase B**（LLM Enhance）：层次化文本总结、图像详细分析、章节摘要生成 → 持久化到 DB → `status="done"`
+   - **断点续传**：若 Phase B 中断，再次 `ingest` 会检测到已有 `embedded` chunks 并跳过 Phase A 直接续传
+   - 异常处理：任何阶段失败时文档状态变为 `"failed"`，不会卡住 `"processing"`
    - 典型耗时：单章节总结 5–10 秒，层次化总结 15–30 秒，图像分析 3–5 秒/图
 
 2. **Agent Skill Flow**（高效批处理模式）
@@ -166,7 +170,7 @@ PYTHONPATH=scripts ./venv/bin/python scripts/main.py --validate-config dummy_pat
 ### 运行测试
 
 ```bash
-# 运行全部测试（153+ 个用例）
+# 运行全部测试（166 个用例）
 PYTHONPATH=scripts ./venv/bin/python -m pytest scripts/tests/ -v
 
 # 运行单个测试文件
@@ -299,6 +303,24 @@ PYTHONPATH=scripts ./venv/bin/python scripts/agent_batch_helper.py auto --doc-id
 5. **LLM 客户端 timeout**：默认 HTTP timeout 为 120 秒，已增加 3 次指数退避重试（1s / 2s / 4s），但极大文档或极慢网络仍可能超时。
 6. **Embedding 维度不可变**：FAISS 索引创建后维度固定。更换模型导致维度变化时，必须删除旧索引并重新处理文档。
 7. **过滤规则**：`agent_batch_helper.py filter/auto` 依赖 `scripts/prompts/filter_config.json`，修改规则后无需重启，下次运行自动生效。
+8. **后台运行限制**：Kimi CLI 插件架构为单次 subprocess 调用，无法真正后台运行。超长文档依赖断点续传降低重试成本。
+
+## Plugin 工具速查
+
+| Tool | 说明 | 关键参数 |
+|------|------|----------|
+| `ingest` | 提取并存储文档 | `path`, `dry_run`, `auto_chapter`, `agent_mode` |
+| `search` | 语义向量搜索 | `text`, `top_k` |
+| `query` | 结构化查询 | `doc_id`, `page`, `chapter`, `keyword`, `concept` |
+| `get_content` | 获取完整未截断内容 | `doc_id` + `page`/`chapter`/`chunk_db_id` |
+| `status` | 列出所有文档 | 无 |
+| `toc` | 目录/标题搜索 | `doc_id` 或 `match` |
+| `auto_summarize` | Agent 批量总结流水线 | `doc_id`, `batch_size`, `filter` |
+| `synthesize_chapters` | 章节综合 | `doc_id` |
+| `progress` | 处理进度 | `doc_id` |
+| `reprocess` | 强制重新处理 | `doc_id` |
+
+**注意**：`plugin.json` 中所有 tool 的 `command` 固定为 `venv/bin/python3`，不依赖系统 PATH。
 
 ---
 
@@ -329,7 +351,7 @@ PYTHONPATH=scripts ./venv/bin/python scripts/agent_batch_helper.py auto --doc-id
 
 | 文件 | 作用 |
 |------|------|
-| `plugin.json` | Kimi CLI Plugin 工具定义（9 个 tools） |
+| `plugin.json` | Kimi CLI Plugin 工具定义（10 个 tools） |
 | `scripts/plugin_router.py` | Plugin 运行时路由（stdin JSON → stdout JSON） |
 | `scripts/main.py` | 独立 CLI 主入口 |
 | `scripts/doc_extractor.py` | 传统 CLI（子命令：ingest/status/query/search/toc/list-pending/write-summary/reprocess…） |

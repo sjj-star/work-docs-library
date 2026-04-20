@@ -26,7 +26,7 @@ class LLMAPIIngestionPipeline:
     
     def __init__(self, db: Optional[KnowledgeDB] = None, vec: Optional[VectorIndex] = None) -> None:
         self.db = db or KnowledgeDB()
-        self.vec = vec or VectorIndex()
+        self.vec = vec or VectorIndex(dim=Config.EMBEDDING_DIMENSION)
         
         # 使用独立的 LLM 和 Embedding 客户端
         try:
@@ -77,7 +77,7 @@ class LLMAPIIngestionPipeline:
         return ingested
     
     def _process_one(self, file_path: str, dry_run: bool, auto_chapter: bool, force: bool = False) -> Optional[str]:
-        """处理单个文档"""
+        """处理单个文档 - 两阶段：Phase A (Parse & Embed) + Phase B (LLM Enhance)"""
         suffix = Path(file_path).suffix.lower()
         parser = self.parsers.get(suffix)
         if not parser:
@@ -101,8 +101,10 @@ class LLMAPIIngestionPipeline:
             logger.info("Dry-run | file=%s | pages=%s | chapters=%s", file_path, raw_doc.total_pages, len(raw_doc.chapters))
             return raw_doc.doc_id
         
-        # 检查是否需要处理
+        doc_id = raw_doc.doc_id
         existing = self.db.get_document_by_path(file_path)
+        
+        # 跳过已完成的文档
         if not force and existing and existing.file_hash == raw_doc.file_hash and existing.status == "done":
             logger.info("Skip unchanged | file=%s | doc_id=%s", file_path, existing.doc_id)
             return existing.doc_id
@@ -111,126 +113,233 @@ class LLMAPIIngestionPipeline:
         if self.embedder is None:
             logger.warning("No embedder | file=%s will be ingested without embeddings", file_path)
         
-        # 存储文档基础信息
-        self.db.upsert_document(raw_doc)
-        self.db.update_document_status(raw_doc.doc_id, "processing")
-        
-        # 清理旧数据（如果存在）
-        if existing:
+        # --- Phase A: Parse & Embed ---
+        need_phase_a = True
+        if existing and not force:
             with self.db._connect() as conn:
-                old_chunks = conn.execute(
-                    "SELECT id FROM chunks WHERE doc_id = ?", (raw_doc.doc_id,)
-                ).fetchall()
-            if old_chunks:
-                self.vec.remove_doc([r["id"] for r in old_chunks])
-                self.db.delete_chunks_by_doc(raw_doc.doc_id)
-                self.db.delete_chapter_summaries_by_doc(raw_doc.doc_id)
-                self.db.delete_concepts_by_doc(raw_doc.doc_id)
+                rows = conn.execute("SELECT status FROM chunks WHERE doc_id = ?", (doc_id,)).fetchall()
+            if rows:
+                statuses = {r["status"] for r in rows}
+                if statuses == {"done"}:
+                    logger.info("Skip unchanged | doc_id=%s | all chunks done", doc_id)
+                    return doc_id
+                if "embedded" in statuses or "pending" in statuses:
+                    need_phase_a = False
+                    logger.info("Resume Phase B | doc_id=%s | existing chunks found", doc_id)
         
-        # LLM 增强处理
-        enhanced_doc = self._llm_enhance_document(raw_doc)
+        if need_phase_a:
+            self.db.upsert_document(raw_doc)
+            self.db.update_document_status(doc_id, "processing")
+            
+            # 清理旧数据（如果存在）
+            if existing:
+                with self.db._connect() as conn:
+                    old_chunks = conn.execute(
+                        "SELECT id FROM chunks WHERE doc_id = ?", (doc_id,)
+                    ).fetchall()
+                if old_chunks:
+                    self.vec.remove_doc([r["id"] for r in old_chunks])
+                    self.db.delete_chunks_by_doc(doc_id)
+                    self.db.delete_chapter_summaries_by_doc(doc_id)
+                    self.db.delete_concepts_by_doc(doc_id)
+            
+            # 处理 chunks（原始内容，不带 LLM 增强）
+            chunks = raw_doc.chunks if raw_doc.chunks else []
+            if not chunks:
+                content = Path(file_path).read_text(encoding="utf-8", errors="ignore")
+                chunks = [Chunk(
+                    doc_id=doc_id,
+                    chunk_id="full",
+                    content=content,
+                    chunk_type="text",
+                    page_start=1,
+                    page_end=raw_doc.total_pages or 1,
+                )]
+            
+            # 分配章节
+            chapters = self.db.get_chapters(doc_id) if not auto_chapter else raw_doc.chapters
+            for ck in chunks:
+                ck.doc_id = doc_id
+                for ch in chapters:
+                    if ch.start_page <= ck.page_start <= ch.end_page:
+                        ck.chapter_title = ch.title
+                        break
+            
+            # 存储 chunks
+            chunk_db_ids = []
+            for ck in chunks:
+                db_id = self.db.insert_chunk(ck)
+                chunk_db_ids.append(db_id)
+            
+            # 向量化处理
+            if self.embedder:
+                texts = [ck.content for ck in chunks]
+                for i in range(0, len(texts), Config.BATCH_SIZE):
+                    batch_texts = texts[i:i + Config.BATCH_SIZE]
+                    batch_ids = chunk_db_ids[i:i + Config.BATCH_SIZE]
+                    try:
+                        embeddings = self.embedder.embed(batch_texts)
+                        for db_id, emb in zip(batch_ids, embeddings):
+                            self.db.update_chunk_embedding(db_id, emb)
+                            self.vec.add(db_id, emb)
+                            self.db.update_chunk_status(db_id, "embedded")
+                    except Exception as e:
+                        logger.error("Embed error | doc_id=%s | error=%s", doc_id, e)
+                        self.db.update_document_status(doc_id, "failed")
+                        raise
+            else:
+                for db_id in chunk_db_ids:
+                    self.db.update_chunk_status(db_id, "embedded")
+                logger.warning("No embedder | skipped vector index generation for doc_id=%s", doc_id)
         
-        # 处理 chunks
-        chunks = enhanced_doc.chunks if enhanced_doc.chunks else []
-        if not chunks:
-            # 回退：全文作为单个 chunk
-            content = Path(file_path).read_text(encoding="utf-8", errors="ignore")
-            chunks = [Chunk(
-                doc_id=enhanced_doc.doc_id,
-                chunk_id="full",
-                content=content,
-                chunk_type="text",
-                page_start=1,
-                page_end=enhanced_doc.total_pages or 1,
-            )]
-        
-        # 分配章节
-        chapters = self.db.get_chapters(enhanced_doc.doc_id) if not auto_chapter else enhanced_doc.chapters
-        for ck in chunks:
-            ck.doc_id = enhanced_doc.doc_id
-            for ch in chapters:
-                if ch.start_page <= ck.page_start <= ch.end_page:
-                    ck.chapter_title = ch.title
-                    break
-        
-        # 存储 chunks
-        chunk_db_ids = []
-        for ck in chunks:
-            db_id = self.db.insert_chunk(ck)
-            chunk_db_ids.append(db_id)
-        
-        # 向量化处理
-        if self.embedder:
-            texts = [ck.content for ck in chunks]
-            for i in range(0, len(texts), Config.BATCH_SIZE):
-                batch_texts = texts[i:i + Config.BATCH_SIZE]
-                batch_ids = chunk_db_ids[i:i + Config.BATCH_SIZE]
-                try:
-                    embeddings = self.embedder.embed(batch_texts)
-                    for db_id, emb in zip(batch_ids, embeddings):
-                        self.db.update_chunk_embedding(db_id, emb)
-                        self.vec.add(db_id, emb)
-                        self.db.update_chunk_status(db_id, "embedded")
-                except Exception as e:
-                    logger.error("Embed error | doc_id=%s | error=%s", enhanced_doc.doc_id, e)
-        else:
-            logger.warning("No embedder | skipped vector index generation for doc_id=%s", enhanced_doc.doc_id)
-        
-        # 持久化 LLM 输出到数据库（LLM_API_FLOW 一次完成）
+        # --- Phase B: LLM Enhance ---
         if self.llm_client:
-            # 1. 写入章节摘要
-            chapter_summaries = enhanced_doc.metadata.get("chapter_summaries", [])
-            chapter_summary_map = {}
-            for cs in chapter_summaries:
-                ch_title = cs.get("chapter_title", "")
-                if not ch_title:
-                    continue
-                chapter_summary_map[ch_title] = cs.get("summary", "")
-                self.db.upsert_chapter_summary(
-                    enhanced_doc.doc_id,
-                    ch_title,
-                    {
-                        "start_page": cs.get("start_page"),
-                        "end_page": cs.get("end_page"),
-                        "summary": cs.get("summary", ""),
-                        "concepts": [],
-                        "relationships": [],
-                        "key_figures": [],
-                        "key_tables": [],
-                        "status": "done",
-                    }
-                )
-            
-            # 2. 为每个 chunk 写入 summary / keywords / status=done
-            keywords = enhanced_doc.metadata.get("keywords", [])
-            keywords_str = ",".join(keywords) if isinstance(keywords, list) else str(keywords)
-            for db_id, ck in zip(chunk_db_ids, chunks):
-                # 使用 chunk 所在章节的 summary，或回退到文档级 summary
-                ch_summary = chapter_summary_map.get(ck.chapter_title or "", "")
-                doc_summary = enhanced_doc.metadata.get("llm_summary", "")
-                chunk_summary = ch_summary if ch_summary else doc_summary
-                if chunk_summary:
-                    self.db.update_chunk_summary(db_id, chunk_summary)
-                if keywords_str:
-                    self.db.update_chunk_keywords(db_id, keywords_str)
-                self.db.update_chunk_status(db_id, "done")
-            
-            # 3. 从关键词生成简单概念索引
-            for kw in keywords:
-                if kw and isinstance(kw, str):
-                    self.db.upsert_concept(
-                        doc_id=enhanced_doc.doc_id,
-                        concept_name=kw,
-                        definition=f"关键词: {kw}",
-                    )
-            
-            logger.info("LLM output persisted | doc_id=%s | chapters=%s | chunks=%s | keywords=%s",
-                       enhanced_doc.doc_id, len(chapter_summaries), len(chunk_db_ids), len(keywords))
+            try:
+                doc_for_llm = self._load_document_with_chunks(doc_id)
+                if not doc_for_llm:
+                    doc_for_llm = raw_doc
+                
+                enhanced_doc = self._llm_enhance_document(doc_for_llm)
+                self._persist_llm_outputs(doc_id, enhanced_doc)
+            except Exception as e:
+                logger.error("LLM enhance error | doc_id=%s | error=%s", doc_id, e)
+                self.db.update_document_status(doc_id, "failed")
+                raise
+        else:
+            with self.db._connect() as conn:
+                rows = conn.execute(
+                    "SELECT id FROM chunks WHERE doc_id = ? AND status = 'embedded'", (doc_id,)
+                ).fetchall()
+            for r in rows:
+                self.db.update_chunk_status(r["id"], "done")
         
-        # 更新状态
-        self.db.update_document_status(enhanced_doc.doc_id, "done")
-        logger.info("Ingestion complete | file=%s | doc_id=%s | mode=LLM_API_FLOW", file_path, enhanced_doc.doc_id)
-        return enhanced_doc.doc_id
+        self.db.update_document_status(doc_id, "done")
+        logger.info("Ingestion complete | file=%s | doc_id=%s | mode=LLM_API_FLOW", file_path, doc_id)
+        return doc_id
+    
+    def _load_document_with_chunks(self, doc_id: str) -> Optional[Document]:
+        """从数据库加载文档及其 chunks（用于 Phase B 断点续传）"""
+        doc = self.db.get_document(doc_id)
+        if not doc:
+            return None
+        with self.db._connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM chunks WHERE doc_id = ? ORDER BY page_start, chunk_id",
+                (doc_id,)
+            ).fetchall()
+        if not rows:
+            return None
+        import json
+        chunks = []
+        for r in rows:
+            kw_raw = r["keywords"] or ""
+            try:
+                keywords = json.loads(kw_raw)
+            except json.JSONDecodeError:
+                keywords = [k.strip() for k in kw_raw.split(",") if k.strip()]
+            chunks.append(Chunk(
+                doc_id=r["doc_id"],
+                chunk_id=r["chunk_id"],
+                content=r["content"],
+                chunk_type=r["chunk_type"],
+                page_start=r["page_start"],
+                page_end=r["page_end"],
+                chapter_title=r["chapter_title"],
+                keywords=keywords,
+                summary=r["summary"] or "",
+                status=r["status"] or "pending",
+                metadata=json.loads(r["metadata"] or "{}"),
+            ))
+        doc.chunks = chunks
+        return doc
+    
+    def _persist_llm_outputs(self, doc_id: str, enhanced_doc: Document) -> None:
+        """持久化 LLM 增强结果到数据库（支持增量更新，跳过已 done 的 chunks）"""
+        import json
+        
+        # 获取当前 chunk 状态映射
+        with self.db._connect() as conn:
+            rows = conn.execute(
+                "SELECT id, chunk_id, status, metadata FROM chunks WHERE doc_id = ?",
+                (doc_id,)
+            ).fetchall()
+        chunk_status_map = {r["chunk_id"]: {"db_id": r["id"], "status": r["status"], "metadata": json.loads(r["metadata"] or "{}")} for r in rows}
+        
+        # 1. 写入章节摘要
+        chapter_summaries = enhanced_doc.metadata.get("chapter_summaries", [])
+        chapter_summary_map = {}
+        for cs in chapter_summaries:
+            ch_title = cs.get("chapter_title", "")
+            if not ch_title:
+                continue
+            chapter_summary_map[ch_title] = cs.get("summary", "")
+            self.db.upsert_chapter_summary(
+                doc_id,
+                ch_title,
+                {
+                    "start_page": cs.get("start_page"),
+                    "end_page": cs.get("end_page"),
+                    "summary": cs.get("summary", ""),
+                    "concepts": [],
+                    "relationships": [],
+                    "key_figures": [],
+                    "key_tables": [],
+                    "status": "done",
+                }
+            )
+        
+        # 2. 为每个 embedded chunk 写入 summary / keywords / status=done
+        keywords = enhanced_doc.metadata.get("keywords", [])
+        keywords_str = ",".join(keywords) if isinstance(keywords, list) else str(keywords)
+        doc_summary = enhanced_doc.metadata.get("llm_summary", "")
+        
+        for ck in enhanced_doc.chunks:
+            info = chunk_status_map.get(ck.chunk_id)
+            if not info:
+                continue
+            db_id = info["db_id"]
+            # 跳过已完成的 chunks（resume 场景）
+            if info["status"] == "done":
+                continue
+            
+            ch_summary = chapter_summary_map.get(ck.chapter_title or "", "")
+            chunk_summary = ch_summary if ch_summary else doc_summary
+            if chunk_summary:
+                self.db.update_chunk_summary(db_id, chunk_summary)
+            if keywords_str:
+                self.db.update_chunk_keywords(db_id, keywords_str)
+            self.db.update_chunk_status(db_id, "done")
+        
+        # 3. 持久化图像分析结果到 chunk metadata
+        image_analyses = enhanced_doc.metadata.get("image_analyses", [])
+        for ia in image_analyses:
+            chunk_id = ia.get("chunk_id")
+            if not chunk_id or chunk_id not in chunk_status_map:
+                continue
+            info = chunk_status_map[chunk_id]
+            db_id = info["db_id"]
+            meta = info["metadata"]
+            imgs = meta.get("images", [])
+            for img in imgs:
+                if str(img.get("path")) == str(ia.get("path", "")):
+                    img["vision_desc"] = ia.get("analysis", "")
+                    break
+            else:
+                imgs.append({"path": ia.get("path", ""), "vision_desc": ia.get("analysis", "")})
+            meta["images"] = imgs
+            self.db.update_chunk_metadata(db_id, meta)
+        
+        # 4. 从关键词生成简单概念索引
+        for kw in keywords:
+            if kw and isinstance(kw, str):
+                self.db.upsert_concept(
+                    doc_id=doc_id,
+                    concept_name=kw,
+                    definition=f"关键词: {kw}",
+                )
+        
+        logger.info("LLM output persisted | doc_id=%s | chapters=%s | images=%s | keywords=%s",
+                   doc_id, len(chapter_summaries), len(image_analyses), len(keywords))
     
     def _llm_enhance_document(self, raw_doc: Document) -> Document:
         """使用 LLM 增强文档内容"""
@@ -263,13 +372,6 @@ class LLMAPIIngestionPipeline:
             "llm_provider": Config.LLM_PROVIDER,
             "thinking_enabled": Config.LLM_THINKING_ENABLED
         })
-        
-        # 6. 增强 chunk 内容（在原始内容前添加 LLM 总结）
-        if text_summary and raw_doc.chunks:
-            summary_prefix = f"[LLM 总结] {text_summary}\n\n[原文内容]\n\n"
-            for chunk in raw_doc.chunks:
-                if chunk.chunk_type == "text":
-                    chunk.content = summary_prefix + chunk.content
         
         logger.info(f"LLM 增强处理完成 | doc_id={raw_doc.doc_id} | summary_length={len(text_summary)}")
         return raw_doc
