@@ -1,17 +1,12 @@
 # work-docs-library Agent 指南
 
-> 本文档供 AI Coding Agent 阅读。假设读者对项目一无所知。
+> 本文档供 AI Coding Agent 阅读。假设读者对项目一无所知。详细说明见 `README.md`。
 
 ## 项目概述
 
 `work-docs-library` 是一个面向技术文档（PDF、Word、Excel）的自动化知识提取与检索 pipeline，以 **Kimi Code CLI Plugin（Skill）** 形式运行。
 
-核心能力：
-- 多格式文档解析（PDF 含图片/矢量图区域提取、DOCX、XLSX）
-- 结构化存储（SQLite 存储文档元数据、章节、文本块 chunk）
-- 向量语义索引（FAISS + Embedding API）
-- LLM 自动摘要与关键词生成
-- Agent 批量协作工作流（checkpoint/resume 的长文档摘要流水线）
+核心能力：多格式文档解析、SQLite 结构化存储、FAISS 向量语义索引、LLM 自动摘要、Agent 批量协作工作流（checkpoint/resume）。
 
 项目主要使用 **中文** 编写注释与文档。
 
@@ -19,15 +14,12 @@
 
 ## 技术栈与运行时架构
 
-### 技术栈
-
 | 层级 | 依赖 |
 |------|------|
-| 解析 | `pymupdf`（PDF 主解析）、`pdfplumber`、`PyPDF2`、`python-docx`、`openpyxl` |
-| 图像 | `Pillow`（压缩、格式转换） |
+| 解析 | `pymupdf`、`python-docx`、`openpyxl` |
 | 向量检索 | `faiss-cpu`、`numpy` |
 | 数据库 | SQLite（标准库 `sqlite3`） |
-| LLM API | `requests`（直接调用 OpenAI-compatible HTTP API） |
+| LLM API | `requests`（OpenAI-compatible HTTP API） |
 | 环境配置 | `python-dotenv` |
 | 测试 | `pytest` |
 
@@ -42,17 +34,15 @@
    - 前提：同时配置了 LLM 对话模型和 Embedding 模型
    - 行为：调用 `LLMAPIIngestionPipeline`，执行**两阶段处理**：
      - **Phase A**（Parse & Embed）：解析 → 存储 chunks → 嵌入 → `status="embedded"`
-     - **Phase B**（LLM Enhance）：层次化文本总结、图像详细分析、章节摘要生成 → 持久化到 DB → `status="done"`
+     - **Phase B**（LLM Enhance）：层次化文本总结、图像分析、章节摘要 → 持久化到 DB → `status="done"`
    - **断点续传**：若 Phase B 中断，再次 `ingest` 会检测到已有 `embedded` chunks 并跳过 Phase A 直接续传
    - 异常处理：任何阶段失败时文档状态变为 `"failed"`，不会卡住 `"processing"`
-   - 典型耗时：单章节总结 5–10 秒，层次化总结 15–30 秒，图像分析 3–5 秒/图
 
 2. **Agent Skill Flow**（高效批处理模式）
-   - 前提：仅配置了 Embedding 模型（LLM 配置缺失或被注释）
+   - 前提：仅配置了 Embedding 模型
    - 行为：调用 `CompatibilityIngestionPipeline`，仅执行向量化，不自动总结
    - 后续需通过 `agent_batch_helper.py` 将 pending chunk 分批导出，由外部 Agent 阅读并回写摘要
 
-**数据流**：
 ```
 文档 → Parser → Document/Chunk → SQLite
                  ↓
@@ -67,65 +57,54 @@
 
 ### 存储布局
 
-- `knowledge_base/workdocs.db` — SQLite 数据库（文档、chunk、章节摘要、概念索引）
+- `knowledge_base/workdocs.db` — SQLite 数据库（4 张表：documents、chunks、chapter_summaries、concept_index）
 - `knowledge_base/faiss.index` — FAISS 向量索引
 - `knowledge_base/id_map.json` — FAISS 内部 ID 到 chunk 的映射
 - `knowledge_base/images/<file_hash>/` — 从 PDF 提取的图片
 - `auto_batches/<doc_id>/` — `agent_batch_helper.py` 生成的批次文件（checkpoint/resume）
 
+> 完整数据库 Schema、数据流向、查询接口、FAISS 细节见 `README.md` → **数据库与存储架构**。
+
 ---
 
-## 数据库 Schema（开发者必读）
+## 数据库 Schema（开发者速查）
 
 ### `documents` — 文档元数据
 | 字段 | 类型 | 开发注意 |
 |------|------|----------|
-| `doc_id` | `TEXT PRIMARY KEY` | MD5 内容哈希，也是 `FlowSelector` 和 `reprocess` 的定位键 |
-| `title` | `TEXT` | 来自 `Path(file).stem` |
-| `source_path` | `TEXT UNIQUE` | 原始路径，`get_document_by_path()` 的查询键 |
-| `file_type` | `TEXT` | `.pdf` / `.docx` / `.xlsx` |
-| `total_pages` | `INTEGER` | PDF 页数，DOCX/XLSX 为 0 |
-| `chapters` | `TEXT` (JSON) | `PDFParser._toc_to_chapters()` 产出，无目录时默认为 `[{"title":"全文","start_page":1,"end_page":N}]` |
-| `chapters_override` | `TEXT` (JSON) | 人工覆盖，优先级高于 `chapters`；`ChapterEditor` 和 `chapter-edit` CLI 写入 |
-| `file_hash` | `TEXT` | 与 `doc_id` 相同（都是 MD5），用于变更检测和 `status="done"` 时的跳过逻辑 |
+| `doc_id` (PK) | `TEXT` | MD5 内容哈希，也是 `reprocess` 定位键 |
+| `source_path` (UNIQUE) | `TEXT` | `get_document_by_path()` 的查询键 |
+| `chapters` | `TEXT` (JSON) | 无目录时默认为 `[{"title":"全文","start_page":1,"end_page":N}]` |
+| `chapters_override` | `TEXT` (JSON) | 人工覆盖，优先级高于 `chapters` |
 | `status` | `TEXT` | `pending` → `processing` → `done` / `failed` / `embedded` |
 
-### `chunks` — 内容块（核心表，开发最频繁操作）
+### `chunks` — 内容块（核心表）
 | 字段 | 类型 | 开发注意 |
 |------|------|----------|
-| `id` | `INTEGER PRIMARY KEY AUTOINCREMENT` | **这就是 `chunk_db_id`**，FAISS `id_map` 映射的目标，也是 `get_content`、`apply` 的键 |
-| `doc_id` | `TEXT` | FK → `documents(doc_id)` |
-| `chunk_id` | `TEXT` | 逻辑 ID，如 `page_3_text`、`table_5`，parser 生成 |
-| `content` | `TEXT` | **原始提取内容，永不覆盖**。LLM 总结存在 `summary` 字段，不污染 content |
-| `chunk_type` | `TEXT` | `text` / `table` / `image_desc` / `summary`；`filter_config.json` 可针对 `image_desc` 跳过 |
-| `page_start` / `page_end` | `INTEGER` | `query_by_page()` 使用重叠判断：`page_start <= pe AND page_end >= ps` |
-| `chapter_title` | `TEXT` | 按页码范围匹配 `chapters` 分配；无目录时默认为 `"全文"` |
-| `keywords` | `TEXT` | JSON list 或逗号分隔；`_apply_json_file()` 写入时自动转为逗号分隔 |
-| `summary` | `TEXT` | Phase B 或 Agent 回写后才填充；初始为空字符串 |
-| `metadata` | `TEXT` (JSON) | **万能扩展字段**：`{"embedding": [...], "images": [{"path":"...","vision_desc":"..."}], "entities": [...]}` |
-| `status` | `TEXT` | `pending` → `embedded`（Phase A 完成）→ `done`（Phase B / Agent 完成）/ `skipped` / `failed` |
-| `created_at` | `TEXT` | `DEFAULT CURRENT_TIMESTAMP` |
+| `id` (PK) | `INTEGER AUTOINCREMENT` | **这就是 `chunk_db_id`**，FAISS `id_map` 映射目标，也是 `get_content`/`apply` 的键 |
+| `doc_id` (FK) | `TEXT` | → `documents(doc_id)` |
+| `chunk_id` | `TEXT` | 逻辑 ID，如 `page_3_text` |
+| `content` | `TEXT` | **原始提取内容，永不覆盖** |
+| `chunk_type` | `TEXT` | `text` / `table` / `image_desc` / `summary` |
+| `chapter_title` | `TEXT` | 无目录时默认为 `"全文"` |
+| `keywords` | `TEXT` | JSON list 或逗号分隔 |
+| `summary` | `TEXT` | Phase B 或 Agent 回写后才填充 |
+| `metadata` | `TEXT` (JSON) | `{"embedding": [...], "images": [{"path":"...","vision_desc":"..."}]}` |
+| `status` | `TEXT` | `pending` → `embedded` → `done` / `skipped` / `failed` |
 
-**关键索引**：
-- `idx_chunks_doc` on `doc_id`
-- `idx_chunks_type` on `chunk_type`
-- `idx_chunks_chapter` on `(doc_id, chapter_title)`
+**索引**：`idx_chunks_doc(doc_id)`、`idx_chunks_type(chunk_type)`、`idx_chunks_chapter(doc_id, chapter_title)`
 
 ### `chapter_summaries` — 章节级 LLM 摘要
 | 字段 | 开发注意 |
 |------|----------|
 | `doc_id` + `chapter_title` | 复合定位；`upsert_chapter_summary()` 使用 `ON CONFLICT` 更新 |
-| `summary` | 完整章节摘要，LLM API Flow 的 `_persist_llm_outputs()` 写入 |
-| `concepts` / `relationships` / `key_figures` / `key_tables` | JSON 列表；目前 LLM API Flow 写入空列表，留给未来扩展 |
+| `summary` | `_persist_llm_outputs()` 写入 |
 | `status` | `pending` / `done` |
 
 ### `concept_index` — 概念/关键词索引
 | 字段 | 开发注意 |
 |------|----------|
-| `doc_id` + `concept_name` (UNIQUE) | 每文档去重；`upsert_concept()` 使用 `ON CONFLICT IGNORE` |
-| `definition` | 目前为 `"关键词: {kw}"` 的简化定义 |
-| `first_mentioned_page` | 预留字段，当前未填充 |
-| `related_concepts` | JSON 列表，预留字段 |
+| `doc_id` + `concept_name` (UNIQUE) | `upsert_concept()` 使用 `ON CONFLICT IGNORE` |
 
 ### 数据流向（开发视角）
 
@@ -151,16 +130,18 @@ Parser → Document/Chunk → insert_chunk() → status="pending"
 
 ### 查询接口速查（KnowledgeDB 方法）
 
-| 方法 | 用途 | 状态依赖 |
-|------|------|----------|
-| `query_by_page(doc_id, ps, pe)` | 页码重叠查询 | 任意状态 |
-| `query_by_chapter(doc_id, title)` | 章节标题 LIKE 匹配 | 任意状态 |
-| `query_by_keyword(keyword)` | 关键词 LIKE 搜索 | 任意状态 |
-| `query_by_concept(doc_id, concept)` | 概念名联合搜索 | 任意状态 |
-| `get_chunk_by_db_id(db_id)` | 精确单条 | 任意状态 |
-| `get_embedded_but_unsummarized_chunks(doc_id?)` | **Agent Batch 核心**：获取待总结的 chunks | `status='embedded' AND summary IS NULL` |
-| `get_pending_chunks(doc_id?)` | 获取尚未嵌入的 chunks | `status='pending'` |
-| `update_chunk_metadata(db_id, metadata)` | 更新 chunk metadata JSON | 任意状态 |
+| 方法 | 用途 |
+|------|------|
+| `query_by_page(doc_id, ps, pe)` | 页码重叠查询 |
+| `query_by_chapter(doc_id, title)` | 章节标题 LIKE 匹配 |
+| `query_by_keyword(keyword)` | 关键词 LIKE 搜索 |
+| `query_by_concept(doc_id, concept)` | 概念名联合搜索 |
+| `get_chunk_by_db_id(db_id)` | 精确单条 |
+| `get_embedded_but_unsummarized_chunks(doc_id?)` | **Agent Batch 核心**：获取待总结的 chunks |
+| `get_pending_chunks(doc_id?)` | 获取尚未嵌入的 chunks |
+| `update_chunk_metadata(db_id, metadata)` | 更新 chunk metadata JSON |
+
+> 完整 Schema 说明、表关系图、原始数据 vs LLM 增强数据存储位置、状态生命周期、FAISS 细节见 `README.md` → **数据库与存储架构**。
 
 ---
 
@@ -168,42 +149,37 @@ Parser → Document/Chunk → insert_chunk() → status="pending"
 
 ```
 work-docs-library/
-├── plugin.json                   # Kimi CLI Plugin 定义（tools 接口）
+├── plugin.json                   # Kimi CLI Plugin 定义（10 个 tools）
 ├── scripts/
-│   ├── plugin_router.py          # Plugin 统一入口：读取 stdin JSON → 调用对应 tool → stdout JSON
-│   ├── main.py                   # 独立 CLI 主入口（支持 --validate-config、--dry-run）
-│   ├── doc_extractor.py          # 传统 CLI（ingest/status/query/search/toc/chapter-edit 等子命令）
+│   ├── plugin_router.py          # Plugin 统一入口：stdin JSON → stdout JSON
+│   ├── main.py                   # 独立 CLI 主入口
+│   ├── doc_extractor.py          # 传统 CLI（ingest/status/query/search/toc/chapter-edit…）
 │   ├── agent_batch_helper.py     # Agent 批量协作 CLI（list/dump/apply/filter/progress/auto）
-│   ├── auto_batch_summarizer.py  # 自动化批次总结辅助逻辑
 │   ├── requirements.txt          # Python 依赖
-│   ├── .env.example              # 环境变量模板
-│   ├── .env                      # 实际配置（gitignored，优先加载）
+│   ├── .env.example / .env       # 环境变量模板 / 实际配置（gitignored）
 │   ├── prompts/
 │   │   ├── summarize.txt         # LLM chunk 摘要提示词
 │   │   ├── structural_summarize.txt  # 章节级结构化摘要提示词
-│   │   └── filter_config.json    # 低价值内容过滤规则（always_skip / heuristic_skip）
+│   │   └── filter_config.json    # 低价值内容过滤规则
 │   ├── core/                     # 业务逻辑层
-│   │   ├── config.py             # 配置中心：读取 .env，定义 Config 类
-│   │   ├── flow_selector.py      # 智能流程选择器（LLM_API_FLOW / AGENT_SKILL_FLOW）
-│   │   ├── models.py             # 数据模型：Chapter、Chunk、Document（dataclass）
-│   │   ├── db.py                 # KnowledgeDB：SQLite 增删改查、事务管理
-│   │   ├── vector_index.py       # VectorIndex：FAISS 加载、添加、删除、搜索、持久化
-│   │   ├── pipeline.py           # IngestionPipeline：通用扫描→解析→chunk→嵌入→入库
-│   │   ├── llm_api_pipeline.py   # LLMAPIIngestionPipeline（LLM API Flow 专用）
+│   │   ├── config.py             # 配置中心
+│   │   ├── flow_selector.py      # 双模式流程选择器
+│   │   ├── models.py             # 数据模型：Chapter、Chunk、Document
+│   │   ├── db.py                 # KnowledgeDB：SQLite 增删改查
+│   │   ├── vector_index.py       # VectorIndex：FAISS 管理
+│   │   ├── pipeline.py           # IngestionPipeline：通用摄入管道
+│   │   ├── llm_api_pipeline.py   # LLMAPIIngestionPipeline（LLM API Flow）
 │   │   ├── compatibility_pipeline.py  # CompatibilityIngestionPipeline（Agent Skill Flow）
-│   │   ├── llm_chat_client.py    # LLMChatClient：对话/总结/图像分析专用客户端
-│   │   ├── embedding_client.py   # EmbeddingClient：向量化专用客户端（批处理、动态维度）
-│   │   ├── llm_client.py         # 旧版通用客户端（_BaseClient / ChatClient / EmbeddingClient），保持向后兼容
-│   │   ├── context_manager.py    # 上下文窗口管理（recent/keyword/smart/truncate 策略）
-│   │   └── chapter_editor.py     # ChapterEditor：基于 input() 的交互式章节增删改
+│   │   ├── llm_chat_client.py    # LLMChatClient：对话/总结/图像分析
+│   │   ├── embedding_client.py   # EmbeddingClient：向量化
+│   │   ├── llm_client.py         # 旧版通用客户端（向后兼容）
+│   │   ├── context_manager.py    # 上下文窗口管理
+│   │   └── chapter_editor.py     # 交互式章节编辑器
 │   ├── parsers/                  # IO / 解析层
-│   │   ├── pdf_parser.py         # PDFParser：基于 pymupdf，含大量启发式图表区域识别
-│   │   ├── office_parser.py      # OfficeParser：DOCX / XLSX 解析
-│   │   └── image_utils.py        # 图片压缩和格式转换
-│   └── tests/                    # pytest 测试集
-│       ├── conftest.py           # 全局 fixture（插入 sys.path、设置 caplog 级别）
-│       ├── fixtures/pdf_pages/   # 真实技术文档单页 PDF 测试样本（TI、AMBA、VCS 等）
-│       └── test_*.py             # 各模块测试（见下表）
+│   │   ├── pdf_parser.py         # PDF 解析器（pymupdf）
+│   │   ├── office_parser.py      # DOCX / XLSX 解析
+│   │   └── image_utils.py        # 图片压缩
+│   └── tests/                    # pytest 测试集（166 个用例）
 └── venv/                         # Python 虚拟环境
 ```
 
@@ -211,13 +187,13 @@ work-docs-library/
 
 | 模块 | 关键类/函数 | 职责 |
 |------|-------------|------|
-| `core/config.py` | `Config` | 统一读取 `.env`，所有配置项以 `WORKDOCS_` 为前缀的环境变量 |
+| `core/config.py` | `Config` | 统一读取 `.env`，所有配置项以 `WORKDOCS_` 为前缀 |
 | `core/flow_selector.py` | `FlowSelector` | 根据配置自动选择 `LLM_API_FLOW` 或 `AGENT_SKILL_FLOW` |
 | `core/models.py` | `Chapter`, `Chunk`, `Document` | 领域模型，使用 `dataclass` 定义 |
-| `core/db.py` | `KnowledgeDB` | SQLite 操作，使用参数化查询防注入，`_connect()` 为上下文管理器 |
-| `core/vector_index.py` | `VectorIndex` | FAISS 索引封装，支持维度不匹配时自动重建，兼容旧版 dict 格式 `id_map` |
+| `core/db.py` | `KnowledgeDB` | SQLite 操作，参数化查询防注入，`_connect()` 为上下文管理器 |
+| `core/vector_index.py` | `VectorIndex` | FAISS 索引封装，维度不匹配时自动重建，兼容旧版 dict 格式 `id_map` |
 | `core/pipeline.py` | `IngestionPipeline` | 通用摄入管道：扫描 → 解析 → chunk → 嵌入 → 入库 |
-| `core/llm_api_pipeline.py` | `LLMAPIIngestionPipeline` | LLM API Flow 专用，支持层次化总结和图像分析 |
+| `core/llm_api_pipeline.py` | `LLMAPIIngestionPipeline` | LLM API Flow 专用，两阶段处理，支持断点续传 |
 | `core/compatibility_pipeline.py` | `CompatibilityIngestionPipeline` | Agent Skill Flow 兼容管道，仅向量化 |
 | `core/llm_chat_client.py` | `LLMChatClient` | 对话客户端，支持聊天、总结、vision 描述、思考模式 |
 | `core/embedding_client.py` | `EmbeddingClient` | 向量化客户端，支持批处理、首次维度验证 |
@@ -227,8 +203,6 @@ work-docs-library/
 ---
 
 ## 构建与测试命令
-
-> ⚠️ **前置要求**：首次安装后必须创建 Python 虚拟环境并安装依赖，否则 Kimi CLI 调用插件工具时会因缺少依赖而失败。
 
 ### 环境准备
 
@@ -293,42 +267,26 @@ PYTHONPATH=scripts ./venv/bin/python scripts/agent_batch_helper.py auto --doc-id
 ## 代码风格指南
 
 ### 日志规范
-
-- **诊断/进度/错误信息统一使用 `logging`**，格式：
-  ```python
-  "%(asctime)s | %(levelname)-8s | %(name)s | %(message)s"
-  ```
-- CLI 格式化结果展示与交互式 TUI 保留 `print()`
-- 禁止随意使用 `print()` 输出调试信息
+- **诊断/进度/错误信息统一使用 `logging`**，格式：`"%(asctime)s | %(levelname)-8s | %(name)s | %(message)s"`
+- CLI 格式化结果展示保留 `print()`，禁止随意使用 `print()` 输出调试信息
 
 ### 类型与模型
-
 - 领域模型使用 `dataclass`（`Chapter`、`Chunk`、`Document`）
-- 类型注解覆盖较全，核心函数参数/返回值尽量标注
-- `Chunk.status` 枚举值：`pending`、`embedded`、`done`、`skipped`、`failed`
-- `Document.status` 枚举值：`pending`、`processing`、`done`、`failed`
+- `Chunk.status`：`pending`、`embedded`、`done`、`skipped`、`failed`
+- `Document.status`：`pending`、`processing`、`done`、`failed`
 
 ### 数据库安全
-
 - **所有 SQL 必须使用参数化查询**（`?` 占位符），禁止字符串拼接
-- `KnowledgeDB._connect()` 使用上下文管理器管理连接生命周期（`yield conn` + `conn.commit()` + `conn.close()`）
+- `KnowledgeDB._connect()` 使用上下文管理器管理连接生命周期
 
 ### 路径安全
-
-- 文件读取操作需校验路径在 skill 根目录内：
-  ```python
-  resolved = Path(path).resolve()
-  relative_to(skill_root)
-  ```
-- 已应用于 `write-embedding`、`agent_batch_helper apply --input` 等接口
+- 文件读取操作需校验路径在 skill 根目录内：`Path(path).resolve().relative_to(skill_root)`
 
 ### 配置访问
-
 - 统一通过 `core.config.Config` 读取环境变量
-- 数值型配置在类定义后通过 `_initialize_numeric_configs()` 初始化，支持安全解析（无效值自动回退到默认值并记录 warning）
+- 数值型配置通过 `_initialize_numeric_configs()` 初始化，无效值自动回退到默认值
 
 ### 向后兼容
-
 - `core/llm_client.py` 中的旧版客户端保留，供存量代码导入
 - 新代码优先使用 `core/llm_chat_client.py` 和 `core/embedding_client.py`
 
@@ -336,50 +294,23 @@ PYTHONPATH=scripts ./venv/bin/python scripts/agent_batch_helper.py auto --doc-id
 
 ## 测试策略
 
-### 测试结构
-
 | 测试文件 | 说明 |
 |----------|------|
-| `test_pdf_parser.py` | 图表提取核心测试（1117 行，44+ 用例），含真实 PDF 单页 fixtures |
-| `test_context_manager.py` | 上下文窗口管理测试（461 行） |
-| `test_doc_extractor.py` | CLI 功能、查询、搜索测试 |
-| `test_agent_batch_helper.py` | 批处理、断点续传、过滤规则测试 |
+| `test_pdf_parser.py` | 图表提取核心测试（44+ 用例） |
+| `test_plugin_router.py` | FlowSelector、get_content、失败恢复、断点续传（12 用例） |
+| `test_agent_batch_helper.py` | 批处理、断点续传、过滤规则、race condition |
 | `test_pipeline.py` | 文档处理流程测试 |
-| `test_db.py` | SQLite 操作、事务管理测试 |
-| `test_vector_index.py` | FAISS 索引增删查、持久化、维度迁移测试 |
-| `test_llm_client.py` | LLM 对话、总结、图像分析 Mock 测试 |
-| `test_dual_client.py` | 双客户端架构、配置验证、Kimi 适配测试 |
+| `test_db.py` | SQLite 操作、事务管理 |
+| `test_vector_index.py` | FAISS 索引增删查、持久化、维度迁移 |
+| `test_llm_client.py` | LLM 对话、总结、图像分析 Mock |
+| `test_dual_client.py` | 双客户端架构、配置验证、Kimi 适配 |
 | `test_integration.py` | 端到端集成测试 |
-| `test_chapter_editor.py` | 交互式章节编辑器测试 |
-| `test_office_parser.py` | DOCX/XLSX 解析测试 |
-| `test_image_utils.py` | 图片压缩工具测试 |
-| `test_models.py` | 数据模型序列化测试 |
-
-### 真实 Fixtures
-
-测试使用真实技术文档的单页 PDF：
-- TI DMA 控制器：`sprui07_page_*.pdf`
-- TI 处理器：`tms320f28035_page_*.pdf`
-- AMBA 总线规范：`amba_ahb_page_*.pdf`、`amba_axi_page_*.pdf`
-- VCS 用户指南：`vcs_ug_page_*.pdf`
-- Concept 用户指南：`spru430f_page_*.pdf`
 
 ### Mock 规范
-
 - 测试 LLM/Embedding 客户端时，**禁止直接调用真实 API**
 - 使用 `monkeypatch.setattr(Config, ...)` 而非 `monkeypatch.setenv` 来 mock 配置，避免 `.env` 加载顺序导致 mock 失效
 
----
-
-## 安全注意事项
-
-| 风险 | 等级 | 说明与缓解措施 |
-|------|------|----------------|
-| SQL 注入 | **低** | 全部使用参数化查询，无字符串拼接 |
-| 路径遍历 | **中→低** | `ingest --path` 功能上允许任意路径；`write-embedding` / `agent_batch_helper apply` 已增加 `resolve()` + `relative_to(skill_root)` 校验 |
-| API Key 泄漏 | **低** | Key 存储于 `.env`，未硬编码到代码中；`.env` 在 `.gitignore` 中 |
-| JSON 反序列化 | **低** | 使用标准库 `json.load()`，无自定义反序列化 |
-| 资源耗尽 | **中** | 大 PDF 的 diagram 渲染、大 DOCX 的单 chunk 合并可能消耗较多内存/磁盘；生产环境建议限制单文件大小 |
+> 完整测试分类、真实 fixtures 列表、性能指标见 `README.md` → **开发与测试**。
 
 ---
 
@@ -401,7 +332,7 @@ def _smart_batch(rows, target_chars=25000, max_chunks=12, min_chunks=3):
 2. **大章节拆分**：超出限制时按顺序拆分
 3. **尾部合并**：最后一个 batch 若 chunk 数 < `min_chunks`，合并到前一个 batch
 
-输出：`batch_map = [[db_id1, db_id2, ...], [db_id3, db_id4, ...], ...]`，持久化到 `checkpoint.json`。
+输出：`batch_map = [[db_id1, db_id2, ...], ...]`，持久化到 `checkpoint.json`。
 
 ### txt 文件格式
 
@@ -441,10 +372,7 @@ The AHB bus matrix supports up to 16 masters...
 ### 闭环流程
 
 1. `run_auto_summarize()` 写入 `batch_001.txt`
-2. Agent 阅读 txt，产出 `batch_001.json`：
-   ```json
-   [{"chunk_db_id": 47, "summary": "...", "keywords": "..."}]
-   ```
+2. Agent 阅读 txt，产出 `batch_001.json`：`[{"chunk_db_id": 47, "summary": "...", "keywords": "..."}]`
 3. 再次调用 `run_auto_summarize()`：
    - 发现 `batch_001.json` 存在
    - `_apply_json_file()` → `update_chunk_summary()` + `update_chunk_keywords()` + `set_chunk_done()`
@@ -459,6 +387,8 @@ The AHB bus matrix supports up to 16 masters...
 | 自动应用后 | ✅ | ❌（已删除） | ✅ |
 | 全部完成后 | ❌（全部删除） | ❌ | ❌ |
 
+> 完整的 batch 机制流程图、文件格式详细说明、图片注入逻辑见 `README.md` → **Agent Batch 机制详解**。
+
 ---
 
 ## 已知限制与常见陷阱
@@ -471,6 +401,10 @@ The AHB bus matrix supports up to 16 masters...
 6. **Embedding 维度不可变**：FAISS 索引创建后维度固定。更换模型导致维度变化时，必须删除旧索引并重新处理文档。
 7. **过滤规则**：`agent_batch_helper.py filter/auto` 依赖 `scripts/prompts/filter_config.json`，修改规则后无需重启，下次运行自动生效。
 8. **后台运行限制**：Kimi CLI 插件架构为单次 subprocess 调用，无法真正后台运行。超长文档依赖断点续传降低重试成本。
+
+> 安全性分析、代码风格详细分析见 `README.md` → **功能稳定性 / 安全性 / 代码风格分析**。
+
+---
 
 ## Plugin 工具速查
 

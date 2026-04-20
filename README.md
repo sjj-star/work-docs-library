@@ -977,8 +977,6 @@ PYTHONPATH=scripts ./venv/bin/python -m pytest scripts/tests/ -v
 
 ---
 
-## 功能稳定性 / 安全性 / 代码风格分析
-
 ### 稳定性分析
 
 **核心优势：**
