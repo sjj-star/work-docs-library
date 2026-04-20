@@ -29,13 +29,20 @@ def patched_config(monkeypatch, tmp_path):
     monkeypatch.setattr(Config, "FAISS_INDEX_PATH", kb / "faiss.index")
     monkeypatch.setattr(Config, "ID_MAP_PATH", kb / "id_map.json")
     monkeypatch.setattr(Config, "BATCH_SIZE", 2)
-    monkeypatch.setattr(Config, "EMBEDDING_DIM", 4)
+    monkeypatch.setattr(Config, "EMBEDDING_DIMENSION", 4)
     return tmp_path
 
 
 class FakeEmbedder:
+    def __init__(self):
+        self._dim_validated = True
+    
     def embed(self, texts):
         return [[1.0, 0.0, 0.0, 0.0] for _ in texts]
+    
+    def get_embedding_dimension(self):
+        return 4
+    
     def close(self):
         pass
 
@@ -228,7 +235,7 @@ def test_cmd_write_embedding(patched_config, monkeypatch, caplog):
     emb_file = patched_config / "emb.json"
     emb_file.write_text("[1.0, 0.0, 0.0, 0.0]", encoding="utf-8")
 
-    monkeypatch.setattr(doc_extractor.Config, "EMBEDDING_DIM", 4)
+    monkeypatch.setattr(doc_extractor.Config, "EMBEDDING_DIMENSION", 4)
     args = argparse.Namespace(chunk_db_id=cid, embedding_file=str(emb_file))
     doc_extractor.cmd_write_embedding(args)
     assert "Embedding written" in caplog.text
@@ -238,7 +245,7 @@ def test_cmd_write_embedding_outside_skill_rejected(patched_config, monkeypatch,
     import tempfile
     emb_file = Path(tempfile.gettempdir()) / "outside_emb.json"
     emb_file.write_text("[1.0, 0.0, 0.0, 0.0]", encoding="utf-8")
-    monkeypatch.setattr(doc_extractor.Config, "EMBEDDING_DIM", 4)
+    monkeypatch.setattr(doc_extractor.Config, "EMBEDDING_DIMENSION", 4)
     args = argparse.Namespace(chunk_db_id=1, embedding_file=str(emb_file))
     doc_extractor.cmd_write_embedding(args)
     assert "must be inside" in caplog.text or "outside skill directory" in caplog.text
@@ -248,7 +255,7 @@ def test_cmd_write_embedding_outside_skill_rejected(patched_config, monkeypatch,
 def test_cmd_write_embedding_bad_json(patched_config, monkeypatch, caplog):
     emb_file = patched_config / "bad_emb.json"
     emb_file.write_text("\"not an array\"", encoding="utf-8")
-    monkeypatch.setattr(doc_extractor.Config, "EMBEDDING_DIM", 4)
+    monkeypatch.setattr(doc_extractor.Config, "EMBEDDING_DIMENSION", 4)
     args = argparse.Namespace(chunk_db_id=1, embedding_file=str(emb_file))
     doc_extractor.cmd_write_embedding(args)
     assert "non-empty JSON array" in caplog.text

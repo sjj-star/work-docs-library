@@ -39,15 +39,13 @@ def test_remove_doc(make_index):
     assert 2 in ids
 
 
-def test_dimension_mismatch_rebuild(make_index):
+def test_dimension_mismatch_error(make_index):
+    """维度不匹配时应抛出错误，不允许自动重建"""
     vi = make_index(dim=4)
     vi.add(1, [1, 0, 0, 0])
-    # Adding a vector with different dimension rebuilds index
-    vi.add(2, [1, 0, 0, 0, 0, 0])
-    assert vi.dim == 6
-    results = vi.search([1, 0, 0, 0, 0, 0], top_k=2)
-    assert len(results) == 1
-    assert results[0][0] == 2
+    # 添加不同维度的向量应抛出 RuntimeError
+    with pytest.raises(RuntimeError, match="Cannot add vector with 6 dimensions"):
+        vi.add(2, [1, 0, 0, 0, 0, 0])
 
 
 def test_persistence(make_index, tmp_path):
