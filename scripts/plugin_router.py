@@ -13,6 +13,11 @@ from pathlib import Path
 _SKILL_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_SKILL_ROOT / "scripts"))
 
+# --- Auto-switch to venv Python if available ---
+_VENV_PYTHON = _SKILL_ROOT / "venv" / "bin" / "python3"
+if _VENV_PYTHON.exists() and sys.executable != str(_VENV_PYTHON):
+    os.execv(str(_VENV_PYTHON), [str(_VENV_PYTHON)] + sys.argv)
+
 from core.config import Config
 
 Config.setup_logging()
@@ -23,11 +28,27 @@ for handler in logging.root.handlers:
 logger = logging.getLogger("plugin_router")
 
 # Import agent_batch_helper helpers after path setup
-import agent_batch_helper as abh
-from core.db import KnowledgeDB
-from core.llm_client import EmbeddingClient
-from core.pipeline import IngestionPipeline
-from core.vector_index import VectorIndex
+try:
+    import agent_batch_helper as abh
+    from core.db import KnowledgeDB
+    from core.llm_client import EmbeddingClient
+    from core.pipeline import IngestionPipeline
+    from core.vector_index import VectorIndex
+except ImportError as e:
+    print(
+        json.dumps(
+            {
+                "success": False,
+                "error": (
+                    f"Missing Python dependencies or virtual environment: {e}. "
+                    f"Please run: cd {_SKILL_ROOT} && python3 -m venv venv && "
+                    f"source venv/bin/activate && pip install -r scripts/requirements.txt"
+                ),
+            },
+            ensure_ascii=False,
+        )
+    )
+    sys.exit(1)
 
 
 def _chunk_to_dict(ck, db, preview_len: int = 500):
