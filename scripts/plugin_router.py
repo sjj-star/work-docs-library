@@ -31,6 +31,7 @@ logger = logging.getLogger("plugin_router")
 try:
     import agent_batch_helper as abh
     from core.db import KnowledgeDB
+    from core.flow_selector import FlowSelector
     from core.llm_client import EmbeddingClient
     from core.pipeline import IngestionPipeline
     from core.vector_index import VectorIndex
@@ -86,7 +87,7 @@ def tool_ingest(params: dict):
         from core.compatibility_pipeline import CompatibilityIngestionPipeline
         pipe = CompatibilityIngestionPipeline()
     else:
-        pipe = IngestionPipeline()
+        pipe = FlowSelector.create_ingestion_pipeline()
     try:
         doc_ids = pipe.ingest(path, dry_run=dry_run, auto_chapter=auto_chapter)
         if not doc_ids:
@@ -258,7 +259,7 @@ def tool_progress(params: dict):
 def tool_reprocess(params: dict):
     doc_id = params.get("doc_id")
     Config.ensure_dirs()
-    pipe = IngestionPipeline()
+    pipe = FlowSelector.create_ingestion_pipeline()
     try:
         doc = pipe.db.get_document(doc_id)
         if not doc:
