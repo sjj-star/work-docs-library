@@ -7,7 +7,7 @@
       "name": "ingest",
       "description": "提取并存储文档到知识库，生成 embedding 和 chunk",
       "command": [
-        "python3",
+        "venv/bin/python3",
         "scripts/plugin_router.py",
         "ingest"
       ],
@@ -43,7 +43,7 @@
       "name": "search",
       "description": "基于 FAISS 的语义向量搜索",
       "command": [
-        "python3",
+        "venv/bin/python3",
         "scripts/plugin_router.py",
         "search"
       ],
@@ -69,7 +69,7 @@
       "name": "query",
       "description": "按页码、章节标题或关键词查询 chunk",
       "command": [
-        "python3",
+        "venv/bin/python3",
         "scripts/plugin_router.py",
         "query"
       ],
@@ -112,7 +112,7 @@
       "name": "status",
       "description": "列出已导入知识库的所有文档",
       "command": [
-        "python3",
+        "venv/bin/python3",
         "scripts/plugin_router.py",
         "status"
       ],
@@ -125,7 +125,7 @@
       "name": "toc",
       "description": "显示文档目录或按标题搜索文档",
       "command": [
-        "python3",
+        "venv/bin/python3",
         "scripts/plugin_router.py",
         "toc"
       ],
@@ -147,7 +147,7 @@
       "name": "auto_summarize",
       "description": "自动批量总结：过滤低价值页、生成 batch txt、断点续传",
       "command": [
-        "python3",
+        "venv/bin/python3",
         "scripts/plugin_router.py",
         "auto_summarize"
       ],
@@ -188,7 +188,7 @@
       "name": "synthesize_chapters",
       "description": "章节级综合：在 chunk 总结完成后，按章节生成结构化摘要、概念定义与关系图",
       "command": [
-        "python3",
+        "venv/bin/python3",
         "scripts/plugin_router.py",
         "synthesize_chapters"
       ],
@@ -214,7 +214,7 @@
       "name": "progress",
       "description": "显示文档的总结进度",
       "command": [
-        "python3",
+        "venv/bin/python3",
         "scripts/plugin_router.py",
         "progress"
       ],
@@ -235,7 +235,7 @@
       "name": "reprocess",
       "description": "强制重新处理文档",
       "command": [
-        "python3",
+        "venv/bin/python3",
         "scripts/plugin_router.py",
         "reprocess"
       ],
@@ -256,7 +256,7 @@
       "name": "get_content",
       "description": "获取文档的完整章节、页面或 chunk 原始内容（不截断）",
       "command": [
-        "python3",
+        "venv/bin/python3",
         "scripts/plugin_router.py",
         "get_content"
       ],
