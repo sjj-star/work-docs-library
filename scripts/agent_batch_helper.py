@@ -137,6 +137,18 @@ def _smart_batch(rows, target_chars: int = 25000, max_chunks: int = 12, min_chun
     2. If a chapter is too large, split it at semantic boundaries (respecting target/max).
     3. Merge very small orphan tails into the previous batch.
     """
+    # 输入验证
+    if target_chars <= 0:
+        raise ValueError(f"target_chars 必须大于 0，当前: {target_chars}")
+    
+    # 确保 max_chunks 至少为 min_chunks
+    if max_chunks < min_chunks:
+        logger.warning(f"max_chunks ({max_chunks}) 小于 min_chunks ({min_chunks})，自动调整为 {min_chunks}")
+        max_chunks = min_chunks
+    
+    if min_chunks < 1:
+        raise ValueError(f"min_chunks 必须大于等于 1，当前: {min_chunks}")
+    
     if not rows:
         return []
 
