@@ -12,8 +12,9 @@ logger = logging.getLogger(__name__)
 
 
 class VectorIndex:
-    def __init__(self, dim: Optional[int] = None, index_path: Optional[Path] = None, id_map_path: Optional[Path] = None) -> None:
-        self.dim = dim or Config.EMBEDDING_DIM
+    def __init__(self, dim: int, index_path: Optional[Path] = None, id_map_path: Optional[Path] = None) -> None:
+        # dim 为必需参数，由调用方传入（通常为 EmbeddingClient 探测到的实际维度）
+        self.dim = dim
         self.index_path = index_path or Config.FAISS_INDEX_PATH
         self.id_map_path = id_map_path or Config.ID_MAP_PATH
         self._index: Optional[faiss.IndexFlatIP] = None
@@ -25,8 +26,16 @@ class VectorIndex:
             self._index = faiss.read_index(str(self.index_path))
             actual_dim = self._index.d
             if actual_dim != self.dim:
-                logger.warning("VectorIndex dim mismatch | existing=%s config=%s | adapting to existing", actual_dim, self.dim)
-                self.dim = actual_dim
+                # 严格错误：维度不匹配时直接失败，不允许自动调整
+                raise RuntimeError(
+                    f"VectorIndex dimension mismatch: existing index has {actual_dim} "
+                    f"dimensions, but the embedding model produces {self.dim} dimensions. "
+                    f"FAISS index dimensions cannot be changed after creation.\n"
+                    f"You must either:\n"
+                    f"  1. Update WORKDOCS_EMBEDDING_DIMENSION to {actual_dim} (if your model supports it)\n"
+                    f"  2. Delete the existing index at {self.index_path} and re-ingest all documents\n"
+                    f"  3. Switch back to a model that produces {actual_dim} dimensions"
+                )
         else:
             self._index = faiss.IndexFlatIP(self.dim)
         if Path(self.id_map_path).exists():
@@ -53,10 +62,11 @@ class VectorIndex:
         vec = np.array([vector], dtype=np.float32)
         actual_dim = vec.shape[1]
         if self._index.d != actual_dim:
-            logger.warning("VectorIndex rebuilding | from_dim=%s to_dim=%s", self._index.d, actual_dim)
-            self._index = faiss.IndexFlatIP(actual_dim)
-            self.dim = actual_dim
-            self._id_map = []
+            # 严格错误：添加不同维度的向量时直接失败
+            raise RuntimeError(
+                f"Cannot add vector with {actual_dim} dimensions to index with {self._index.d} dimensions. "
+                f"All vectors must have the same dimension as the index."
+            )
         faiss.normalize_L2(vec)
         self._index.add(vec)
         self._id_map.append(chunk_db_id)
