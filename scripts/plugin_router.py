@@ -248,6 +248,87 @@ def tool_reprocess(params: dict):
         pipe.close()
 
 
+def tool_get_content(params: dict):
+    Config.ensure_dirs()
+    db = KnowledgeDB()
+    doc_id = params.get("doc_id")
+    page = params.get("page")
+    chapter = params.get("chapter")
+    chunk_db_id = params.get("chunk_db_id")
+
+    if chunk_db_id is not None:
+        chunk = db.get_chunk_by_db_id(int(chunk_db_id))
+        if not chunk:
+            return {"success": False, "error": f"Chunk {chunk_db_id} not found."}
+        return {
+            "success": True,
+            "query_type": "chunk",
+            "doc_id": chunk.doc_id,
+            "chunk_db_id": chunk_db_id,
+            "chunk_id": chunk.chunk_id,
+            "page_start": chunk.page_start,
+            "page_end": chunk.page_end,
+            "chapter_title": chunk.chapter_title,
+            "content": chunk.content,
+            "total_chars": len(chunk.content),
+            "chunks": [
+                {
+                    "chunk_db_id": chunk_db_id,
+                    "chunk_id": chunk.chunk_id,
+                    "page_start": chunk.page_start,
+                    "page_end": chunk.page_end,
+                    "chapter_title": chunk.chapter_title,
+                }
+            ],
+        }
+
+    if page:
+        ps, pe = _parse_page(page)
+        chunks = db.query_by_page(doc_id, ps, pe)
+        query_type = "page"
+    elif chapter:
+        chunks = db.query_by_chapter(doc_id, chapter)
+        query_type = "chapter"
+    else:
+        return {"success": False, "error": "Provide page, chapter, or chunk_db_id."}
+
+    if not chunks:
+        return {"success": False, "error": "No content found for the given query."}
+
+    chunks.sort(key=lambda ck: (ck.page_start, ck.chunk_id))
+    parts = []
+    chunk_meta = []
+    with db._connect() as conn:
+        for ck in chunks:
+            parts.append(ck.content)
+            row = conn.execute(
+                "SELECT id FROM chunks WHERE doc_id = ? AND chunk_id = ?",
+                (ck.doc_id, ck.chunk_id),
+            ).fetchone()
+            chunk_meta.append({
+                "chunk_db_id": row["id"] if row else None,
+                "chunk_id": ck.chunk_id,
+                "page_start": ck.page_start,
+                "page_end": ck.page_end,
+                "chapter_title": ck.chapter_title,
+            })
+
+    full_content = "\n\n---\n\n".join(parts)
+    first = chunks[0]
+    last = chunks[-1]
+    return {
+        "success": True,
+        "query_type": query_type,
+        "doc_id": first.doc_id,
+        "chapter_title": first.chapter_title,
+        "page_start": first.page_start,
+        "page_end": last.page_end,
+        "content": full_content,
+        "total_chars": len(full_content),
+        "chunks": chunk_meta,
+    }
+
+
 def tool_auto_summarize(params: dict):
     Config.ensure_dirs()
     doc_id = params["doc_id"]
@@ -307,6 +388,7 @@ TOOL_MAP = {
     "synthesize_chapters": tool_synthesize_chapters,
     "progress": tool_progress,
     "reprocess": tool_reprocess,
+    "get_content": tool_get_content,
 }
 
 

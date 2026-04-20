@@ -251,6 +251,36 @@
           "doc_id"
         ]
       }
+    },
+    {
+      "name": "get_content",
+      "description": "获取文档的完整章节、页面或 chunk 原始内容（不截断）",
+      "command": [
+        "venv/bin/python3",
+        "scripts/plugin_router.py",
+        "get_content"
+      ],
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "doc_id": {
+            "type": "string",
+            "description": "文档 ID（查询 chapter/page 时必填）"
+          },
+          "page": {
+            "type": "string",
+            "description": "页码范围如 50-60"
+          },
+          "chapter": {
+            "type": "string",
+            "description": "章节标题子串匹配"
+          },
+          "chunk_db_id": {
+            "type": "integer",
+            "description": "Chunk 数据库 ID"
+          }
+        }
+      }
     }
   ],
   "runtime": {
