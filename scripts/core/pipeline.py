@@ -20,19 +20,38 @@ logger = logging.getLogger(__name__)
 class IngestionPipeline:
     def __init__(self, db: Optional[KnowledgeDB] = None, vec: Optional[VectorIndex] = None) -> None:
         self.db = db or KnowledgeDB()
-        self.vec = vec or VectorIndex()
+        self._vec_override = vec  # 用户提供的 VectorIndex 实例
+        self._vec: Optional[VectorIndex] = None  # 延迟初始化
         self.embedder: Optional[EmbeddingClient] = None
         try:
             # 使用新的独立 Embedding 客户端
             self.embedder = EmbeddingClient()
         except RuntimeError:
             self.embedder = None
-
+        
         self.parsers = {
             ".pdf": PDFParser(),
             ".docx": OfficeParser(),
             ".xlsx": OfficeParser(),
         }
+    
+    @property
+    def vec(self) -> VectorIndex:
+        """延迟初始化的 VectorIndex，在首次访问时创建"""
+        if self._vec is None:
+            if self._vec_override is not None:
+                self._vec = self._vec_override
+            elif self.embedder is not None and self.embedder._dim_validated:
+                # 使用 EmbeddingClient 探测到的实际维度
+                self._vec = VectorIndex(dim=self.embedder.get_embedding_dimension())
+            else:
+                # 无法探测维度时的回退：使用配置中的维度
+                self._vec = VectorIndex(dim=Config.EMBEDDING_DIMENSION)
+        return self._vec
+    
+    @vec.setter
+    def vec(self, value: VectorIndex) -> None:
+        self._vec = value
 
     def scan(self, path: str) -> List[str]:
         p = Path(path)

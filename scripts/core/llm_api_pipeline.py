@@ -14,6 +14,7 @@ from .vector_index import VectorIndex
 from .models import Chunk, Document
 from .llm_chat_client import LLMChatClient
 from .embedding_client import EmbeddingClient
+from .context_manager import get_context_manager, ContextWindowManager
 from parsers.pdf_parser import PDFParser
 from parsers.office_parser import OfficeParser
 
@@ -41,6 +42,10 @@ class LLMAPIIngestionPipeline:
         except RuntimeError as e:
             logger.warning(f"Embedding 客户端初始化失败: {e}")
             self.embedder = None
+        
+        # 上下文管理器
+        self.context_manager = get_context_manager()
+        logger.info("上下文窗口管理器已初始化")
         
         self.parsers = {
             ".pdf": PDFParser(),
@@ -219,7 +224,11 @@ class LLMAPIIngestionPipeline:
         return raw_doc
     
     def _hierarchical_summarize(self, doc: Document) -> str:
-        """层次化文档总结"""
+        """层次化文档总结 - 使用上下文管理器优化"""
+        if not self.llm_client:
+            logger.warning("LLM 客户端不可用，跳过文档总结")
+            return ""
+        
         # 收集所有文本内容
         all_text = []
         for chunk in doc.chunks:
@@ -231,6 +240,14 @@ class LLMAPIIngestionPipeline:
         
         full_text = "\n\n".join(all_text)
         
+        # 估算总 token 数
+        estimated_tokens = self.context_manager.estimate_tokens(full_text)
+        max_tokens = self.context_manager.model_params["max_tokens"]
+        
+        if estimated_tokens <= max_tokens * 0.8:
+            # 文本较短，直接总结
+            return self.llm_client.summarize(full_text)["summary"]
+        
         # 智能分块（按段落边界）
         chunks = self._smart_chunking(full_text, max_size=6000)
         
@@ -240,8 +257,16 @@ class LLMAPIIngestionPipeline:
         # 层次化总结
         chunk_summaries = []
         for i, chunk in enumerate(chunks):
+            logger.debug(f"总结块 {i+1}/{len(chunks)}")
             summary = self.llm_client.summarize(chunk)["summary"]
             chunk_summaries.append(f"部分{i+1}: {summary}")
+        
+        # 验证每个摘要非空
+        chunk_summaries = [s for s in chunk_summaries if s]
+        
+        if not chunk_summaries:
+            logger.error("所有块的总结都为空")
+            return ""
         
         # 最终汇总
         combined = "\n\n".join(chunk_summaries)
@@ -319,10 +344,38 @@ class LLMAPIIngestionPipeline:
         return image_analyses
     
     def _generate_chapter_summaries(self, doc: Document) -> List[Dict[str, Any]]:
-        """生成章节摘要"""
+        """生成章节摘要 - 使用递归章节总结"""
         if not self.llm_client or not doc.chapters:
             return []
         
+        if len(doc.chapters) < 2:
+            # 章节数较少，使用普通章节摘要
+            return self._generate_simple_chapter_summaries(doc)
+        
+        # 使用递归章节总结
+        try:
+            # 调用递归章节总结
+            final_summary = self._recursive_chapter_summarization(doc)
+            
+            if not final_summary:
+                logger.warning("递归章节总结返回空结果，使用普通章节摘要")
+                return self._generate_simple_chapter_summaries(doc)
+            
+            # 从元数据获取章节摘要
+            chapter_summaries = doc.metadata.get("recursive_chapter_summaries", [])
+            
+            if not chapter_summaries:
+                logger.warning("未找到递归章节摘要，使用普通章节摘要")
+                return self._generate_simple_chapter_summaries(doc)
+            
+            return chapter_summaries
+            
+        except Exception as e:
+            logger.error(f"递归章节总结失败: {e}，回退到普通章节摘要")
+            return self._generate_simple_chapter_summaries(doc)
+    
+    def _generate_simple_chapter_summaries(self, doc: Document) -> List[Dict[str, Any]]:
+        """生成普通章节摘要（不使用递归）"""
         chapter_summaries = []
         
         for chapter in doc.chapters:
@@ -402,9 +455,161 @@ class LLMAPIIngestionPipeline:
             logger.error(f"关键词提取失败 | error={e}")
             return []
     
+    def _recursive_chapter_summarization(self, doc: Document) -> str:
+        """
+        递归式章节总结 - 使用上下文管理器优化章节感知的总结
+        """
+        if not self.llm_client:
+            logger.warning("LLM 客户端不可用，退回到普通层次化总结")
+            return self._hierarchical_summarize(doc)
+        
+        if not doc.chapters or len(doc.chapters) < 2:
+            logger.debug("文档章节数 < 2，使用普通层次化总结")
+            return self._hierarchical_summarize(doc)
+        
+        logger.info(f"开始递归章节总结 | doc_id={doc.doc_id} | chapters={len(doc.chapters)}")
+        
+        # 1. 按章节收集内容
+        chapter_contents = self._collect_chapter_contents(doc)
+        
+        # 2. 生成章节摘要
+        chapter_summaries = []
+        previous_summaries = []
+        
+        for i, (chapter, content) in enumerate(chapter_contents):
+            if not content.strip():
+                previous_summaries.append("")
+                continue
+            
+            # 构建上下文
+            context = self.context_manager.calculate_optimal_context(
+                content=content,
+                chapter_index=i,
+                previous_summaries=previous_summaries
+            )
+            
+            # 生成章节摘要
+            chapter_summary = self._generate_chapter_summary(
+                chapter_title=chapter.title,
+                context=context,
+                chapter_index=i,
+                total_chapters=len(chapter_contents)
+            )
+            
+            if chapter_summary:
+                chapter_summaries.append({
+                    "chapter": chapter.title,
+                    "summary": chapter_summary,
+                    "index": i
+                })
+                previous_summaries.append(chapter_summary)
+        
+        if not chapter_summaries:
+            return self._hierarchical_summarize(doc)
+        
+        # 3. 递归聚合
+        final_summary = self._recursive_summary_aggregation(chapter_summaries)
+        
+        # 4. 保存到元数据
+        doc.metadata.update({
+            "recursive_chapter_summaries": chapter_summaries
+        })
+        
+        return final_summary
+    
+    def _collect_chapter_contents(self, doc: Document) -> List[tuple]:
+        """按章节收集内容"""
+        if not doc.chapters:
+            return []
+        
+        chapter_contents = []
+        for chapter in doc.chapters:
+            chapter_texts = []
+            for chunk in doc.chunks:
+                if (chunk.chapter_title == chapter.title and 
+                    chunk.chunk_type == "text" and 
+                    chunk.content.strip()):
+                    chapter_texts.append(chunk.content)
+            
+            combined_content = "\n\n".join(chapter_texts)
+            chapter_contents.append((chapter, combined_content))
+        
+        return chapter_contents
+    
+    def _generate_chapter_summary(self, chapter_title: str, context: str,
+                                chapter_index: int, total_chapters: int) -> str:
+        """生成章节摘要"""
+        if not self.llm_client:
+            return ""
+        
+        prompt = f"""请对第 {chapter_index + 1}/{total_chapters} 章进行总结：
+
+章节标题：{chapter_title}
+
+上下文：
+{context}
+
+总结："""
+        
+        try:
+            return self.llm_client.chat([{"role": "user", "content": prompt}]).strip()
+        except Exception as e:
+            logger.error(f"章节摘要生成失败: {e}")
+            return ""
+    
+    def _recursive_summary_aggregation(self, chapter_summaries: List[Dict]) -> str:
+        """递归生成摘要的摘要"""
+        if len(chapter_summaries) <= 3:
+            return self._direct_summary_aggregation(chapter_summaries)
+        
+        return self._grouped_recursive_aggregation(chapter_summaries)
+    
+    def _direct_summary_aggregation(self, chapter_summaries: List[Dict]) -> str:
+        """直接汇总"""
+        if not self.llm_client:
+            return ""
+        
+        combined = "\n\n".join([
+            f"第{s['index'] + 1}章 {s['chapter']}:\n{s['summary']}"
+            for s in chapter_summaries
+        ])
+        
+        prompt = f"""对以下章节摘要进行汇总总结：
+
+{combined}
+
+整体总结："""
+        
+        try:
+            return self.llm_client.chat([{"role": "user", "content": prompt}]).strip()
+        except Exception as e:
+            logger.error(f"汇总失败: {e}")
+            return "\n\n".join([s["summary"] for s in chapter_summaries])
+    
+    def _grouped_recursive_aggregation(self, chapter_summaries: List[Dict]) -> str:
+        """分组递归聚合"""
+        group_size = 4
+        groups = [chapter_summaries[i:i+group_size] for i in range(0, len(chapter_summaries), group_size)]
+        
+        group_summaries = []
+        for i, group in enumerate(groups):
+            group_summary = self._direct_summary_aggregation(group)
+            group_summaries.append({
+                "chapter": f"组{i+1}",
+                "summary": group_summary,
+                "index": i
+            })
+        
+        if len(group_summaries) > 3:
+            return self._grouped_recursive_aggregation(group_summaries)
+        else:
+            return self._direct_summary_aggregation(group_summaries)
+    
     def close(self) -> None:
         """关闭资源"""
         if self.llm_client:
             self.llm_client.close()
         if self.embedder:
             self.embedder.close()
+        if self.context_manager:
+            self.context_manager.close()

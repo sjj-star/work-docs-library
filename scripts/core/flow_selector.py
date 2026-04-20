@@ -109,7 +109,7 @@ class FlowSelector:
                 "embedding_provider": Config.EMBEDDING_PROVIDER,
                 "embedding_model": Config.EMBEDDING_MODEL,
                 "embedding_base_url": Config.EMBEDDING_BASE_URL,
-                "embedding_dim": Config.EMBEDDING_DIM,
+                "embedding_dimension": Config.EMBEDDING_DIMENSION,
             })
         
         return capabilities

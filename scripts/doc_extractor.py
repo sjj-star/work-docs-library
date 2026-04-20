@@ -70,14 +70,15 @@ def cmd_query(args):
 def cmd_search(args):
     Config.ensure_dirs()
     db = KnowledgeDB()
-    vec = VectorIndex()
     try:
         embedder = EmbeddingClient()
     except RuntimeError as e:
         logger.error("Failed to initialize embedder: %s", e)
         return
     try:
+        # 先调用 embed 探测维度，再用探测到的维度创建 VectorIndex
         emb = embedder.embed([args.text])[0]
+        vec = VectorIndex(dim=len(emb))
         hits = vec.search(emb, top_k=args.top_k)
         print(f"Vector search top-{args.top_k} results:\n")
         for db_id, score in hits:
@@ -121,7 +122,6 @@ def cmd_write_keywords(args):
 def cmd_write_embedding(args):
     import json
     db = KnowledgeDB()
-    vec = VectorIndex()
 
     file_path = Path(args.embedding_file).resolve()
     skill_root = Config.DB_PATH.parent.parent.resolve()
@@ -137,12 +137,12 @@ def cmd_write_embedding(args):
     if not isinstance(emb, list) or not emb:
         logger.error("Embedding must be a non-empty JSON array of floats")
         return
-    if len(emb) != Config.EMBEDDING_DIM:
-        logger.error("Embedding dimension mismatch | expected=%s got=%s", Config.EMBEDDING_DIM, len(emb))
-        return
     if not all(isinstance(x, (int, float)) for x in emb):
         logger.error("Embedding must contain only numeric values")
         return
+
+    # 使用 embedding 的实际维度创建 VectorIndex
+    vec = VectorIndex(dim=len(emb))
 
     db.update_chunk_embedding(args.chunk_db_id, emb)
     vec.add(args.chunk_db_id, emb)
@@ -192,10 +192,41 @@ def cmd_reprocess(args):
 
 
 def _parse_page(page_str: str):
+    """解析页码范围字符串，支持格式: '5' 或 '10-20'"""
+    import re
+    
+    if not page_str or not isinstance(page_str, str):
+        raise ValueError(f"页码必须是字符串，当前类型: {type(page_str)}")
+    
+    page_str = page_str.strip()
+    
     if "-" in page_str:
+        # 验证格式
+        if not re.match(r"^\d+-\d+$", page_str):
+            raise ValueError(f"页码范围格式无效，应为 'start-end': {page_str}")
+        
         a, b = page_str.split("-", 1)
-        return int(a), int(b)
-    p = int(page_str)
+        try:
+            start, end = int(a), int(b)
+        except ValueError:
+            raise ValueError(f"页码必须是数字: {page_str}")
+        
+        if start > end:
+            raise ValueError(f"起始页码不能大于结束页码: {start} > {end}")
+        if start < 1:
+            raise ValueError(f"页码必须大于等于 1: {start}")
+        
+        return start, end
+    
+    # 单个页码
+    try:
+        p = int(page_str)
+    except ValueError:
+        raise ValueError(f"页码必须是数字: {page_str}")
+    
+    if p < 1:
+        raise ValueError(f"页码必须大于等于 1: {p}")
+    
     return p, p
 
 
