@@ -15,6 +15,24 @@ logger = logging.getLogger(__name__)
 class LLMChatClient:
     """LLM 对话专用客户端 - 使用独立的 LLM 配置"""
     
+    # 类常量 - Magic Number 提取
+    MAX_RETRY_ATTEMPTS = 3           # 最大重试次数
+    RETRY_BACKOFF_BASE = 2           # 指数退避基数（秒）
+    DEFAULT_TIMEOUT = 120            # 默认超时时间（秒）
+    MAX_INPUT_CHARS = 12000          # 最大输入字符数（避免超限）
+    THINKING_BUDGET = 1024           # 思考模式 token 预算
+    DEFAULT_SUMMARY_MAX_TOKENS = 1000  # 默认摘要最大 token 数
+    SUMMARY_TARGET_LENGTH = 250      # 摘要目标长度（字）
+    
+    # MIME 类型映射
+    IMAGE_MIME_TYPES = {
+        "jpg": "image/jpeg",
+        "jpeg": "image/jpeg", 
+        "png": "image/png",
+        "webp": "image/webp"
+    }
+    DEFAULT_IMAGE_MIME = "image/webp"  # 默认图片 MIME 类型
+    
     def __init__(self, provider: Optional[str] = None, api_key: Optional[str] = None, 
                  base_url: Optional[str] = None, model: Optional[str] = None) -> None:
         self.provider = (provider or Config.LLM_PROVIDER).lower()
@@ -36,10 +54,11 @@ class LLMChatClient:
         
         self._session = requests.Session()
     
-    def _post(self, url: str, payload: dict, timeout: int = 120) -> dict:
+    def _post(self, url: str, payload: dict, timeout: int = None) -> dict:
         """发送 POST 请求，带重试机制"""
+        timeout = timeout or self.DEFAULT_TIMEOUT
         last_exc = None
-        for attempt in range(3):
+        for attempt in range(self.MAX_RETRY_ATTEMPTS):
             try:
                 resp = self._session.post(
                     url,
@@ -52,7 +71,7 @@ class LLMChatClient:
             except Exception as e:
                 last_exc = e
                 import time
-                time.sleep(2 ** attempt)
+                time.sleep(self.RETRY_BACKOFF_BASE ** attempt)
         raise last_exc
     
     def chat(self, messages: List[dict], temperature: float = 0.3, **kwargs) -> str:
@@ -71,7 +90,7 @@ class LLMChatClient:
         
         # 添加思考模式支持
         if self.thinking_enabled and "extra_body" not in kwargs:
-            kwargs["extra_body"] = {"thinking": {"type": "enabled", "budget": 1024}}
+            kwargs["extra_body"] = {"thinking": {"type": "enabled", "budget": self.THINKING_BUDGET}}
         
         # 合并额外参数
         data.update(kwargs)
@@ -85,10 +104,11 @@ class LLMChatClient:
         if self.provider == "kimi" and self.model.startswith("kimi"):
             logger.warning("Kimi 模型不支持思考模式，回退到普通对话")
             return self.chat(messages)
-        return self.chat(messages, temperature, extra_body={"thinking": {"type": "enabled", "budget": 1024}})
+        return self.chat(messages, temperature, extra_body={"thinking": {"type": "enabled", "budget": self.THINKING_BUDGET}})
     
-    def summarize(self, text: str, max_tokens: int = 1000, prompt_template: Optional[str] = None) -> dict:
+    def summarize(self, text: str, max_tokens: int = None, prompt_template: Optional[str] = None) -> dict:
         """智能文本总结"""
+        max_tokens = max_tokens or self.DEFAULT_SUMMARY_MAX_TOKENS
         system_prompt = """你是一个技术文档分析专家。请对以下内容进行结构化总结，格式如下：
 
 Summary: [用中文提供简洁的技术总结，200-300字]
@@ -98,7 +118,7 @@ Keywords: [关键词1, 关键词2, 关键词3]
 请确保总结准确、专业，突出技术要点。"""
         
         user_prompt = prompt_template or "请总结以下技术文档内容：\n\n{{text}}"
-        content = user_prompt.replace("{{text}}", text[:12000])  # 截断避免超限
+        content = user_prompt.replace("{{text}}", text[:self.MAX_INPUT_CHARS])  # 截断避免超限
         
         messages = [
             {"role": "system", "content": system_prompt},
@@ -138,7 +158,7 @@ Keywords: [关键词1, 关键词2, 关键词3]
             b64 = base64.b64encode(f.read()).decode("utf-8")
         
         ext = image_path.split(".")[-1].lower()
-        mime = "image/jpeg" if ext in ("jpg", "jpeg") else "image/png" if ext == "png" else "image/webp"
+        mime = self.IMAGE_MIME_TYPES.get(ext, self.DEFAULT_IMAGE_MIME)
         
         messages = [
             {
@@ -169,10 +189,6 @@ Keywords: [关键词1, 关键词2, 关键词3]
         # 第二层：总结汇总
         combined = "\n\n".join(chunk_summaries)
         return self.summarize(combined, max_tokens=max_tokens_per_chunk * 2)["summary"]
-    
-    def close(self) -> None:
-        """关闭会话"""
-        self._session.close()
     
     def close(self) -> None:
         """关闭会话"""
