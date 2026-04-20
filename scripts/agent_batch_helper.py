@@ -282,6 +282,8 @@ def _cleanup_orphan_files(out_dir: Path, batch_map: list) -> int:
     valid_batch_ids = {i + 1 for i in range(len(batch_map))}
     batch_id_to_set = {i + 1: set(ids) for i, ids in enumerate(batch_map)}
 
+    import time
+    now = time.time()
     for fpath in list(out_dir.glob("batch_*.txt")) + list(out_dir.glob("batch_*.json")):
         m = re.match(r"batch_(\d{3})\.(txt|json)$", fpath.name)
         if not m:
@@ -290,6 +292,7 @@ def _cleanup_orphan_files(out_dir: Path, batch_map: list) -> int:
         ext = m.group(2)
 
         if idx not in valid_batch_ids:
+            # Orphan files outside valid batch range are deleted immediately
             fpath.unlink(missing_ok=True)
             cleaned += 1
             continue
@@ -301,6 +304,16 @@ def _cleanup_orphan_files(out_dir: Path, batch_map: list) -> int:
                 if isinstance(data, list):
                     json_ids = {item.get("chunk_db_id") for item in data if isinstance(item, dict) and item.get("chunk_db_id") is not None}
                     if not json_ids.issubset(batch_id_to_set[idx]):
+                        # Conservative guard for stale-but-valid-index JSONs:
+                        # skip deletion if modified within the last 3 seconds
+                        # to avoid deleting JSONs that a background Agent is still writing.
+                        try:
+                            mtime = fpath.stat().st_mtime
+                            if now - mtime < 3:
+                                logger.debug("Skipped stale cleanup for recently modified JSON | file=%s | age=%.2fs", fpath.name, now - mtime)
+                                continue
+                        except Exception:
+                            pass
                         fpath.unlink(missing_ok=True)
                         cleaned += 1
                         # Also delete the paired txt so it gets rewritten cleanly
