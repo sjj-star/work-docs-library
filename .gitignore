@@ -7,6 +7,9 @@ __pycache__/
 venv/
 .env
 
+# Plugin credential injection (Kimi CLI writes OAuth token here)
+config.json
+
 # Testing
 .pytest_cache/
 .coverage
