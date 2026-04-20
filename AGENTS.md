@@ -391,6 +391,80 @@ The AHB bus matrix supports up to 16 masters...
 
 ---
 
+## 章节综合机制（`synthesize_chapters`）
+
+`synthesize_chapters` 与 `auto_summarize` 是**两个独立的 Agent 协作流水线**，执行顺序上 `auto_summarize` 先、`synthesize_chapters` 后。
+
+| 对比项 | `auto_summarize` | `synthesize_chapters` |
+|--------|-----------------|----------------------|
+| **处理对象** | 单个 chunk（`status='embedded'`） | 整个章节（多个 `status='done'` 的 chunk 聚合） |
+| **输入** | chunk 原始 `content` | chunk 的 `summary`、`entities`、`relationships`、`vision_insights` |
+| **输出** | chunk 级 `summary` + `keywords` | 章节级结构化摘要：`summary`、`concepts`、`relationships`、`key_figures`、`key_tables` |
+| **写入表** | `chunks` | `chapter_summaries` + `concept_index` |
+| **文件前缀** | `batch_*.txt` / `batch_*.json` | `chapter_synthesis_*.txt` / `chapter_synthesis_*.json` |
+| **Checkpoint** | `checkpoint.json` | `chapter_checkpoint.json` |
+
+### 工作流程
+
+```
+auto_summarize 完成 → 所有 chunks status="done"
+         │
+         ▼
+  run_synthesize_chapters()
+         ├── 按 chapter_title 聚合所有 done chunks
+         ├── 跳过已 status="done" 的 chapter_summaries
+         ├── 为每个待处理章节写入 chapter_synthesis_*.txt
+         │
+         ▼
+    Agent 阅读 txt，产出 chapter_synthesis_*.json
+         │
+         ▼
+    再次调用 run_synthesize_chapters()
+         ├── 发现 json 存在
+         ├── 写入 chapter_summaries 表
+         ├── 写入 concept_index 表
+         └── 继续下一章节
+```
+
+### txt 文件格式
+
+```text
+--- CHAPTER SYNTHESIS | System Architecture ---
+
+--- CHUNK_DB_ID=47 | page_3_text | P3-3 ---
+Summary: The AHB bus matrix supports up to 16 masters...
+Entities: [{"name": "AHB matrix", "type": "component"}]
+Relationships: [{"from": "AHB matrix", "to": "arbiter", "type": "contains"}]
+Vision Insights: The block diagram shows...
+Content Preview: The AHB bus matrix supports up to 16 masters...
+------------------------------------------------------------
+```
+
+### Agent 产出的 json 格式
+
+```json
+{
+  "summary": "System Architecture 章节描述了 AHB 总线矩阵的拓扑结构...",
+  "concepts": [
+    {"name": "AHB Matrix", "definition": "支持16主16从的交叉开关矩阵", "pages": [3, 4]}
+  ],
+  "relationships": [
+    {"from": "AHB Matrix", "to": "Arbiter", "type": "contains", "description": "每个主端口包含一个仲裁器"}
+  ],
+  "key_figures": ["Figure 3-1: AHB Bus Matrix Topology"],
+  "key_tables": ["Table 3-1: Master Priority Configuration"]
+}
+```
+
+### 数据写入
+
+- **`chapter_summaries` 表**：`summary`、`concepts`、`relationships`、`key_figures`、`key_tables`、`status="done"`
+- **`concept_index` 表**：从 `concepts` 提取概念名和定义，从 `relationships` 提取关联概念
+
+> 完整对比说明、txt/json 格式详细说明见 `README.md` → **章节综合机制**。
+
+---
+
 ## 已知限制与常见陷阱
 
 1. **DOCX 单 chunk 限制**：`.docx` 文件目前被解析为单个 `Chunk`，超大文档可能导致嵌入/token 超限。
