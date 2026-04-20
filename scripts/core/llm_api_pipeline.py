@@ -176,6 +176,57 @@ class LLMAPIIngestionPipeline:
         else:
             logger.warning("No embedder | skipped vector index generation for doc_id=%s", enhanced_doc.doc_id)
         
+        # 持久化 LLM 输出到数据库（LLM_API_FLOW 一次完成）
+        if self.llm_client:
+            # 1. 写入章节摘要
+            chapter_summaries = enhanced_doc.metadata.get("chapter_summaries", [])
+            chapter_summary_map = {}
+            for cs in chapter_summaries:
+                ch_title = cs.get("chapter_title", "")
+                if not ch_title:
+                    continue
+                chapter_summary_map[ch_title] = cs.get("summary", "")
+                self.db.upsert_chapter_summary(
+                    enhanced_doc.doc_id,
+                    ch_title,
+                    {
+                        "start_page": cs.get("start_page"),
+                        "end_page": cs.get("end_page"),
+                        "summary": cs.get("summary", ""),
+                        "concepts": [],
+                        "relationships": [],
+                        "key_figures": [],
+                        "key_tables": [],
+                        "status": "done",
+                    }
+                )
+            
+            # 2. 为每个 chunk 写入 summary / keywords / status=done
+            keywords = enhanced_doc.metadata.get("keywords", [])
+            keywords_str = ",".join(keywords) if isinstance(keywords, list) else str(keywords)
+            for db_id, ck in zip(chunk_db_ids, chunks):
+                # 使用 chunk 所在章节的 summary，或回退到文档级 summary
+                ch_summary = chapter_summary_map.get(ck.chapter_title or "", "")
+                doc_summary = enhanced_doc.metadata.get("llm_summary", "")
+                chunk_summary = ch_summary if ch_summary else doc_summary
+                if chunk_summary:
+                    self.db.update_chunk_summary(db_id, chunk_summary)
+                if keywords_str:
+                    self.db.update_chunk_keywords(db_id, keywords_str)
+                self.db.update_chunk_status(db_id, "done")
+            
+            # 3. 从关键词生成简单概念索引
+            for kw in keywords:
+                if kw and isinstance(kw, str):
+                    self.db.upsert_concept(
+                        doc_id=enhanced_doc.doc_id,
+                        concept_name=kw,
+                        definition=f"关键词: {kw}",
+                    )
+            
+            logger.info("LLM output persisted | doc_id=%s | chapters=%s | chunks=%s | keywords=%s",
+                       enhanced_doc.doc_id, len(chapter_summaries), len(chunk_db_ids), len(keywords))
+        
         # 更新状态
         self.db.update_document_status(enhanced_doc.doc_id, "done")
         logger.info("Ingestion complete | file=%s | doc_id=%s | mode=LLM_API_FLOW", file_path, enhanced_doc.doc_id)
@@ -538,18 +589,24 @@ class LLMAPIIngestionPipeline:
     
     def _generate_chapter_summary(self, chapter_title: str, context: str,
                                 chapter_index: int, total_chapters: int) -> str:
-        """生成章节摘要"""
+        """生成章节摘要，利用前面章节的摘要作为上下文理解当前章节。"""
         if not self.llm_client:
             return ""
         
-        prompt = f"""请对第 {chapter_index + 1}/{total_chapters} 章进行总结：
+        prompt = f"""你对一本技术书籍进行逐章总结。当前是第 {chapter_index + 1}/{total_chapters} 章。
 
-章节标题：{chapter_title}
+**任务要求**：
+1. 总结当前章节的核心内容、关键机制和设计 rationale。
+2. 如果上下文中提供了前面章节的摘要，请利用它们来理解当前章节：识别因果关系、前置依赖、概念演进或主题转折。
+3. 明确指出当前章节与前面哪些内容有直接关联（例如："本章的 DMA 配置依赖于第 3 章介绍的时钟树"）。
+4. 如果当前章节是后续内容的基础，也请指出。
 
-上下文：
+**章节标题**：{chapter_title}
+
+**上下文（前面章节的摘要，如有）**：
 {context}
 
-总结："""
+**请输出当前章节的结构化摘要**："""
         
         try:
             return self.llm_client.chat([{"role": "user", "content": prompt}]).strip()
@@ -565,7 +622,7 @@ class LLMAPIIngestionPipeline:
         return self._grouped_recursive_aggregation(chapter_summaries)
     
     def _direct_summary_aggregation(self, chapter_summaries: List[Dict]) -> str:
-        """直接汇总"""
+        """直接汇总多个章节摘要，产生更高层次的'摘要的摘要'。"""
         if not self.llm_client:
             return ""
         
@@ -574,11 +631,19 @@ class LLMAPIIngestionPipeline:
             for s in chapter_summaries
         ])
         
-        prompt = f"""对以下章节摘要进行汇总总结：
+        prompt = f"""你正在对一本书的多个章节摘要进行高层次汇总，产生"摘要的摘要"。
+
+**输入**：以下是一组章节的详细摘要。
 
 {combined}
 
-整体总结："""
+**任务要求**：
+1. 不要简单复述各章内容，而是提炼出跨章节的整体脉络、核心架构或主线逻辑。
+2. 识别章节之间的层次关系：哪些是基础概念、哪些是进阶应用、哪些是具体实现。
+3. 如果存在因果关系或依赖链，请明确阐述（例如："因为 A 章定义了协议，B 章才能在此基础上描述传输机制"）。
+4. 输出应是一份简洁的、可作为全书概览的高层摘要。
+
+**请输出高层汇总摘要**："""
         
         try:
             return self.llm_client.chat([{"role": "user", "content": prompt}]).strip()
