@@ -34,9 +34,13 @@ def patched_config(monkeypatch, tmp_path):
 class FakeEmbedder:
     def __init__(self):
         self.dim = 4
+        self._dim_validated = True
 
     def embed(self, texts):
         return [[1.0, 0.0, 0.0, 0.0] for _ in texts]
+
+    def get_embedding_dimension(self):
+        return self.dim
 
     def close(self):
         pass
@@ -74,7 +78,7 @@ def test_process_one_pdf_with_embedding(patched_config, monkeypatch):
     assert len(chunks) == 1
     assert chunks[0].status == "embedded"
 
-    vi = VectorIndex()
+    vi = VectorIndex(dim=4)
     assert vi._index.ntotal == 1
 
 
