@@ -122,8 +122,9 @@ work-docs-library/
 │   ├── requirements.txt          # Python 依赖
 │   ├── .env.example / .env       # 环境变量模板 / 实际配置（gitignored）
 │   ├── prompts/
-│   │   ├── summarize.txt         # LLM chunk 摘要提示词
-│   │   ├── structural_summarize.txt  # 章节级结构化摘要提示词
+│   │   ├── summarize.txt         # LLM chunk 摘要 system 提示词（代码读取）
+│   │   ├── summarize_user.txt    # LLM chunk 摘要 user 提示词模板（含 {{text}} 占位符）
+│   │   ├── structural_summarize.txt  # 章节级结构化摘要提示词（代码读取）
 │   │   └── filter_config.json    # 低价值内容过滤规则
 │   ├── core/                     # 业务逻辑层
 │   │   ├── config.py             # 配置中心（三层优先级解析）
@@ -293,6 +294,7 @@ PYTHONPATH=scripts ./venv/bin/python scripts/agent_batch_helper.py auto --doc-id
 5. **LLM 客户端 timeout**：默认 HTTP timeout 为 120 秒，已增加 3 次指数退避重试（1s / 2s / 4s）。
 6. **Embedding 维度不可变**：FAISS 索引创建后维度固定。更换模型导致维度变化时，必须删除旧索引并重新处理文档。
 7. **过滤规则**：`agent_batch_helper.py filter/auto` 依赖 `scripts/prompts/filter_config.json`，修改规则后无需重启，下次运行自动生效。
+8. **提示词定制**：`scripts/prompts/summarize.txt`、`summarize_user.txt`、`structural_summarize.txt` 被 `BaseLLMClient._load_prompt()` 读取。修改提示词后无需重启，下次调用自动生效。若文件不存在，使用内置默认值。
 8. **后台运行限制**：Kimi CLI 插件架构为单次 subprocess 调用，无法真正后台运行。超长文档依赖断点续传降低重试成本。
 
 > 安全性分析、代码风格详细分析见 `README.md` → **功能稳定性 / 安全性 / 代码风格分析**。

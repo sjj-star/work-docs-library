@@ -701,18 +701,9 @@ class LLMAPIIngestionPipeline:
                         if len(text) > 1000:
                             break
             
-            prompt = f"""分析以下技术文档，提取结构化元数据。文档内容：
-{text[:2000]}
-
-请以 JSON 格式返回（不要包含 markdown 代码块）：
-{{"keywords": ["关键词1", "关键词2"], "entities": [{{"name": "实体名", "type": "component", "definition": "一句话定义"}}], "relationships": [{{"from": "实体A", "to": "实体B", "relation": "contains", "detail": "关系描述"}}], "answered_questions": ["文档回答了什么问题1", "回答了什么问题2"]}}
-
-要求：
-- keywords: 5-8 个最重要的技术关键词
-- entities: 文档中的核心技术实体（组件、协议、概念等），每个包含 name、type、definition
-- relationships: 实体间的关键关系，每个包含 from、to、relation、detail
-- answered_questions: 文档能够回答的 3-5 个核心问题
-- 所有内容用中文"""
+            from .llm_chat_client import BaseLLMClient
+            prompt_template = BaseLLMClient._load_prompt("structural_summarize")
+            prompt = prompt_template.replace("{{text}}", text[:2000])
             
             response = self.llm_client.chat([{"role": "user", "content": prompt}])
             data = self._parse_llm_json(response)

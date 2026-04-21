@@ -138,7 +138,9 @@ work-docs-library/
 │   ├── requirements.txt
 │   ├── .env.example              # 环境变量模板
 │   ├── prompts/
-│   │   ├── summarize.txt         # LLM 摘要提示词
+│   │   ├── summarize.txt         # LLM 摘要 system 提示词（代码读取）
+│   │   ├── summarize_user.txt    # LLM 摘要 user 提示词模板（含 {{text}} 占位符）
+│   │   ├── structural_summarize.txt  # 结构化元数据提取提示词（代码读取）
 │   │   └── filter_config.json    # 低价值内容过滤规则
 │   ├── core/
 │   │   ├── config.py             # 配置中心
