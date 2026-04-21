@@ -137,7 +137,7 @@ work-docs-library/
 │   │   ├── compatibility_pipeline.py  # CompatibilityIngestionPipeline（Agent Skill Flow）
 │   │   ├── llm_chat_client.py    # LLMChatClient：对话/总结/图像分析
 │   │   ├── embedding_client.py   # EmbeddingClient：向量化
-│   │   ├── llm_client.py         # 旧版通用客户端（向后兼容）
+│   │   ├── llm_chat_client.py    # BaseLLMClient + LLMChatClient：LLM 对话客户端
 │   │   ├── context_manager.py    # 上下文窗口管理
 │   │   └── chapter_editor.py     # 交互式章节编辑器
 │   ├── parsers/                  # IO / 解析层
