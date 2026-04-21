@@ -177,7 +177,7 @@ class CompatibilityIngestionPipeline:
         
         # 使用旧的 LLM 客户端进行 vision 描述（保持兼容性）
         try:
-            from .llm_client import ChatClient
+            from .llm_chat_client import LLMChatClient as ChatClient
             vision_client = ChatClient()
             
             for ck in chunks:

@@ -7,8 +7,8 @@ import shutil
 
 from .config import Config
 from .db import KnowledgeDB
-from .llm_client import ChatClient, EmbeddingClient as OldEmbeddingClient  # 保持兼容性
-from .embedding_client import EmbeddingClient  # 新的独立客户端
+from .llm_chat_client import LLMChatClient as ChatClient
+from .embedding_client import EmbeddingClient
 from .models import Chunk, Document
 from .vector_index import VectorIndex
 from parsers.pdf_parser import PDFParser
