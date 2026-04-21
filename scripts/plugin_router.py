@@ -34,7 +34,7 @@ try:
     import agent_batch_helper as abh
     from core.db import KnowledgeDB
     from core.flow_selector import FlowSelector
-    from core.llm_client import EmbeddingClient
+    from core.embedding_client import EmbeddingClient
     from core.pipeline import IngestionPipeline
     from core.vector_index import VectorIndex
 except ImportError as e:

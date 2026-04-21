@@ -17,7 +17,7 @@ from core.config import Config
 from core.db import KnowledgeDB
 
 logger = logging.getLogger("doc_extractor")
-from core.llm_client import EmbeddingClient
+from core.embedding_client import EmbeddingClient
 from core.pipeline import IngestionPipeline
 from core.vector_index import VectorIndex
 from core.chapter_editor import ChapterEditor

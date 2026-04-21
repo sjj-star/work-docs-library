@@ -1,6 +1,7 @@
 import pytest
 
-from core.llm_client import EmbeddingClient, ChatClient
+from core.embedding_client import EmbeddingClient
+from core.llm_chat_client import LLMChatClient as ChatClient
 
 
 class FakeResponse:
@@ -36,6 +37,8 @@ def mock_env(monkeypatch, tmp_path):
     monkeypatch.setattr(config_module.Config, "LLM_PROVIDER", "openai")
     monkeypatch.setattr(config_module.Config, "LLM_BASE_URL", "")
     monkeypatch.setattr(config_module.Config, "LLM_MODEL", "gpt-4")
+    monkeypatch.setattr(config_module.Config, "EMBEDDING_API_KEY", "test-emb-key")
+    monkeypatch.setattr(config_module.Config, "EMBEDDING_BASE_URL", "https://api.openai.com/v1")
     monkeypatch.setattr(config_module.Config, "EMBEDDING_MODEL", "text-embedding-3-small")
 
 
@@ -47,7 +50,7 @@ def test_embedding_client_embed(monkeypatch):
         ]
     })
     session = FakeSession(fake_resp)
-    monkeypatch.setattr("core.llm_client.requests.Session", lambda: session)
+    monkeypatch.setattr("core.embedding_client.requests.Session", lambda: session)
 
     client = EmbeddingClient()
     result = client.embed(["hello", "world"])
