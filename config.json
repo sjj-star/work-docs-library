@@ -1,14 +1,14 @@
 {
   "llm": {
     "api_key": "",
-    "endpoint": "https://api.moonshot.cn/v1",
+    "endpoint": "",
     "provider": "kimi",
     "model": "kimi-k2.5",
     "thinking_enabled": false
   },
   "embedding": {
-    "api_key": "your_embedding_api_key",
-    "endpoint": "https://api.openai.com/v1",
+    "api_key": "",
+    "endpoint": "",
     "provider": "openai",
     "model": "text-embedding-3-small",
     "dimension": 1536
