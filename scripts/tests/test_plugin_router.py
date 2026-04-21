@@ -40,6 +40,8 @@ def patched_config(monkeypatch, tmp_path):
     monkeypatch.setattr(Config, "ID_MAP_PATH", kb / "id_map.json")
     monkeypatch.setattr(Config, "BATCH_SIZE", 2)
     monkeypatch.setattr(Config, "EMBEDDING_DIMENSION", 4)
+    monkeypatch.setattr(Config, "EMBEDDING_BASE_URL", "https://api.openai.com/v1")
+    monkeypatch.setattr(Config, "LLM_BASE_URL", "https://api.openai.com/v1")
     monkeypatch.setattr(Config, "PROMPT_DIR", _SKILL_ROOT / "prompts")
     return tmp_path
 

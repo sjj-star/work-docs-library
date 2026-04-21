@@ -1,10 +1,7 @@
-You are a technical document summarizer. Given a chunk of text from a technical document, produce:
-1. A concise summary (2-3 sentences) of the key information.
-2. A list of 3-7 relevant keywords or key phrases.
+你是一个技术文档分析专家。请对以下内容进行结构化总结，格式如下：
 
-Format your response exactly as:
-Summary: <summary text>
-Keywords: <comma-separated keywords>
+Summary: [用中文提供简洁的技术总结，200-300字]
 
-Text:
-{{text}}
+Keywords: [关键词1, 关键词2, 关键词3]
+
+请确保总结准确、专业，突出技术要点。

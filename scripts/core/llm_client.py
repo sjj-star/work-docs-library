@@ -4,9 +4,11 @@ from typing import List, Optional
 import requests
 
 from .config import Config
+from .llm_chat_client import LLMChatClient
 
 
 class _BaseClient:
+    """向后兼容的基类（供 EmbeddingClient 使用）"""
     def __init__(self, provider: Optional[str] = None, api_key: Optional[str] = None, base_url: Optional[str] = None) -> None:
         self.provider = (provider or Config.LLM_PROVIDER).lower()
         self.api_key = api_key or Config.LLM_API_KEY
@@ -51,84 +53,9 @@ class _BaseClient:
         self._session.close()
 
 
-class ChatClient(_BaseClient):
-    def chat(self, messages: List[dict], temperature: float = 0.3, **kwargs) -> str:
-        """基础对话功能，支持额外参数如 extra_body"""
-        data = {
-            "model": self.model,
-            "messages": messages,
-            "temperature": temperature
-        }
-        data.update(kwargs)  # 支持 extra_body 等参数
-        
-        response_data = self._post(self.chat_url, data)
-        return response_data["choices"][0]["message"]["content"]
-
-    def summarize(self, text: str, max_tokens: int = 1000, prompt_template: Optional[str] = None) -> dict:
-        """智能文本总结"""
-        system_prompt = """你是一个技术文档分析专家。请对以下内容进行结构化总结，格式如下：
-
-Summary: [用中文提供简洁的技术总结，200-300字]
-
-Keywords: [关键词1, 关键词2, 关键词3]
-
-请确保总结准确、专业，突出技术要点。"""
-        
-        user_prompt = prompt_template or "请总结以下技术文档内容：\n\n{{text}}"
-        content = user_prompt.replace("{{text}}", text[:8000])  # 截断避免超限
-        
-        messages = [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": content}
-        ]
-        
-        raw = self.chat(messages, temperature=0.3)
-        
-        # 解析结构化输出
-        summary = ""
-        keywords = []
-        
-        for line in raw.splitlines():
-            if line.lower().startswith("summary:"):
-                summary = line.split(":", 1)[1].strip()
-            elif line.lower().startswith("keywords:"):
-                kw_part = line.split(":", 1)[1].strip()
-                keywords = [k.strip() for k in kw_part.split(",") if k.strip()]
-        
-        # 回退处理
-        if not summary:
-            summary = raw.strip()
-        
-        return {
-            "summary": summary,
-            "keywords": keywords,
-            "raw": raw
-        }
-
-    def vision_describe(self, image_path: str, prompt: str = "详细描述这个技术图表的内容和含义。") -> str:
-        """图像分析和描述"""
-        with open(image_path, "rb") as f:
-            b64 = base64.b64encode(f.read()).decode("utf-8")
-        
-        ext = image_path.split(".")[-1].lower()
-        mime = "image/jpeg" if ext in ("jpg", "jpeg") else "image/png" if ext == "png" else "image/webp"
-        
-        messages = [
-            {
-                "role": "user",
-                "content": [
-                    {"type": "text", "text": prompt},
-                    {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{b64}"}},
-                ],
-            }
-        ]
-        
-        return self.chat(messages, temperature=0.3)
-
-    @staticmethod
-    def _load_prompt(name: str) -> str:
-        path = Config.PROMPT_DIR / f"{name}.txt"
-        return path.read_text(encoding="utf-8") if path.exists() else "Summarize the following text:\n{{text}}"
+class ChatClient(LLMChatClient):
+    """Backward-compatible chat client. Inherits from LLMChatClient."""
+    pass
 
 
 class EmbeddingClient(_BaseClient):

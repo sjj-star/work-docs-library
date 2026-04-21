@@ -58,11 +58,10 @@ def test_embedding_client_embed(monkeypatch):
 
 
 def test_chat_client_chat(monkeypatch):
-    fake_resp = FakeResponse({
-        "choices": [{"message": {"content": "Summary: hello\nKeywords: a, b"}}]
-    })
-    session = FakeSession(fake_resp)
-    monkeypatch.setattr("core.llm_client.requests.Session", lambda: session)
+    def _fake_post(self, url, payload, timeout=None):
+        return {"choices": [{"message": {"content": "Summary: hello\nKeywords: a, b"}}]}
+
+    monkeypatch.setattr(ChatClient, "_post", _fake_post)
 
     client = ChatClient()
     text = client.chat([{"role": "user", "content": "summarize"}])
@@ -70,11 +69,10 @@ def test_chat_client_chat(monkeypatch):
 
 
 def test_chat_client_summarize(monkeypatch, tmp_path):
-    fake_resp = FakeResponse({
-        "choices": [{"message": {"content": "Summary: test summary\nKeywords: x, y"}}]
-    })
-    session = FakeSession(fake_resp)
-    monkeypatch.setattr("core.llm_client.requests.Session", lambda: session)
+    def _fake_post(self, url, payload, timeout=None):
+        return {"choices": [{"message": {"content": "Summary: test summary\nKeywords: x, y"}}]}
+
+    monkeypatch.setattr(ChatClient, "_post", _fake_post)
 
     client = ChatClient()
     out = client.summarize("some long text")
@@ -83,11 +81,10 @@ def test_chat_client_summarize(monkeypatch, tmp_path):
 
 
 def test_chat_client_vision_describe(monkeypatch, tmp_path):
-    fake_resp = FakeResponse({
-        "choices": [{"message": {"content": "An image description"}}]
-    })
-    session = FakeSession(fake_resp)
-    monkeypatch.setattr("core.llm_client.requests.Session", lambda: session)
+    def _fake_post(self, url, payload, timeout=None):
+        return {"choices": [{"message": {"content": "An image description"}}]}
+
+    monkeypatch.setattr(ChatClient, "_post", _fake_post)
 
     img = tmp_path / "test.png"
     from PIL import Image
