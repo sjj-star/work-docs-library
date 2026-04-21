@@ -71,8 +71,7 @@
 
 三层优先级（高 → 低）：**环境变量(Kimi CLI注入) > `config.json` > `.env`**。
 
-- `config.json`：主配置入口，Kimi CLI 通过 `plugin.json` 的 `inject` 自动注入 OAuth token。被 `.gitignore` 忽略。
-- `config.example.json`：配置模板（提交到仓库）。
+- `config.json`：主配置入口。仓库自带空值模板，Kimi CLI 通过 `plugin.json` 的 `inject` 自动注入 OAuth token。被 `.gitignore` 忽略（已用 `git add -f` 强制提交初始版本）。
 - `.env`：开发/独立运行回退配置。
 
 `_resolve_config(env_name, json_path, default)` 实现解析逻辑，完整说明见 `README.md` → **配置说明**。
@@ -114,7 +113,7 @@
 ```
 work-docs-library/
 ├── plugin.json                   # Kimi CLI Plugin 定义（10 个 tools，含 inject 配置）
-├── config.example.json           # 配置模板
+├── config.json                   # 配置入口（空值模板，Kimi CLI 自动注入凭证）
 ├── scripts/
 │   ├── plugin_router.py          # Plugin 统一入口：stdin JSON → stdout JSON
 │   ├── main.py                   # 独立 CLI 主入口
@@ -178,7 +177,7 @@ pip install -r scripts/requirements.txt
 
 # 配置
 cp scripts/.env.example scripts/.env
-# 或复制 config.example.json → config.json（Plugin 模式）
+# 或编辑 config.json 补充非注入参数（Plugin 模式）
 
 # 验证配置
 PYTHONPATH=scripts ./venv/bin/python scripts/main.py --validate-config dummy_path
@@ -324,7 +323,7 @@ PYTHONPATH=scripts ./venv/bin/python scripts/agent_batch_helper.py auto --doc-id
 | 文件 | 作用 |
 |------|------|
 | `plugin.json` | Kimi CLI Plugin 工具定义（10 个 tools，含 inject 配置） |
-| `config.example.json` | 配置模板 |
+| `config.json` | 配置入口（空值模板，Kimi CLI 自动注入凭证） |
 | `scripts/plugin_router.py` | Plugin 运行时路由（stdin JSON → stdout JSON） |
 | `scripts/main.py` | 独立 CLI 主入口 |
 | `scripts/doc_extractor.py` | 传统 CLI（子命令：ingest/status/query/search/toc…） |

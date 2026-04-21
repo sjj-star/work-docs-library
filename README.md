@@ -450,9 +450,8 @@ embed_client.close()
 
 | 文件 | 作用 | 版本控制 | 使用场景 |
 |------|------|----------|----------|
-| `config.json` | **主配置入口**。Kimi CLI 自动注入 OAuth token，用户维护其他参数 | ❌ `.gitignore` 忽略 | 作为 Kimi Code CLI Plugin 运行时 |
-| `config.example.json` | 配置模板 | ✅ 提交到仓库 | 复制为 `config.json` 的起点 |
-| `.env` / `.env.example` | 环境变量配置 | ❌ `.gitignore` 忽略 | 独立运行 `main.py` / `doc_extractor.py`；`config.json` 缺失时回退 |
+| `config.json` | **主配置入口**。仓库自带空值模板，Kimi CLI 安装时自动注入 OAuth token | ❌ `.gitignore` 忽略（已用 `git add -f` 强制提交初始版本） | 作为 Kimi Code CLI Plugin 运行时 |
+| `.env` / `.env.example` | 环境变量配置 | ❌ `.gitignore` 忽略 | 独立运行 `main.py` / `doc_extractor.py`；`config.json` 字段为空时回退 |
 
 ### `config.json` 结构与机制
 
@@ -523,18 +522,19 @@ embed_client.close()
 
 #### 场景 1: 作为 Kimi CLI Plugin 运行（推荐）
 
-1. 复制配置模板：
-   ```bash
-   cp config.example.json config.json
-   ```
-2. 安装插件到 Kimi CLI：
+1. 安装插件到 Kimi CLI：
    ```bash
    kimi plugin install /path/to/work-docs-library
    ```
-3. Kimi CLI 自动将 OAuth token 注入 `config.json`
-4. （可选）手动编辑 `config.json` 补充 embedding 等非注入参数
+2. Kimi CLI 自动将 OAuth token 注入 `config.json`
+3. （可选）手动编辑 `config.json` 补充 embedding 等非注入参数
 
 无需创建 `.env` 文件，所有配置由 `config.json` 管理。
+
+> **注意**：Kimi CLI 注入凭证后，`config.json` 会被本地修改。建议运行以下命令防止意外提交凭证到 git：
+> ```bash
+> git update-index --skip-worktree config.json
+> ```
 
 #### 场景 2: 独立运行（开发/测试）
 
