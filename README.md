@@ -167,6 +167,9 @@ work-docs-library/
 │   └── tests/                    # pytest 测试集
 ├── knowledge_base/               # 运行时自动生成：数据库、FAISS 索引、图片
 ├── auto_batches/                 # Agent 批量总结输出目录
+├── AGENTS.md                     # Agent 使用指南（编码规范、模块说明）
+├── LICENSE
+├── .gitignore
 └── README.md
 ```
 
@@ -827,6 +830,7 @@ pending ──► processing ──► done / failed / embedded
 
 | 工具 | 能力 | 底层查询 |
 |------|------|---------|
+| **`ingest`** | 提取并存储文档到知识库 | 扫描 → 解析 → chunk → 嵌入 → 入库（自动选择 LLM API Flow 或 Agent Skill Flow） |
 | **`search`** | 语义搜索 | 将查询文本 embedding → FAISS 相似度搜索 → 按 `chunk_db_id` 回查数据库 |
 | **`query`** | 结构化查询 | 按 `page` 范围 / `chapter` 标题（LIKE 匹配）/ `keyword` 关键词 / `concept` 概念名 |
 | **`get_content`** | 获取完整未截断内容 | 按 `chunk_db_id` 精确查询 / 按 `page` 范围拼接 / 按 `chapter` 拼接多块 |
