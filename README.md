@@ -132,23 +132,33 @@ flowchart TB
 
 ```
 work-docs-library/
+├── config.json                   # 统一配置入口（Kimi CLI 凭证注入目标）
+├── plugin.json                   # Kimi Code CLI Plugin 配置
 ├── scripts/
-│   ├── doc_extractor.py          # 主 CLI
+│   ├── main.py                   # 主入口（自动选择处理模式）
+│   ├── plugin_router.py          # Plugin 统一路由（stdin/stdout JSON）
+│   ├── doc_extractor.py          # 传统 CLI（向后兼容）
 │   ├── agent_batch_helper.py     # Agent 批量协作 CLI
 │   ├── requirements.txt
 │   ├── .env.example              # 环境变量模板
+│   ├── .env                      # 实际环境变量（gitignored）
 │   ├── prompts/
 │   │   ├── summarize.txt         # LLM 摘要 system 提示词（代码读取）
 │   │   ├── summarize_user.txt    # LLM 摘要 user 提示词模板（含 {{text}} 占位符）
 │   │   ├── structural_summarize.txt  # 结构化元数据提取提示词（代码读取）
 │   │   └── filter_config.json    # 低价值内容过滤规则
 │   ├── core/
-│   │   ├── config.py             # 配置中心
+│   │   ├── config.py             # 配置中心（三层优先级）
 │   │   ├── models.py             # 数据模型 (Document/Chunk/Chapter)
 │   │   ├── db.py                 # SQLite 数据库操作
-│   │   ├── llm_client.py         # LLM API 客户端
 │   │   ├── vector_index.py       # FAISS 向量索引管理
-│   │   ├── pipeline.py           # 文档摄入流水线
+│   │   ├── llm_chat_client.py    # LLM 对话客户端（含 BaseLLMClient 基类）
+│   │   ├── embedding_client.py   # Embedding 专用客户端
+│   │   ├── pipeline.py           # 基类文档摄入流水线
+│   │   ├── llm_api_pipeline.py   # LLM API Flow 专用管道
+│   │   ├── compatibility_pipeline.py  # Agent Skill Flow 兼容管道
+│   │   ├── flow_selector.py      # 自动选择处理模式
+│   │   ├── context_manager.py    # 上下文窗口管理器
 │   │   └── chapter_editor.py     # 交互式章节编辑器
 │   ├── parsers/
 │   │   ├── pdf_parser.py         # PDF 解析器（pymupdf）
@@ -156,6 +166,7 @@ work-docs-library/
 │   │   └── image_utils.py        # 图片压缩工具
 │   └── tests/                    # pytest 测试集
 ├── knowledge_base/               # 运行时自动生成：数据库、FAISS 索引、图片
+├── auto_batches/                 # Agent 批量总结输出目录
 └── README.md
 ```
 
@@ -377,7 +388,7 @@ print(f"层次化摘要: {hierarchical_summary}")
 # 图像分析
 image_path = "/path/to/technical_diagram.png"
 analysis = llm_client.vision_describe(image_path, "详细分析这个技术图表")
-print(f"图像分析: {analysis['summary']}")
+print(f"图像分析: {analysis}")
 
 llm_client.close()
 ```
@@ -617,18 +628,77 @@ PYTHONPATH=scripts ./venv/bin/python scripts/main.py --validate-config dummy_pat
 | `core/db.py` | `KnowledgeDB`：SQLite 的增删改查、事务管理 |
 | `core/vector_index.py` | `VectorIndex`：FAISS 索引的加载、添加、删除、搜索、持久化 |
 
-### 双模型客户端架构（新增）
+### 双模型客户端架构
 | 模块 | 职责 |
 |------|------|
-| `core/llm_chat_client.py` | `LLMChatClient`：对话专用客户端，支持聊天、总结、图像分析，可配置思考模式 |
+| `core/llm_chat_client.py` | `BaseLLMClient` + `LLMChatClient`：LLM 对话客户端基类与增强子类，支持聊天、总结、图像分析、thinking 模式、Kimi 适配、层次化总结 |
 | `core/embedding_client.py` | `EmbeddingClient`：向量化专用客户端，支持批处理、动态维度配置 |
-| `core/llm_client.py` | `_BaseClient` / `ChatClient` / `EmbeddingClient`：原有通用客户端（保持向后兼容） |
 
 ### 交互与编辑
 | 模块 | 职责 |
 |------|------|
 | `core/chapter_editor.py` | `ChapterEditor`：基于 `input()` 的交互式章节增删改 |
 | `agent_batch_helper.py` | Agent 批量协作 CLI，支持 checkpoint/resume |
+
+---
+
+## Prompts 提示词文件
+
+`scripts/prompts/` 目录下的文本文件被代码**运行时读取**，无需重启即可生效。若文件被删除，代码会回退到内置默认值。
+
+### `summarize.txt` — LLM 摘要 system 提示词
+
+**被谁读取**：`BaseLLMClient.summarize()`（`_load_prompt("summarize")`）
+
+**作用**：定义 LLM 的身份和输出格式。当前要求生成 `Summary:` 和 `Keywords:` 两行结构化输出。
+
+**格式规范**：
+- 纯文本，无占位符
+- 明确指定输出格式，便于代码解析
+
+### `summarize_user.txt` — LLM 摘要 user 提示词模板
+
+**被谁读取**：`BaseLLMClient.summarize()`（`_load_prompt("summarize_user")`）
+
+**作用**：提供具体任务指令和待处理文本的占位符。
+
+**格式规范**：
+- **必须包含 `{{text}}` 占位符**，运行时会被替换为实际文档内容（截断至 `MAX_INPUT_CHARS`）
+- 若缺少 `{{text}}`，LLM 将接收不到待总结的文本
+
+**自定义示例**：
+```text
+请面向硬件工程师总结以下技术文档，突出寄存器配置和时序关系：
+
+{{text}}
+```
+
+### `structural_summarize.txt` — 结构化元数据提取提示词
+
+**被谁读取**：`LLMAPIIngestionPipeline._extract_structured_metadata()`（`_load_prompt("structural_summarize")`）
+
+**作用**：要求 LLM 从文档中提取结构化 JSON（entities、relationships、answered_questions、keywords）。
+
+**格式规范**：
+- **必须包含 `{{text}}` 占位符**，运行时被替换为文档标题/章节/内容片段（截断至 2000 字符）
+- 要求 LLM 返回**纯 JSON**（不含 markdown 代码块标记）
+
+### `filter_config.json` — 低价值内容过滤规则
+
+**被谁读取**：`agent_batch_helper.py` 的 `_is_low_value()`
+
+**作用**：控制 `filter/auto` 子命令中哪些 chunk 被标记为 `skipped`。
+
+| 字段 | 说明 |
+|------|------|
+| `always_skip.chapter_keywords` | 章节标题包含时绝对跳过（如 "Table of Contents", "Disclaimer"） |
+| `always_skip.content_keywords` | 内容前缀包含时绝对跳过（如 "All rights reserved"） |
+| `always_skip.chunk_types` | chunk 类型黑名单（如 `image_desc`） |
+| `heuristic_skip.min_content_length` | 内容长度低于阈值时跳过 |
+| `heuristic_skip.ascii_art_ratio` | 纯 ASCII 艺术比例阈值 |
+| `heuristic_skip.dimension_page` | 封装尺寸/机械数据页的特殊规则 |
+
+**生效方式**：修改后无需重启，下次运行 `agent_batch_helper.py filter/auto` 自动生效。
 
 ---
 
@@ -1082,9 +1152,9 @@ PYTHONPATH=scripts ./venv/bin/python -m pytest scripts/tests/ -v
 2. **表格检测优化**：添加惰性检测（`find_tables()` 仅在 `table_caption` 存在时调用），解决严重超时问题
 3. **双 LLM 架构**：实现独立 LLM + Embedding 客户端，支持不同供应商
 4. **Kimi 模型适配**：强制 `temperature=1.0`，支持思考模式，通过 `extra_body` 参数配置
-5. **BigModel 维度配置**：添加 `dimensions` 参数支持
-6. **测试 Mock 修复**：`test_llm_client.py` 从 `monkeypatch.setenv` 改为 `monkeypatch.setattr(Config, ...)` 解决 mock 失效
-7. **资源泄漏修复**：`VisionClient` 添加 `try/finally` 确保在异常情况下正确关闭
+5. **维度配置**：Embedding 请求自动携带 `dimensions` 参数（支持的开源模型可生效）
+6. **并发优化**：LLM API Flow 引入 ThreadPoolExecutor，块级总结/图像分析/章节摘要/四大模块并发执行
+7. **资源泄漏修复**：客户端 `close()` 正确关闭 `requests.Session`
 8. **重试机制**：LLM 客户端 `_post` 增加 3 次指数退避重试（1s / 2s / 4s）
 9. **LLM API Flow 两阶段处理**：重构为 Phase A（Parse & Embed）+ Phase B（LLM Enhance），支持断点续传，异常时状态变为 `failed` 而非卡住 `processing`
 10. **图像分析持久化**：`_analyze_document_images()` 结果现在写入 `chunk.metadata["images"][*]["vision_desc"]`
