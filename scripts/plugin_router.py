@@ -20,10 +20,12 @@ if _VENV_PYTHON.exists() and sys.executable != str(_VENV_PYTHON):
 
 from core.config import Config
 
-Config.setup_logging()
-# Redirect all root log handlers to stderr so stdout stays pure JSON
-for handler in logging.root.handlers:
-    handler.stream = sys.stderr
+# 延迟初始化 logging：只在实际运行时配置，避免测试导入时污染全局 logging 状态
+if __name__ == "__main__":
+    Config.setup_logging()
+    # Redirect all root log handlers to stderr so stdout stays pure JSON
+    for handler in logging.root.handlers:
+        handler.stream = sys.stderr
 
 logger = logging.getLogger("plugin_router")
 
