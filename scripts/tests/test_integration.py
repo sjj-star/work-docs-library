@@ -19,13 +19,18 @@ from core.config import Config
 class TestSystemIntegration:
     """测试系统集成"""
     
-    def test_configuration_validation_success(self):
-        """测试配置验证成功"""
-        # 验证配置（假设配置正确）
+    def test_configuration_validation_success(self, monkeypatch):
+        """测试配置验证成功（mock 配置）"""
+        monkeypatch.setattr(Config, "EMBEDDING_API_KEY", "test-emb-key")
+        monkeypatch.setattr(Config, "EMBEDDING_BASE_URL", "https://api.openai.com/v1")
+        monkeypatch.setattr(Config, "EMBEDDING_MODEL", "text-embedding-3-small")
+        monkeypatch.setattr(Config, "LLM_API_KEY", "test-llm-key")
+        monkeypatch.setattr(Config, "LLM_BASE_URL", "https://api.openai.com/v1")
+        monkeypatch.setattr(Config, "LLM_MODEL", "gpt-4o-mini")
+
         FlowSelector.validate_configuration()
-        
         mode = FlowSelector.get_operation_mode()
-        assert mode in ["LLM_API_FLOW", "AGENT_SKILL_FLOW"]
+        assert mode == "LLM_API_FLOW"
     
     def test_context_manager_initialization(self):
         """测试上下文管理器初始化"""
@@ -80,16 +85,23 @@ class TestSystemIntegration:
         
         manager.reset_stats()
     
-    def test_llm_client_with_context(self):
-        """测试 LLM 客户端与上下文的集成"""
-        if not Config.llm_configured():
-            pytest.skip("LLM 未配置")
-        
+    def test_llm_client_with_context(self, monkeypatch):
+        """测试 LLM 客户端与上下文的集成（mock API）"""
         from core.llm_chat_client import LLMChatClient
-        
+
+        def _fake_post(self, url, payload, timeout=None):
+            return {"choices": [{"message": {"content": 'Summary: Mocked summary of memory management.\n\nKeywords: memory, management'}}]}
+
+        monkeypatch.setattr(LLMChatClient, "_post", _fake_post)
+        monkeypatch.setattr(Config, "LLM_PROVIDER", "openai")
+        monkeypatch.setattr(Config, "LLM_MODEL", "gpt-4o-mini")
+        monkeypatch.setattr(Config, "LLM_API_KEY", "test-key")
+        monkeypatch.setattr(Config, "LLM_BASE_URL", "https://api.openai.com/v1")
+        monkeypatch.setattr(Config, "LLM_THINKING_ENABLED", False)
+
         client = LLMChatClient()
         manager = get_context_manager()
-        
+
         # 生成上下文
         content = "This is a test chapter about memory management."
         context = manager.calculate_optimal_context(
@@ -97,14 +109,15 @@ class TestSystemIntegration:
             chapter_index=0,
             previous_summaries=[]
         )
-        
+
         # 使用 LLM 生成摘要
-        summary_data = client.summarize(context[:1000])  # 截断避免超限
-        
+        summary_data = client.summarize(context[:1000])
+
         assert "summary" in summary_data
         assert isinstance(summary_data["summary"], str)
         assert len(summary_data["summary"]) > 0
-        
+        assert summary_data["summary"] == "Mocked summary of memory management."
+
         client.close()
     
     def test_concurrent_context_generation(self):
