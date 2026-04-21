@@ -230,6 +230,18 @@ class KnowledgeDB:
                 (json.dumps(meta, ensure_ascii=False), chunk_db_id),
             )
 
+    def update_chunks_embedded_batch(self, items: List[tuple]) -> None:
+        """批量更新 chunk embedding 和状态（在一个连接中完成）"""
+        with self._connect() as conn:
+            for chunk_db_id, embedding in items:
+                row = conn.execute("SELECT metadata FROM chunks WHERE id = ?", (chunk_db_id,)).fetchone()
+                meta = json.loads(row["metadata"] or "{}") if row else {}
+                meta["embedding"] = embedding
+                conn.execute(
+                    "UPDATE chunks SET metadata = ?, status = 'embedded' WHERE id = ?",
+                    (json.dumps(meta, ensure_ascii=False), chunk_db_id),
+                )
+
     def get_pending_chunks(self, doc_id: Optional[str] = None) -> List[tuple]:
         sql = "SELECT id, doc_id, chunk_id, content, chunk_type, page_start, page_end, chapter_title FROM chunks WHERE status = 'pending'"
         params = ()

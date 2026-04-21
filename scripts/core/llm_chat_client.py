@@ -4,6 +4,7 @@ LLM 对话客户端 - 基类 + 增强子类
 """
 import base64
 import logging
+import threading
 from pathlib import Path
 from typing import List, Optional
 import requests
@@ -56,15 +57,23 @@ class BaseLLMClient:
         # embed_url 保留以兼容 LLMClient 多重继承
         self.embed_url = f"{base}/embeddings"
 
-        self._session = requests.Session()
+        # 使用线程本地存储，确保多线程并发时每个线程有独立的 Session
+        self._local = threading.local()
+
+    def _get_session(self) -> requests.Session:
+        """获取当前线程的 requests.Session（懒创建）"""
+        if not hasattr(self._local, 'session') or self._local.session is None:
+            self._local.session = requests.Session()
+        return self._local.session
 
     def _post(self, url: str, payload: dict, timeout: int = None) -> dict:
         """发送 POST 请求，带重试机制"""
         timeout = timeout or self.DEFAULT_TIMEOUT
+        session = self._get_session()
         last_exc = None
         for attempt in range(self.MAX_RETRY_ATTEMPTS):
             try:
-                resp = self._session.post(
+                resp = session.post(
                     url,
                     headers={"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"},
                     json=payload,
@@ -162,8 +171,10 @@ class BaseLLMClient:
         return self.chat(messages, temperature=0.3)
 
     def close(self) -> None:
-        """关闭会话"""
-        self._session.close()
+        """关闭当前线程的会话"""
+        if hasattr(self._local, 'session') and self._local.session is not None:
+            self._local.session.close()
+            self._local.session = None
 
     @staticmethod
     def _load_prompt(name: str) -> str:

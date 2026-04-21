@@ -59,18 +59,29 @@ class VectorIndex:
             json.dump(self._id_map, f, ensure_ascii=False)
 
     def add(self, chunk_db_id: int, vector: List[float]) -> None:
-        vec = np.array([vector], dtype=np.float32)
-        actual_dim = vec.shape[1]
-        if self._index.d != actual_dim:
-            # 严格错误：添加不同维度的向量时直接失败
-            raise RuntimeError(
-                f"Cannot add vector with {actual_dim} dimensions to index with {self._index.d} dimensions. "
-                f"All vectors must have the same dimension as the index."
-            )
-        faiss.normalize_L2(vec)
-        self._index.add(vec)
-        self._id_map.append(chunk_db_id)
-        self._save()
+        self.add_batch([(chunk_db_id, vector)])
+
+    def add_batch(self, items: List[tuple]) -> None:
+        """批量添加向量，只在最后统一持久化"""
+        if not items:
+            return
+        ids = []
+        vectors = []
+        for chunk_db_id, vector in items:
+            vec = np.array([vector], dtype=np.float32)
+            actual_dim = vec.shape[1]
+            if self._index.d != actual_dim:
+                raise RuntimeError(
+                    f"Cannot add vector with {actual_dim} dimensions to index with {self._index.d} dimensions."
+                )
+            faiss.normalize_L2(vec)
+            vectors.append(vec)
+            ids.append(chunk_db_id)
+        if vectors:
+            all_vecs = np.vstack(vectors)
+            self._index.add(all_vecs)
+            self._id_map.extend(ids)
+            self._save()
 
     def remove_doc(self, chunk_db_ids: List[int]) -> None:
         if not chunk_db_ids:
