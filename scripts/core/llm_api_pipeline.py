@@ -4,6 +4,7 @@ LLM API 驱动的处理管道
 """
 import hashlib
 import logging
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import List, Optional, Dict, Any
 import shutil
@@ -179,10 +180,10 @@ class LLMAPIIngestionPipeline:
                     batch_ids = chunk_db_ids[i:i + Config.BATCH_SIZE]
                     try:
                         embeddings = self.embedder.embed(batch_texts)
-                        for db_id, emb in zip(batch_ids, embeddings):
-                            self.db.update_chunk_embedding(db_id, emb)
-                            self.vec.add(db_id, emb)
-                            self.db.update_chunk_status(db_id, "embedded")
+                        # 批量更新 SQLite 和 FAISS
+                        items = list(zip(batch_ids, embeddings))
+                        self.db.update_chunks_embedded_batch(items)
+                        self.vec.add_batch(items)
                     except Exception as e:
                         logger.error("Embed error | doc_id=%s | error=%s", doc_id, e)
                         self.db.update_document_status(doc_id, "failed")
@@ -412,24 +413,25 @@ class LLMAPIIngestionPipeline:
                    doc_id, len(chapter_summaries), len(image_analyses), len(keywords), len(entities), len(concept_sources))
     
     def _llm_enhance_document(self, raw_doc: Document) -> Document:
-        """使用 LLM 增强文档内容"""
+        """使用 LLM 增强文档内容（四大模块并发执行）"""
         if not self.llm_client:
             logger.warning("LLM 客户端不可用，跳过增强处理")
             return raw_doc
         
         logger.info(f"开始 LLM 增强处理 | doc_id={raw_doc.doc_id}")
         
-        # 1. 层次化文本总结
-        text_summary = self._hierarchical_summarize(raw_doc)
-        
-        # 2. 图像详细分析（如果有图像）
-        image_analyses = self._analyze_document_images(raw_doc)
-        
-        # 3. 生成章节摘要（如果有章节）
-        chapter_summaries = self._generate_chapter_summaries(raw_doc)
-        
-        # 4. 智能关键词/实体/关系提取
-        structured = self._extract_structured_metadata(raw_doc)
+        # 四大模块无数据依赖，使用线程池并发执行
+        max_workers = min(4, Config.BATCH_SIZE)
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            future_summary = executor.submit(self._hierarchical_summarize, raw_doc)
+            future_images = executor.submit(self._analyze_document_images, raw_doc)
+            future_chapters = executor.submit(self._generate_chapter_summaries, raw_doc)
+            future_structured = executor.submit(self._extract_structured_metadata, raw_doc)
+            
+            text_summary = future_summary.result()
+            image_analyses = future_images.result()
+            chapter_summaries = future_chapters.result()
+            structured = future_structured.result()
         
         # 5. 更新文档元数据
         raw_doc.metadata.update({
@@ -480,15 +482,20 @@ class LLMAPIIngestionPipeline:
         if len(chunks) == 1:
             return self.llm_client.summarize(chunks[0])["summary"]
         
-        # 层次化总结
-        chunk_summaries = []
-        for i, chunk in enumerate(chunks):
-            logger.debug(f"总结块 {i+1}/{len(chunks)}")
-            summary = self.llm_client.summarize(chunk)["summary"]
-            chunk_summaries.append(f"部分{i+1}: {summary}")
+        # 层次化总结：块级并发
+        max_workers = min(4, Config.BATCH_SIZE)
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = {executor.submit(self.llm_client.summarize, chunk): i for i, chunk in enumerate(chunks)}
+            results = {}
+            for future in futures:
+                i = futures[future]
+                try:
+                    results[i] = future.result()["summary"]
+                except Exception as e:
+                    logger.error(f"块总结失败 | chunk={i} | error={e}")
+                    results[i] = ""
         
-        # 验证每个摘要非空
-        chunk_summaries = [s for s in chunk_summaries if s]
+        chunk_summaries = [f"部分{i+1}: {results[i]}" for i in range(len(chunks)) if results[i]]
         
         if not chunk_summaries:
             logger.error("所有块的总结都为空")
@@ -527,44 +534,62 @@ class LLMAPIIngestionPipeline:
         image_analyses = []
         image_count = 0
         
+        # 收集所有图像任务
+        image_tasks = []
         for chunk in doc.chunks:
             imgs = chunk.metadata.get("images", []) if chunk.metadata else []
-            if not imgs:
-                continue
-            
             for img in imgs:
+                image_tasks.append((chunk, img))
+        
+        if not image_tasks:
+            return image_analyses
+        
+        # 图像分析并发执行
+        max_workers = min(4, len(image_tasks))
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = {executor.submit(self._analyze_single_image, chunk, img, i): i for i, (chunk, img) in enumerate(image_tasks)}
+            for future in futures:
+                i = futures[future]
                 try:
-                    prompt = f"""分析这个技术图表/图像，提供：
+                    result = future.result()
+                    image_analyses.append(result)
+                    if "error" not in result:
+                        image_count += 1
+                        logger.info(f"图像分析完成 | image_id=img_{image_count} | length={len(result['analysis'])}")
+                except Exception as e:
+                    logger.error(f"图像分析失败 | task={i} | error={e}")
+
+        logger.info(f"图像分析完成 | total_images={image_count}")
+        return image_analyses
+    
+    def _analyze_single_image(self, chunk, img, idx: int) -> Dict[str, Any]:
+        """分析单个图像（用于线程池并发）"""
+        prompt = """分析这个技术图表/图像，提供：
 1. 图表类型和主要内容
 2. 关键元素和标注
 3. 技术含义和作用
 4. 与上下文的可能关联
 
 请用中文回答，保持简洁专业。"""
-                    
-                    analysis = self.llm_client.vision_describe(img["path"], prompt)
-                    
-                    image_analyses.append({
-                        "image_id": f"img_{image_count + 1}",
-                        "path": str(img["path"]),
-                        "analysis": analysis,
-                        "chunk_id": chunk.chunk_id,
-                        "page": chunk.page_start
-                    })
-                    
-                    image_count += 1
-                    logger.info(f"图像分析完成 | image_id=img_{image_count} | length={len(analysis)}")
-                    
-                except Exception as e:
-                    logger.error(f"图像分析失败 | path={img.get('path', 'unknown')} | error={e}")
-                    image_analyses.append({
-                        "image_id": f"img_{image_count + 1}",
-                        "path": str(img.get("path", "unknown")),
-                        "analysis": f"图像分析失败: {e}",
-                        "chunk_id": chunk.chunk_id,
-                        "page": chunk.page_start,
-                        "error": str(e)
-                    })
+        try:
+            analysis = self.llm_client.vision_describe(img["path"], prompt)
+            return {
+                "image_id": f"img_{idx + 1}",
+                "path": str(img["path"]),
+                "analysis": analysis,
+                "chunk_id": chunk.chunk_id,
+                "page": chunk.page_start
+            }
+        except Exception as e:
+            logger.error(f"图像分析失败 | path={img.get('path', 'unknown')} | error={e}")
+            return {
+                "image_id": f"img_{idx + 1}",
+                "path": str(img.get("path", "unknown")),
+                "analysis": f"图像分析失败: {e}",
+                "chunk_id": chunk.chunk_id,
+                "page": chunk.page_start,
+                "error": str(e)
+            }
         
         logger.info(f"图像分析完成 | total_images={image_count}")
         return image_analyses
@@ -604,40 +629,57 @@ class LLMAPIIngestionPipeline:
         """生成普通章节摘要（不使用递归）"""
         chapter_summaries = []
         
+        # 准备章节任务
+        chapter_tasks = []
         for chapter in doc.chapters:
-            try:
-                # 收集章节相关的文本内容
-                chapter_texts = []
-                for chunk in doc.chunks:
-                    if chunk.chapter_title == chapter.title and chunk.chunk_type == "text":
-                        chapter_texts.append(chunk.content)
-                
-                if not chapter_texts:
-                    continue
-                
-                # 章节内容总结
-                chapter_content = "\n\n".join(chapter_texts)
-                chapter_summary = self.llm_client.summarize(chapter_content)["summary"]
-                
-                chapter_summaries.append({
-                    "chapter_title": chapter.title,
-                    "start_page": chapter.start_page,
-                    "end_page": chapter.end_page,
-                    "summary": chapter_summary,
-                    "text_length": len(chapter_content)
-                })
-                
-                logger.info(f"章节摘要生成完成 | chapter={chapter.title} | length={len(chapter_summary)}")
-                
-            except Exception as e:
-                logger.error(f"章节摘要生成失败 | chapter={chapter.title} | error={e}")
-                chapter_summaries.append({
-                    "chapter_title": chapter.title,
-                    "start_page": chapter.start_page,
-                    "end_page": chapter.end_page,
-                    "summary": f"章节摘要生成失败: {e}",
-                    "error": str(e)
-                })
+            chapter_texts = []
+            for chunk in doc.chunks:
+                if chunk.chapter_title == chapter.title and chunk.chunk_type == "text":
+                    chapter_texts.append(chunk.content)
+            chapter_tasks.append((chapter, chapter_texts))
+        
+        # 普通章节摘要并发执行
+        max_workers = min(4, len(chapter_tasks))
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = {executor.submit(self._summarize_single_chapter, chapter, texts): chapter for chapter, texts in chapter_tasks}
+            for future in futures:
+                try:
+                    result = future.result()
+                    chapter_summaries.append(result)
+                    if "error" not in result:
+                        logger.info(f"章节摘要生成完成 | chapter={result['chapter_title']} | length={len(result['summary'])}")
+                except Exception as e:
+                    chapter = futures[future]
+                    logger.error(f"章节摘要生成失败 | chapter={chapter.title} | error={e}")
+                    chapter_summaries.append({
+                        "chapter_title": chapter.title,
+                        "start_page": chapter.start_page,
+                        "end_page": chapter.end_page,
+                        "summary": f"章节摘要生成失败: {e}",
+                        "error": str(e)
+                    })
+        
+        return chapter_summaries
+    
+    def _summarize_single_chapter(self, chapter, chapter_texts: List[str]) -> Dict[str, Any]:
+        """总结单个章节（用于线程池并发）"""
+        if not chapter_texts:
+            return {
+                "chapter_title": chapter.title,
+                "start_page": chapter.start_page,
+                "end_page": chapter.end_page,
+                "summary": "",
+                "text_length": 0
+            }
+        chapter_content = "\n\n".join(chapter_texts)
+        chapter_summary = self.llm_client.summarize(chapter_content)["summary"]
+        return {
+            "chapter_title": chapter.title,
+            "start_page": chapter.start_page,
+            "end_page": chapter.end_page,
+            "summary": chapter_summary,
+            "text_length": len(chapter_content)
+        }
         
         return chapter_summaries
     
@@ -873,18 +915,30 @@ class LLMAPIIngestionPipeline:
             return "\n\n".join([s["summary"] for s in chapter_summaries])
     
     def _grouped_recursive_aggregation(self, chapter_summaries: List[Dict]) -> str:
-        """分组递归聚合"""
+        """分组递归聚合（组间并发）"""
         group_size = 4
         groups = [chapter_summaries[i:i+group_size] for i in range(0, len(chapter_summaries), group_size)]
         
-        group_summaries = []
-        for i, group in enumerate(groups):
-            group_summary = self._direct_summary_aggregation(group)
-            group_summaries.append({
-                "chapter_title": f"组{i+1}",
-                "summary": group_summary,
-                "index": i
-            })
+        max_workers = min(4, len(groups))
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = {executor.submit(self._direct_summary_aggregation, group): i for i, group in enumerate(groups)}
+            group_summaries = []
+            for future in futures:
+                i = futures[future]
+                try:
+                    group_summary = future.result()
+                    group_summaries.append({
+                        "chapter_title": f"组{i+1}",
+                        "summary": group_summary,
+                        "index": i
+                    })
+                except Exception as e:
+                    logger.error(f"分组聚合失败 | group={i} | error={e}")
+                    group_summaries.append({
+                        "chapter_title": f"组{i+1}",
+                        "summary": "",
+                        "index": i
+                    })
         
         if len(group_summaries) > 3:
             return self._grouped_recursive_aggregation(group_summaries)
