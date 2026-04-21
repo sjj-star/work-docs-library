@@ -432,142 +432,151 @@ embed_client.close()
 
 ## 配置说明
 
-### 环境变量（`.env`）
+### 三层配置优先级架构
+
+系统采用分层配置架构，按以下优先级解析配置值（高 → 低）：
+
+```
+1. 环境变量（Kimi CLI 运行时注入，如 llm.api_key）
+   ↓
+2. config.json（统一配置入口，Kimi CLI 持久化凭证 + 用户手动参数）
+   ↓
+3. .env 文件（开发/独立运行回退）
+   ↓
+4. 代码硬编码默认值
+```
+
+### 配置文件说明
+
+| 文件 | 作用 | 版本控制 | 使用场景 |
+|------|------|----------|----------|
+| `config.json` | **主配置入口**。Kimi CLI 自动注入 OAuth token，用户维护其他参数 | ❌ `.gitignore` 忽略 | 作为 Kimi Code CLI Plugin 运行时 |
+| `config.example.json` | 配置模板 | ✅ 提交到仓库 | 复制为 `config.json` 的起点 |
+| `.env` / `.env.example` | 环境变量配置 | ❌ `.gitignore` 忽略 | 独立运行 `main.py` / `doc_extractor.py`；`config.json` 缺失时回退 |
+
+### `config.json` 结构与机制
+
+`config.json` 由 `plugin.json` 的 `config_file` 字段指定，是 **Kimi Code CLI 凭证注入的目标文件**。
+
+```json
+{
+  "llm": {
+    "api_key": "",
+    "endpoint": "https://api.moonshot.cn/v1",
+    "provider": "kimi",
+    "model": "kimi-k2.5",
+    "thinking_enabled": false
+  },
+  "embedding": {
+    "api_key": "your_embedding_api_key",
+    "endpoint": "https://api.openai.com/v1",
+    "provider": "openai",
+    "model": "text-embedding-3-small",
+    "dimension": 1536
+  },
+  "image": { "max_edge": 1024, "quality": 85 },
+  "batch_size": 4,
+  "auto_vision": 0
+}
+```
+
+**凭证注入机制**：
+- `plugin.json` 中配置 `"inject": {"llm.api_key": "api_key", "llm.endpoint": "base_url"}`
+- **安装插件时**：Kimi CLI 将当前配置的 `api_key`（OAuth token 或静态 key）和 `base_url` 写入 `config.json`
+- **启动时**：Kimi CLI 自动刷新 `config.json` 中的凭证（如 OAuth token 过期刷新）
+- **运行时**：同时通过环境变量 `llm.api_key` / `llm.endpoint` 传递当前有效凭证
+
+**字段映射规则**：
+- `llm.api_key` → 对应环境变量 `WORKDOCS_LLM_API_KEY`
+- `llm.endpoint` → 对应环境变量 `WORKDOCS_LLM_BASE_URL`
+- `llm.provider` → 对应环境变量 `WORKDOCS_LLM_PROVIDER`
+- `llm.model` → 对应环境变量 `WORKDOCS_LLM_MODEL`
+- `embedding.dimension` → 对应环境变量 `WORKDOCS_EMBEDDING_DIMENSION`
+- 其余字段同理，完整映射见 `.env.example`
+
+### `.env` 文件（回退配置）
+
+当 `config.json` 不存在或对应字段为空时，系统自动回退到 `.env` 文件中的环境变量。
 
 | 变量名 | 默认值 | 说明 |
 |--------|--------|------|
-| `WORKDOCS_LLM_PROVIDER` | `openai` | LLM 提供商。支持 `openai`、`kimi` 或自定义（需提供 `BASE_URL`） |
-| `WORKDOCS_LLM_API_KEY` | 空 | API 密钥（必填） |
+| `WORKDOCS_LLM_PROVIDER` | `openai` | LLM 提供商：`openai`、`kimi` 或自定义 |
+| `WORKDOCS_LLM_API_KEY` | 空 | API 密钥 |
 | `WORKDOCS_LLM_BASE_URL` | `https://api.openai.com/v1` | API Base URL |
 | `WORKDOCS_LLM_MODEL` | `gpt-4o-mini` | 对话模型名称 |
-| `WORKDOCS_EMBEDDING_PROVIDER` | `openai` | 嵌入模型提供商（可选，默认使用 LLM_PROVIDER） |
-| `WORKDOCS_EMBEDDING_API_KEY` | 空 | 嵌入 API 密钥（可选） |
-| `WORKDOCS_EMBEDDING_BASE_URL` | 空 | 嵌入 API Base URL（可选） |
+| `WORKDOCS_EMBEDDING_PROVIDER` | `openai` | 嵌入模型提供商 |
+| `WORKDOCS_EMBEDDING_API_KEY` | 空 | 嵌入 API 密钥 |
+| `WORKDOCS_EMBEDDING_BASE_URL` | 空 | 嵌入 API Base URL |
 | `WORKDOCS_EMBEDDING_MODEL` | `text-embedding-3-small` | 嵌入模型名称 |
-| `WORKDOCS_EMBEDDING_DIMENSION` | `1536` | 嵌入向量维度（作为 dimensions 参数传递给 API） |
-| `WORKDOCS_LLM_THINKING_ENABLED` | `0` | 是否开启 Kimi 模型的思考模式（`1` 开启） |
-| `WORKDOCS_LLM_CONTEXT_MAX_TOKENS` | `6000` | LLM 上下文窗口最大 token 数 |
-| `WORKDOCS_CONTEXT_STRATEGY` | `smart` | 上下文选择策略：`recent`, `keyword`, `smart`, `truncate` |
-| `WORKDOCS_COST_OPTIMIZATION` | `balanced` | 成本优化策略：`aggressive`, `balanced`, `quality` |
-| `WORKDOCS_IMAGE_MAX_EDGE` | `1024` | 图片压缩后的最大边长（px） |
+| `WORKDOCS_EMBEDDING_DIMENSION` | `1536` | 嵌入向量维度（作为 `dimensions` 参数传递） |
+| `WORKDOCS_LLM_THINKING_ENABLED` | `0` | 是否开启思考模式（`1` 开启） |
+| `WORKDOCS_IMAGE_MAX_EDGE` | `1024` | 图片压缩后最大边长（px） |
 | `WORKDOCS_IMAGE_QUALITY` | `85` | JPEG 压缩质量 |
-| `WORKDOCS_BATCH_SIZE` | `4` | 调用嵌入 API 时的批处理大小 |
-| `WORKDOCS_AUTO_VISION` | `0` | 是否开启自动 Vision API 描述图片（`1` 开启） |
+| `WORKDOCS_BATCH_SIZE` | `4` | 嵌入 API 批处理大小 |
+| `WORKDOCS_AUTO_VISION` | `0` | 是否自动调用 Vision API 描述图片 |
 
-#### 关于 Embedding 维度配置
+**加载顺序**（后加载的不覆盖已存在的环境变量）：
+1. 项目根目录 `.env`
+2. `scripts/.env`
 
-##### 模型能力参考表
+### 配置场景示例
 
-| 提供商 | 模型 | 支持的维度 | 说明 |
-|--------|------|-----------|------|
-| **OpenAI** | text-embedding-3-small | `512`, `1536` | 可通过 dimensions 参数指定 |
-| **OpenAI** | text-embedding-3-large | `256`, `1024`, `3072` | 可通过 dimensions 参数指定 |
-| **OpenAI** | text-embedding-ada-002 | `1536` | 固定维度 |
-| **BigModel** | embedding-3 | `512`, `768`, `1024`, `1536`, ... | 支持自定义维度（官方文档确认） |
-| **Kimi** | embedding-3 | `1536`（实测） | 不支持 dimensions 参数 |
+#### 场景 1: 作为 Kimi CLI Plugin 运行（推荐）
 
-##### 配置说明
+1. 复制配置模板：
+   ```bash
+   cp config.example.json config.json
+   ```
+2. 安装插件到 Kimi CLI：
+   ```bash
+   kimi plugin install /path/to/work-docs-library
+   ```
+3. Kimi CLI 自动将 OAuth token 注入 `config.json`
+4. （可选）手动编辑 `config.json` 补充 embedding 等非注入参数
+
+无需创建 `.env` 文件，所有配置由 `config.json` 管理。
+
+#### 场景 2: 独立运行（开发/测试）
 
 ```bash
-# 单一维度配置：作为 dimensions 参数传递给 API
-# 支持的 API 会使用此值，不支持的 API 会忽略它
-WORKDOCS_EMBEDDING_DIMENSION=1536
+cp scripts/.env.example scripts/.env
+# 编辑 scripts/.env，填入 API Key
+python scripts/main.py /path/to/document.pdf
 ```
 
-**重要原则**：
-1. **维度由模型决定**：配置中的值只是你的期望，实际维度由模型和 API 决定
-2. **无条件传递**：代码总是将 `dimensions` 参数传递给 API，不根据供应商类型做判断
-3. **首次验证**：系统首次调用嵌入 API 时会验证实际返回的维度，如果与配置不一致会记录警告
-4. **向量索引不可变**：FAISS 索引创建后维度固定。如果更换模型导致维度变化，必须删除旧索引并重新处理文档
-5. **如何选择维度**：
-   - 更小的维度（512）：更快的检索速度，更低的存储成本
-   - 更大的维度（1536+）：更高的精度，更慢的检索速度
+#### 场景 3: 混合使用（config.json + .env 互补）
 
-##### 配置示例
+- `config.json` 中配置 LLM 凭证（由 Kimi CLI 自动注入）
+- `.env` 中配置 Embedding 参数（因为 Kimi CLI 只注入 LLM 凭证）
 
-```bash
-# OpenAI - 支持动态维度
-WORKDOCS_EMBEDDING_PROVIDER=openai
-WORKDOCS_EMBEDDING_MODEL=text-embedding-3-small
-WORKDOCS_EMBEDDING_DIMENSION=512     # 可选 512 或 1536
-
-# BigModel - 支持动态维度（官方文档确认）
-WORKDOCS_EMBEDDING_PROVIDER=bigmodel
-WORKDOCS_EMBEDDING_MODEL=embedding-3
-WORKDOCS_EMBEDDING_DIMENSION=1024    # 可选 512, 768, 1024, 1536 等
-
-# Kimi - 固定维度
-WORKDOCS_EMBEDDING_PROVIDER=kimi
-WORKDOCS_EMBEDDING_MODEL=embedding-3
-WORKDOCS_EMBEDDING_DIMENSION=1536    # 实测固定返回 1536 维
+```json
+// config.json
+{
+  "llm": {
+    "api_key": "",
+    "endpoint": "https://api.moonshot.cn/v1",
+    "provider": "kimi",
+    "model": "kimi-k2.5"
+  }
+}
 ```
 
-**加载顺序：**
-
-1. `~/.kimi/plugins/work-docs-library/.env`（先加载，可被覆盖）
-2. `~/.kimi/plugins/work-docs-library/scripts/.env`（后加载，优先级更高）
-
-### 配置示例
-
-#### 场景 1: LLM API Flow（独立配置）
-
-使用不同的供应商进行总结和向量化，发挥各自优势：
-
 ```bash
-# === LLM 对话模型（总结用）===
-WORKDOCS_LLM_PROVIDER=kimi
-WORKDOCS_LLM_API_KEY=sk-***
-WORKDOCS_LLM_BASE_URL=https://api.moonshot.cn/v1
-WORKDOCS_LLM_MODEL=kimi-k2.5
-WORKDOCS_LLM_THINKING_ENABLED=0
-
-# === Embedding 模型（向量化用）===
+# scripts/.env
 WORKDOCS_EMBEDDING_PROVIDER=openai
 WORKDOCS_EMBEDDING_API_KEY=sk-***
 WORKDOCS_EMBEDDING_MODEL=text-embedding-3-small
 WORKDOCS_EMBEDDING_DIMENSION=1536
-```
-
-#### 场景 2: Agent Skill Flow（仅向量化）
-
-仅配置 Embedding 模型，使用传统批处理流程（适合已有 Agent 工作流）：
-
-```bash
-# === 仅配置 Embedding 模型 ===
-WORKDOCS_EMBEDDING_PROVIDER=openai
-WORKDOCS_EMBEDDING_API_KEY=sk-***
-WORKDOCS_EMBEDDING_MODEL=text-embedding-3-small
-WORKDOCS_EMBEDDING_DIMENSION=1536
-```
-
-在此模式下，系统会跳过 LLM API 调用，仅执行向量化，保持与现有 Agent 批处理流程的兼容性。
-
-#### 场景 3: 使用同一供应商（简化配置）
-
-如果 LLM 和 Embedding 使用同一供应商，只需配置 LLM 部分，Embedding 会自动使用相同配置：
-
-```bash
-# === OpenAI 统一配置 ===
-WORKDOCS_LLM_PROVIDER=openai
-WORKDOCS_LLM_API_KEY=sk-***
-WORKDOCS_LLM_MODEL=gpt-4o-mini
-WORKDOCS_EMBEDDING_MODEL=text-embedding-3-small  # 可选，默认 text-embedding-3-small
 ```
 
 ### 配置验证
-
-在运行文档处理之前，建议先验证配置：
 
 ```bash
 cd ~/.kimi/plugins/work-docs-library
 PYTHONPATH=scripts ./venv/bin/python scripts/main.py --validate-config dummy_path
 ```
 
-该命令会检查：
-- 环境变量配置完整性
-- API 密钥有效性（可选）
-- 模型名称合法性
-- 所选操作模式的配置要求
+检查项：环境变量完整性、API 密钥有效性、模型名称合法性、操作模式匹配性。
 
 ### 过滤规则 (`scripts/prompts/filter_config.json`)
 
@@ -1090,19 +1099,6 @@ PYTHONPATH=scripts ./venv/bin/python -m pytest scripts/tests/ -v
 | API Key 泄漏 | **低** | Key 存储于 `.env`，未硬编码到代码中。 |
 | JSON 反序列化 | **低** | 所有 JSON 使用标准库 `json.load()`，无自定义反序列化风险。 |
 | 资源耗尽 | **中** | 大 PDF 的 diagram 渲染、大 DOCX 的单 chunk 合并都可能消耗较多内存/磁盘。 |
-
-### 代码风格分析
-
-**优点：**
-- 分层清晰：`core/`（业务）、`parsers/`（IO）、`tests/`（测试）。
-- 使用 dataclass 定义领域模型，类型注解覆盖较全。
-- `KnowledgeDB._connect()` 使用上下文管理器管理连接生命周期。
-
-**待改进：**
-- `pdf_parser.py` 中存在大量 magic numbers（已提取为常量但缺少文档注释说明来源）。
-- `doc_extractor.py` 与 `agent_batch_helper.py` 存在重复的路径校验逻辑，可进一步抽象到 `core/utils.py`。
-- `IngestionPipeline._process_one` 职责过重，建议拆分为 `_extract_chunks`、`_auto_vision`、`_generate_embeddings` 等私有方法。
-- ~~项目中 `print()` 与 `logging` 混用，建议未来统一为结构化日志。~~ **已修复**：诊断/进度/错误信息已统一使用 `logging`（Agent 友好的结构化格式：`%(asctime)s | %(levelname)-8s | %(name)s | %(message)s`），CLI 格式化结果展示与交互式 TUI 保留 `print()`。
 
 ---
 
