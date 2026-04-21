@@ -32,8 +32,8 @@ class PDFParser:
     # or "Figure 1-1 Description" (where the word after the number starts with a capital
     # letter). It excludes explanatory sentences like "Figure 1-1 shows..." or
     # "Figure 1-1 is a hierarchical...".
-    FIGURE_CAPTION_RE = r"^Figure\s+[A-Z]?\d+[-\.]\d+(?:[:\.]\s*\S|\s+[A-Z]\S*)"
-    TABLE_CAPTION_RE = r"^(Table|表)\s*[A-Z]?\d+[-\.]\d+(?:[:\.]\s*\S|\s+[A-Z]\S*)"
+    FIGURE_CAPTION_RE = r"^Figure\s+[A-Z]?\d+(?:[-\.]\d+)?(?:[:\.]\s*\S|\s+[A-Z]\S*)"
+    TABLE_CAPTION_RE = r"^(Table|表)\s*[A-Z]?\d+(?:[-\.]\d+)?(?:[:\.]\s*\S|\s+[A-Z]\S*)"
     CALLOUT_PREFIXES = ("A.", "B.", "C.", "D.", "E.", "F.", "G.", "H.")
     CALLOUT_NOTE_PREFIX = "Note:"
     CALLOUT_GAP_THRESHOLD = 45
