@@ -32,3 +32,6 @@ checkpoint.json
 # OS
 .DS_Store
 Thumbs.db
+
+# Kimi CLI plan files
+.kimi/
