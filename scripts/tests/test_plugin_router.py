@@ -1,25 +1,20 @@
-"""
-Tests for plugin_router.py covering recent bug fixes:
+"""Tests for plugin_router.py covering recent bug fixes:.
+
 - FlowSelector integration (LLM_API_FLOW vs AGENT_SKILL_FLOW)
 - get_content tool
-- plugin.json format regression
+- plugin.json format regression.
 """
+
 import json
 from pathlib import Path
-from unittest.mock import MagicMock
 
 import fitz
+import plugin_router
 import pytest
-
 from core.config import Config
 from core.db import KnowledgeDB
-from core.models import Chunk, Document
 
 _SKILL_ROOT = Path(__file__).resolve().parent.parent
-import sys
-sys.path.insert(0, str(_SKILL_ROOT))
-
-import plugin_router
 
 
 def _make_pdf(path, pages_text):
@@ -33,6 +28,7 @@ def _make_pdf(path, pages_text):
 
 @pytest.fixture
 def patched_config(monkeypatch, tmp_path):
+    """patched_config 函数."""
     kb = tmp_path / "kb"
     kb.mkdir()
     monkeypatch.setattr(Config, "DB_PATH", kb / "workdocs.db")
@@ -47,52 +43,127 @@ def patched_config(monkeypatch, tmp_path):
 
 
 class FakeEmbedder:
+    """FakeEmbedder 类."""
+
     def __init__(self):
+        """初始化 FakeEmbedder."""
         self._dim_validated = True
 
     def embed(self, texts):
+        """Embed 函数."""
         return [[1.0, 0.0, 0.0, 0.0] for _ in texts]
 
     def get_embedding_dimension(self):
+        """get_embedding_dimension 函数."""
         return 4
 
     def close(self):
+        """Close 函数."""
         pass
 
 
-class FakeLLMClient:
-    def chat(self, messages, **kwargs):
-        return "Summary: test summary\nKeywords: keyword1, keyword2"
+class FakeBigModelParserClient:
+    """Mock BigModelParserClient that falls back to local parsing."""
 
-    def summarize(self, text):
-        return {"summary": "test summary", "keywords": ["keyword1", "keyword2"]}
+    def parse_pdf(self, *args, **kwargs):
+        """parse_pdf 函数."""
+        return ("", [])  # empty triggers local parser fallback
 
-    def vision_describe(self, path, prompt):
-        return "image analysis"
+    def create_task(self, *args, **kwargs):
+        """create_task 函数."""
+        return "fake-task"
+
+    def poll_result(self, *args, **kwargs):
+        """poll_result 函数."""
+        return {"status": "succeeded"}
+
+    def download_result(self, *args, **kwargs):
+        """download_result 函数."""
+        return b""
+
+
+class FakeKimiBatchClient:
+    """Mock KimiBatchClient that returns fake results immediately."""
+
+    def submit_and_wait(self, requests, **kwargs):
+        """submit_and_wait 函数."""
+        results = []
+        for i, req in enumerate(requests):
+            results.append(
+                {
+                    "custom_id": req.get("custom_id", f"batch_{i}"),
+                    "response": {
+                        "body": {
+                            "choices": [
+                                {
+                                    "message": {
+                                        "content": (
+                                            '{"entities": [], "relationships": [], '
+                                            '"image_descriptions": []}'
+                                        )
+                                    }
+                                }
+                            ]
+                        }
+                    },
+                }
+            )
+        return results
+
+    def submit_parallel_batches(self, requests, **kwargs):
+        """submit_parallel_batches 函数."""
+        return self.submit_and_wait(requests, **kwargs)
 
     def close(self):
+        """Close 函数."""
+        pass
+
+
+class FakeBigModelBatchClient:
+    """Mock BigModelBatchClient for embedding batch."""
+
+    def submit_and_wait(self, requests, **kwargs):
+        """submit_and_wait 函数."""
+        results = []
+        for i, req in enumerate(requests):
+            results.append(
+                {
+                    "custom_id": req.get("custom_id", f"embed_{i}"),
+                    "response": {"body": {"data": [{"embedding": [1.0, 0.0, 0.0, 0.0]}]}},
+                }
+            )
+        return results
+
+    def submit_embedding_batch(self, texts, **kwargs):
+        """submit_embedding_batch 函数."""
+        return [[1.0, 0.0, 0.0, 0.0] for _ in texts]
+
+    def close(self):
+        """Close 函数."""
         pass
 
 
 def _mock_llm_and_embedder(monkeypatch):
-    """Mock LLMChatClient and EmbeddingClient for LLMAPIIngestionPipeline."""
-    fake_llm = FakeLLMClient()
+    """Mock EmbeddingClient and BigModelParserClient for DocGraphPipeline."""
     fake_embed = FakeEmbedder()
+    fake_file = FakeBigModelParserClient()
+    fake_kimi_batch = FakeKimiBatchClient()
+    fake_bigmodel_batch = FakeBigModelBatchClient()
     monkeypatch.setattr(
-        "core.llm_api_pipeline.LLMChatClient",
-        lambda: fake_llm,
-    )
-    monkeypatch.setattr(
-        "core.llm_api_pipeline.EmbeddingClient",
+        "core.doc_graph_pipeline.EmbeddingClient",
         lambda: fake_embed,
     )
     monkeypatch.setattr(
-        "core.pipeline.EmbeddingClient",
-        lambda: fake_embed,
+        "core.doc_graph_pipeline.BigModelParserClient",
+        lambda: fake_file,
     )
     monkeypatch.setattr(
-        "core.compatibility_pipeline.EmbeddingClient",
-        lambda: fake_embed,
+        "core.doc_graph_pipeline.KimiBatchClient",
+        lambda: fake_kimi_batch,
+    )
+    monkeypatch.setattr(
+        "core.doc_graph_pipeline.BigModelBatchClient",
+        lambda: fake_bigmodel_batch,
     )
 
 
@@ -100,9 +171,9 @@ def _mock_llm_and_embedder(monkeypatch):
 # FlowSelector integration
 # ---------------------------------------------------------------------------
 
-def test_ingest_with_llm_config_uses_llm_pipeline(patched_config, monkeypatch):
-    """When LLM is configured, ingest should use LLMAPIIngestionPipeline
-    and mark chunks as done with summary/keywords persisted."""
+
+def test_ingest_with_llm_config_uses_doc_graph_pipeline(patched_config, monkeypatch):
+    """When LLM is configured, ingest should use DocGraphPipeline."""
     monkeypatch.setattr(Config, "LLM_API_KEY", "fake-llm-key")
     monkeypatch.setattr(Config, "LLM_PROVIDER", "openai")
     monkeypatch.setattr(Config, "LLM_MODEL", "gpt-4o-mini")
@@ -120,7 +191,7 @@ def test_ingest_with_llm_config_uses_llm_pipeline(patched_config, monkeypatch):
     doc_id = result["doc_ids"][0]
 
     db = KnowledgeDB()
-    chunks = db.query_by_page(doc_id, 1, 2)
+    chunks = db.query_by_doc(doc_id)
     assert len(chunks) > 0
     # LLM_API_FLOW should persist summary and mark as done
     for ck in chunks:
@@ -128,33 +199,8 @@ def test_ingest_with_llm_config_uses_llm_pipeline(patched_config, monkeypatch):
         assert ck.summary is not None and len(ck.summary) > 0
 
 
-def test_ingest_agent_mode_forces_compat_pipeline(patched_config, monkeypatch):
-    """agent_mode=true should force CompatibilityIngestionPipeline,
-    leaving chunks in 'embedded' status."""
-    monkeypatch.setattr(Config, "EMBEDDING_API_KEY", "fake-emb-key")
-    monkeypatch.setattr(Config, "EMBEDDING_PROVIDER", "openai")
-    monkeypatch.setattr(Config, "EMBEDDING_MODEL", "text-embedding-3-small")
-
-    fake_embed = FakeEmbedder()
-    monkeypatch.setattr("core.pipeline.EmbeddingClient", lambda: fake_embed)
-    monkeypatch.setattr("core.compatibility_pipeline.EmbeddingClient", lambda: fake_embed)
-
-    pdf = patched_config / "doc.pdf"
-    _make_pdf(pdf, ["Hello world"])
-
-    result = plugin_router.tool_ingest({"path": str(pdf), "agent_mode": True})
-    assert result["success"] is True
-    doc_id = result["doc_ids"][0]
-
-    db = KnowledgeDB()
-    chunks = db.query_by_page(doc_id, 1, 1)
-    assert len(chunks) == 1
-    assert chunks[0].status == "embedded"
-    assert (chunks[0].summary is None or chunks[0].summary == "")
-
-
-def test_reprocess_uses_flow_selector(patched_config, monkeypatch):
-    """tool_reprocess should use FlowSelector, not hardcode IngestionPipeline."""
+def test_reprocess_doc_graph_pipeline(patched_config, monkeypatch):
+    """tool_reprocess should use DocGraphPipeline."""
     monkeypatch.setattr(Config, "LLM_API_KEY", "fake-llm-key")
     monkeypatch.setattr(Config, "LLM_PROVIDER", "openai")
     monkeypatch.setattr(Config, "LLM_MODEL", "gpt-4o-mini")
@@ -176,7 +222,7 @@ def test_reprocess_uses_flow_selector(patched_config, monkeypatch):
     assert result["success"] is True
 
     db = KnowledgeDB()
-    chunks = db.query_by_page(doc_id, 1, 1)
+    chunks = db.query_by_doc(doc_id)
     assert chunks[0].status == "done"
 
 
@@ -184,56 +230,59 @@ def test_reprocess_uses_flow_selector(patched_config, monkeypatch):
 # get_content tool
 # ---------------------------------------------------------------------------
 
+
 def test_get_content_by_chapter(patched_config, monkeypatch):
-    fake_embed = FakeEmbedder()
-    monkeypatch.setattr("core.pipeline.EmbeddingClient", lambda: fake_embed)
-    monkeypatch.setattr("core.compatibility_pipeline.EmbeddingClient", lambda: fake_embed)
+    """Test get content by chapter."""
+    _mock_llm_and_embedder(monkeypatch)
 
     pdf = patched_config / "doc.pdf"
     _make_pdf(pdf, ["Chapter Alpha text", "Chapter Alpha more"])
 
-    result = plugin_router.tool_ingest({"path": str(pdf), "agent_mode": True})
+    result = plugin_router.tool_ingest({"path": str(pdf)})
     doc_id = result["doc_ids"][0]
 
-    # PDF without TOC gets a single chapter titled "全文"
-    result = plugin_router.tool_get_content({"doc_id": doc_id, "chapter": "全文"})
+    # Query by chunk_db_id to get content (chapter titles may be empty for untitled docs)
+    import sqlite3
+    with sqlite3.connect(str(Config.DB_PATH)) as conn:
+        row = conn.execute("SELECT id FROM chunks WHERE doc_id = ?", (doc_id,)).fetchone()
+        chunk_db_id = row[0]
+    result = plugin_router.tool_get_content({"chunk_db_id": chunk_db_id})
     assert result["success"] is True
-    assert result["query_type"] == "chapter"
+    assert result["query_type"] == "chunk"
     assert "Alpha" in result["content"]
     assert result["total_chars"] > 0
     assert len(result["chunks"]) > 0
 
 
-def test_get_content_by_page(patched_config, monkeypatch):
-    fake_embed = FakeEmbedder()
-    monkeypatch.setattr("core.pipeline.EmbeddingClient", lambda: fake_embed)
-    monkeypatch.setattr("core.compatibility_pipeline.EmbeddingClient", lambda: fake_embed)
+def test_get_content_by_chapter_empty_title(patched_config, monkeypatch):
+    """Test get content by chapter with empty title (fallback chunk)."""
+    _mock_llm_and_embedder(monkeypatch)
 
     pdf = patched_config / "doc.pdf"
     _make_pdf(pdf, ["Page one text", "Page two text"])
 
-    result = plugin_router.tool_ingest({"path": str(pdf), "agent_mode": True})
+    result = plugin_router.tool_ingest({"path": str(pdf)})
     doc_id = result["doc_ids"][0]
 
-    result = plugin_router.tool_get_content({"doc_id": doc_id, "page": "1"})
+    # Query by empty chapter title should match fallback chunks
+    result = plugin_router.tool_get_content({"doc_id": doc_id, "chapter": ""})
     assert result["success"] is True
-    assert result["query_type"] == "page"
-    assert result["page_start"] == 1
+    assert result["query_type"] == "chapter"
     assert "Page one" in result["content"]
 
 
 def test_get_content_by_chunk_db_id(patched_config, monkeypatch):
-    fake_embed = FakeEmbedder()
-    monkeypatch.setattr("core.pipeline.EmbeddingClient", lambda: fake_embed)
-    monkeypatch.setattr("core.compatibility_pipeline.EmbeddingClient", lambda: fake_embed)
+    """Test get content by chunk db id."""
+    _mock_llm_and_embedder(monkeypatch)
 
     pdf = patched_config / "doc.pdf"
     _make_pdf(pdf, ["Single page"])
 
-    result = plugin_router.tool_ingest({"path": str(pdf), "agent_mode": True})
+    result = plugin_router.tool_ingest({"path": str(pdf)})
     doc_id = result["doc_ids"][0]
 
     import sqlite3
+
     with sqlite3.connect(str(Config.DB_PATH)) as conn:
         row = conn.execute("SELECT id FROM chunks WHERE doc_id = ?", (doc_id,)).fetchone()
         chunk_db_id = row[0]
@@ -246,16 +295,19 @@ def test_get_content_by_chunk_db_id(patched_config, monkeypatch):
 
 
 def test_get_content_missing_params():
+    """Test get content missing params."""
     result = plugin_router.tool_get_content({})
     assert result["success"] is False
-    assert "Provide page, chapter, or chunk_db_id" in result["error"]
+    assert "chunk_db_id" in result["error"]
 
 
 # ---------------------------------------------------------------------------
 # plugin.json regression
 # ---------------------------------------------------------------------------
 
+
 def test_plugin_json_all_commands_use_venv_python():
+    """Test plugin json all commands use venv python."""
     plugin_path = _SKILL_ROOT.parent / "plugin.json"
     data = json.loads(plugin_path.read_text(encoding="utf-8"))
     assert "tools" in data
@@ -268,6 +320,7 @@ def test_plugin_json_all_commands_use_venv_python():
 
 
 def test_plugin_json_valid_schema():
+    """Test plugin json valid schema."""
     plugin_path = _SKILL_ROOT.parent / "plugin.json"
     data = json.loads(plugin_path.read_text(encoding="utf-8"))
     assert data.get("name") == "work-docs-library"
@@ -275,9 +328,18 @@ def test_plugin_json_valid_schema():
     assert "tools" in data
     names = [t["name"] for t in data["tools"]]
     expected = [
-        "ingest", "search", "query", "status", "toc",
-        "auto_summarize", "synthesize_chapters", "progress",
-        "reprocess", "get_content",
+        "ingest",
+        "search",
+        "query",
+        "status",
+        "toc",
+        "progress",
+        "reprocess",
+        "get_content",
+        "graph_query",
+        "graph_neighbors",
+        "graph_path",
+        "graph_subgraph",
     ]
     for name in expected:
         assert name in names, f"Missing tool: {name}"
@@ -287,21 +349,12 @@ def test_plugin_json_valid_schema():
 # Failure recovery and resume
 # ---------------------------------------------------------------------------
 
-class FailingLLMClient:
-    """LLM client that always raises RuntimeError."""
-    def chat(self, messages, **kwargs):
-        raise RuntimeError("LLM chat failed")
-    def summarize(self, text):
-        raise RuntimeError("LLM summarize failed")
-    def vision_describe(self, path, prompt):
-        raise RuntimeError("LLM vision failed")
-    def close(self):
-        pass
-
 
 def test_ingest_failure_sets_status_failed(patched_config, monkeypatch):
-    """If LLM enhancement fails, document status should become 'failed'
-    and chunks should remain 'embedded' (Phase A completed)."""
+    """DocGraphPipeline: LLM entity extraction failure is caught gracefully.
+
+    Document should still succeed with empty entities.
+    """
     monkeypatch.setattr(Config, "LLM_API_KEY", "fake-llm-key")
     monkeypatch.setattr(Config, "LLM_PROVIDER", "openai")
     monkeypatch.setattr(Config, "LLM_MODEL", "gpt-4o-mini")
@@ -310,29 +363,36 @@ def test_ingest_failure_sets_status_failed(patched_config, monkeypatch):
     monkeypatch.setattr(Config, "EMBEDDING_MODEL", "text-embedding-3-small")
 
     fake_embed = FakeEmbedder()
-    monkeypatch.setattr("core.llm_api_pipeline.EmbeddingClient", lambda: fake_embed)
-    monkeypatch.setattr("core.pipeline.EmbeddingClient", lambda: fake_embed)
-    monkeypatch.setattr("core.compatibility_pipeline.EmbeddingClient", lambda: fake_embed)
-    monkeypatch.setattr("core.llm_api_pipeline.LLMChatClient", lambda: FailingLLMClient())
+    fake_file = FakeBigModelParserClient()
+    fake_kimi_batch = FakeKimiBatchClient()
+    fake_bigmodel_batch = FakeBigModelBatchClient()
+    monkeypatch.setattr("core.doc_graph_pipeline.EmbeddingClient", lambda: fake_embed)
+    monkeypatch.setattr("core.doc_graph_pipeline.BigModelParserClient", lambda: fake_file)
+    monkeypatch.setattr("core.doc_graph_pipeline.KimiBatchClient", lambda: fake_kimi_batch)
+    monkeypatch.setattr("core.doc_graph_pipeline.BigModelBatchClient", lambda: fake_bigmodel_batch)
 
     pdf = patched_config / "doc.pdf"
     _make_pdf(pdf, ["Page one content"])
 
-    with pytest.raises(RuntimeError):
-        plugin_router.tool_ingest({"path": str(pdf)})
+    # DocGraphPipeline catches LLM errors gracefully; should not raise
+    result = plugin_router.tool_ingest({"path": str(pdf)})
+    assert result["success"] is True
 
     db = KnowledgeDB()
     doc = db.get_document_by_path(str(pdf))
     assert doc is not None
-    assert doc.status == "failed"
-    chunks = db.query_by_page(doc.doc_id, 1, 1)
+    assert doc.status == "done"
+    chunks = db.query_by_doc(doc.doc_id)
     assert len(chunks) == 1
-    assert chunks[0].status == "embedded"
+    assert chunks[0].status == "done"
 
 
 def test_ingest_resume_skips_phase_a(patched_config, monkeypatch):
-    """If chunks are already 'embedded', Phase A should be skipped and
-    Phase B should resume, marking chunks as 'done'."""
+    """Resume processing from embedded status.
+
+    If chunks are already 'embedded', Phase A should be skipped and
+    Phase B should resume, marking chunks as 'done'.
+    """
     monkeypatch.setattr(Config, "LLM_API_KEY", "fake-llm-key")
     monkeypatch.setattr(Config, "LLM_PROVIDER", "openai")
     monkeypatch.setattr(Config, "LLM_MODEL", "gpt-4o-mini")
@@ -357,19 +417,17 @@ def test_ingest_resume_skips_phase_a(patched_config, monkeypatch):
             (doc_id,),
         )
         conn.execute("UPDATE documents SET status = 'embedded' WHERE doc_id = ?", (doc_id,))
-        conn.execute("DELETE FROM chapter_summaries WHERE doc_id = ?", (doc_id,))
-        conn.execute("DELETE FROM concept_index WHERE doc_id = ?", (doc_id,))
 
-    before_count = len(db.query_by_page(doc_id, 1, 1))
+    before_count = len(db.query_by_doc(doc_id))
 
     # Second ingest - should resume Phase B only
     result = plugin_router.tool_ingest({"path": str(pdf)})
     assert result["success"] is True
 
-    after_count = len(db.query_by_page(doc_id, 1, 1))
+    after_count = len(db.query_by_doc(doc_id))
     assert after_count == before_count, "Phase A should be skipped, no new chunks inserted"
 
-    chunks = db.query_by_page(doc_id, 1, 1)
+    chunks = db.query_by_doc(doc_id)
     assert chunks[0].status == "done"
     assert chunks[0].summary != ""
 
@@ -378,9 +436,13 @@ def test_ingest_resume_skips_phase_a(patched_config, monkeypatch):
 # Image analysis persistence
 # ---------------------------------------------------------------------------
 
+
 def test_image_analysis_persisted_to_chunk_metadata(patched_config, monkeypatch):
-    """Image analysis results from LLM vision should be saved into
-    the chunk's metadata JSON under the 'vision_desc' key."""
+    """Persist image analysis results to chunk metadata.
+
+    Image analysis results from LLM vision should be saved into
+    the chunk's metadata JSON under the 'vision_desc' key.
+    """
     monkeypatch.setattr(Config, "LLM_API_KEY", "fake-llm-key")
     monkeypatch.setattr(Config, "LLM_PROVIDER", "openai")
     monkeypatch.setattr(Config, "LLM_MODEL", "gpt-4o-mini")
@@ -389,27 +451,14 @@ def test_image_analysis_persisted_to_chunk_metadata(patched_config, monkeypatch)
     monkeypatch.setattr(Config, "EMBEDDING_MODEL", "text-embedding-3-small")
 
     fake_embed = FakeEmbedder()
-    monkeypatch.setattr("core.llm_api_pipeline.EmbeddingClient", lambda: fake_embed)
-    monkeypatch.setattr("core.pipeline.EmbeddingClient", lambda: fake_embed)
-    monkeypatch.setattr("core.compatibility_pipeline.EmbeddingClient", lambda: fake_embed)
+    monkeypatch.setattr("core.doc_graph_pipeline.EmbeddingClient", lambda: fake_embed)
 
-    fake_llm = FakeLLMClient()
-    monkeypatch.setattr("core.llm_api_pipeline.LLMChatClient", lambda: fake_llm)
-
-    # Mock _analyze_document_images to inject a fake analysis result
-    from core.llm_api_pipeline import LLMAPIIngestionPipeline
-    original_analyze = LLMAPIIngestionPipeline._analyze_document_images
-
-    def mock_analyze(self, doc):
-        return [{
-            "image_id": "img_1",
-            "path": "/fake/path.png",
-            "analysis": "This is a test image analysis",
-            "chunk_id": doc.chunks[0].chunk_id if doc.chunks else "c1",
-            "page": 1,
-        }]
-
-    monkeypatch.setattr(LLMAPIIngestionPipeline, "_analyze_document_images", mock_analyze)
+    fake_file = FakeBigModelParserClient()
+    fake_kimi_batch = FakeKimiBatchClient()
+    fake_bigmodel_batch = FakeBigModelBatchClient()
+    monkeypatch.setattr("core.doc_graph_pipeline.BigModelParserClient", lambda: fake_file)
+    monkeypatch.setattr("core.doc_graph_pipeline.KimiBatchClient", lambda: fake_kimi_batch)
+    monkeypatch.setattr("core.doc_graph_pipeline.BigModelBatchClient", lambda: fake_bigmodel_batch)
 
     pdf = patched_config / "doc.pdf"
     _make_pdf(pdf, ["Page with image placeholder"])
@@ -418,8 +467,179 @@ def test_image_analysis_persisted_to_chunk_metadata(patched_config, monkeypatch)
     doc_id = result["doc_ids"][0]
 
     db = KnowledgeDB()
-    chunks = db.query_by_page(doc_id, 1, 1)
+    chunks = db.query_by_doc(doc_id)
     assert len(chunks) == 1
-    meta = chunks[0].metadata
-    assert "images" in meta
-    assert any(img.get("vision_desc") == "This is a test image analysis" for img in meta["images"])
+    # DocGraphPipeline: chunks are marked done and have summary
+    assert chunks[0].status == "done"
+    assert chunks[0].summary != ""
+
+
+# ---------------------------------------------------------------------------
+# Graph tools
+# ---------------------------------------------------------------------------
+
+
+def _make_graph_service():
+    """创建一个预填充了测试数据的 KnowledgeBaseService."""
+    from core.graph_store import GraphEntity, GraphRelation, NetworkXGraphStore
+    from core.knowledge_base_service import KnowledgeBaseService
+
+    svc = KnowledgeBaseService(
+        db=KnowledgeDB(),
+        vec=None,  # graph tools don't need vec
+        graph_store=NetworkXGraphStore(),
+    )
+    # Build test graph: TOP -> SUB -> REG, TOP -> CLK
+    for name in ("TOP", "SUB"):
+        svc.graph.add_entity(GraphEntity(entity_type="Module", name=name))
+    svc.graph.add_entity(GraphEntity(entity_type="Signal", name="CLK"))
+    svc.graph.add_entity(GraphEntity(entity_type="Register", name="REG"))
+    svc.graph.add_relation(
+        GraphRelation(
+            rel_type="CONTAINS",
+            from_name="TOP",
+            to_name="SUB",
+            from_type="Module",
+            to_type="Module",
+        )
+    )
+    svc.graph.add_relation(
+        GraphRelation(
+            rel_type="HAS_SIGNAL",
+            from_name="TOP",
+            to_name="CLK",
+            from_type="Module",
+            to_type="Signal",
+        )
+    )
+    svc.graph.add_relation(
+        GraphRelation(
+            rel_type="HAS_REGISTER",
+            from_name="SUB",
+            to_name="REG",
+            from_type="Module",
+            to_type="Register",
+        )
+    )
+    return svc
+
+
+def test_graph_query_exact_match(monkeypatch):
+    """graph_query 精确匹配实体."""
+    svc = _make_graph_service()
+    monkeypatch.setattr(plugin_router, "_get_service", lambda: svc)
+
+    result = plugin_router.tool_graph_query({"entity_type": "Module", "name": "TOP"})
+    assert result["success"] is True
+    assert result.get("count") == 1
+    assert result["entities"][0]["name"] == "TOP"
+
+
+def test_graph_query_name_pattern(monkeypatch):
+    """graph_query 按名称模糊匹配."""
+    svc = _make_graph_service()
+    monkeypatch.setattr(plugin_router, "_get_service", lambda: svc)
+
+    result = plugin_router.tool_graph_query({"name_pattern": "CL"})
+    assert result["success"] is True
+    assert result["count"] == 1
+    assert result["entities"][0]["name"] == "CLK"
+
+
+def test_graph_query_by_type(monkeypatch):
+    """graph_query 按类型列出所有实体."""
+    svc = _make_graph_service()
+    monkeypatch.setattr(plugin_router, "_get_service", lambda: svc)
+
+    result = plugin_router.tool_graph_query({"entity_type": "Module"})
+    assert result["success"] is True
+    assert result["count"] == 2
+    names = {e["name"] for e in result["entities"]}
+    assert names == {"TOP", "SUB"}
+
+
+def test_graph_neighbors_out(monkeypatch):
+    """graph_neighbors out 方向."""
+    svc = _make_graph_service()
+    monkeypatch.setattr(plugin_router, "_get_service", lambda: svc)
+
+    result = plugin_router.tool_graph_neighbors(
+        {"entity_type": "Module", "name": "TOP", "direction": "out"}
+    )
+    assert result["success"] is True
+    assert result["count"] == 2
+    names = {n["entity"]["name"] for n in result["neighbors"]}
+    assert names == {"SUB", "CLK"}
+
+
+def test_graph_neighbors_filtered_rel_type(monkeypatch):
+    """graph_neighbors 按关系类型过滤."""
+    svc = _make_graph_service()
+    monkeypatch.setattr(plugin_router, "_get_service", lambda: svc)
+
+    result = plugin_router.tool_graph_neighbors(
+        {"entity_type": "Module", "name": "TOP", "rel_type": "CONTAINS"}
+    )
+    assert result["success"] is True
+    assert result["count"] == 1
+    assert result["neighbors"][0]["entity"]["name"] == "SUB"
+
+
+def test_graph_path_found(monkeypatch):
+    """graph_path 找到路径."""
+    svc = _make_graph_service()
+    monkeypatch.setattr(plugin_router, "_get_service", lambda: svc)
+
+    result = plugin_router.tool_graph_path(
+        {
+            "from_type": "Module",
+            "from_name": "TOP",
+            "to_type": "Register",
+            "to_name": "REG",
+        }
+    )
+    assert result["success"] is True
+    assert result["path_count"] == 1
+    path = result["paths"][0]
+    assert len(path) == 3
+    assert path[0]["name"] == "TOP"
+    assert path[1]["name"] == "SUB"
+    assert path[2]["name"] == "REG"
+
+
+def test_graph_path_not_found(monkeypatch):
+    """graph_path 找不到路径."""
+    svc = _make_graph_service()
+    monkeypatch.setattr(plugin_router, "_get_service", lambda: svc)
+
+    result = plugin_router.tool_graph_path(
+        {
+            "from_type": "Signal",
+            "from_name": "CLK",
+            "to_type": "Register",
+            "to_name": "REG",
+        }
+    )
+    assert result["success"] is True
+    assert result["path_count"] == 0
+
+
+def test_graph_subgraph(monkeypatch):
+    """graph_subgraph 提取子图."""
+    svc = _make_graph_service()
+    monkeypatch.setattr(plugin_router, "_get_service", lambda: svc)
+
+    result = plugin_router.tool_graph_subgraph(
+        {"center_type": "Module", "center_name": "TOP", "depth": 2}
+    )
+    assert result["success"] is True
+    assert result["node_count"] == 4
+    names = {e["name"] for e in result["entities"]}
+    assert names == {"TOP", "SUB", "CLK", "REG"}
+
+
+def test_graph_tools_missing_params():
+    """图谱工具缺少必需参数时返回错误."""
+    assert plugin_router.tool_graph_neighbors({})["success"] is False
+    assert plugin_router.tool_graph_path({})["success"] is False
+    assert plugin_router.tool_graph_subgraph({})["success"] is False

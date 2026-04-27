@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Extract single-page fixture PDFs from real documents for regression testing."""
 
-import fitz
 from pathlib import Path
+
+import fitz
 
 FIXTURES = [
     # (source_label, source_path, page_numbers...)
@@ -10,7 +11,12 @@ FIXTURES = [
     ("amba_axi", "/mnt/c/Users/SJJ22/Downloads/Doc/AMBA/IHI0022K_amba_axi_protocol_spec.pdf", 22),
     ("sprui07", "/mnt/c/Users/SJJ22/Downloads/Doc/TI/TMS320F28335/sprui07.pdf", 104, 177, 209),
     ("spru430f", "/mnt/c/Users/SJJ22/Downloads/Doc/TI/C28x/spru430f.pdf", 15, 16, 17),
-    ("amba_ahb", "/mnt/c/Users/SJJ22/Downloads/Doc/AMBA/AHB/IHI0033C_amba_ahb_protocol_spec.pdf", 14, 28),
+    (
+        "amba_ahb",
+        "/mnt/c/Users/SJJ22/Downloads/Doc/AMBA/AHB/IHI0033C_amba_ahb_protocol_spec.pdf",
+        14,
+        28,
+    ),
     ("vcs_ug", "/mnt/c/Users/SJJ22/Downloads/Doc/EDA Doc/VCS User Guide.pdf", 145, 251),
 ]
 
@@ -18,6 +24,7 @@ OUTPUT_DIR = Path(__file__).parent / "pdf_pages"
 
 
 def main():
+    """Extract fixture PDFs to output directory."""
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     for label, src_path, *pages in FIXTURES:
         doc = fitz.open(src_path)
