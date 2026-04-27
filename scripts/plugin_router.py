@@ -1,175 +1,159 @@
 #!/usr/bin/env python3
-"""
-Plugin router for work-docs-library.
+"""Plugin router for work-docs-library.
+
 Reads JSON parameters from stdin and returns structured JSON via stdout.
 Each tool is dispatched by sys.argv[1].
 """
+
 import json
 import logging
 import os
 import sys
 from pathlib import Path
 
+from core.config import Config
+from core.knowledge_base_service import KnowledgeBaseService
+
 _SKILL_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_SKILL_ROOT / "scripts"))
 
 # --- Auto-switch to venv Python if available ---
 _VENV_PYTHON = _SKILL_ROOT / "venv" / "bin" / "python3"
-if _VENV_PYTHON.exists() and sys.executable != str(_VENV_PYTHON):
-    os.execv(str(_VENV_PYTHON), [str(_VENV_PYTHON)] + sys.argv)
-
-from core.config import Config
+_VENV_PYTHON_ALT = _SKILL_ROOT / "venv" / "bin" / "python"
+_venv_pythons = [p for p in (_VENV_PYTHON, _VENV_PYTHON_ALT) if p.exists()]
+if _venv_pythons and sys.executable not in {str(p) for p in _venv_pythons}:
+    os.execv(str(_venv_pythons[0]), [str(_venv_pythons[0])] + sys.argv)
 
 # 延迟初始化 logging：只在实际运行时配置，避免测试导入时污染全局 logging 状态
 if __name__ == "__main__":
     Config.setup_logging()
     # Redirect all root log handlers to stderr so stdout stays pure JSON
     for handler in logging.root.handlers:
-        handler.stream = sys.stderr
+        if isinstance(handler, logging.StreamHandler):
+            handler.stream = sys.stderr
 
 logger = logging.getLogger("plugin_router")
 
-# Import agent_batch_helper helpers after path setup
-try:
-    import agent_batch_helper as abh
-    from core.db import KnowledgeDB
-    from core.flow_selector import FlowSelector
-    from core.embedding_client import EmbeddingClient
-    from core.pipeline import IngestionPipeline
-    from core.vector_index import VectorIndex
-except ImportError as e:
-    print(
-        json.dumps(
-            {
-                "success": False,
-                "error": (
-                    f"Missing Python dependencies or virtual environment: {e}. "
-                    f"Please run: cd {_SKILL_ROOT} && python3 -m venv venv && "
-                    f"source venv/bin/activate && pip install -r scripts/requirements.txt"
-                ),
-            },
-            ensure_ascii=False,
-        )
-    )
-    sys.exit(1)
+
+# ---------------------------------------------------------------------------
+# 序列化辅助
+# ---------------------------------------------------------------------------
 
 
-def _chunk_to_dict(ck, db, preview_len: int = 500):
-    result = {
+def _chunk_to_dict(ck, preview_len: int = 500) -> dict:
+    """将 Chunk 对象序列化为字典（用于 Plugin 返回）."""
+    return {
         "doc_id": ck.doc_id,
         "chunk_id": ck.chunk_id,
         "chunk_type": ck.chunk_type,
-        "page_start": ck.page_start,
-        "page_end": ck.page_end,
         "chapter_title": ck.chapter_title,
         "content_preview": ck.content[:preview_len],
         "summary": ck.summary,
         "keywords": ck.keywords,
     }
-    # Attach chapter context if available
-    if ck.chapter_title:
-        cs = db.get_chapter_summary(ck.doc_id, ck.chapter_title)
-        if cs:
-            result["chapter_context"] = {
-                "summary": cs.get("summary", "")[:600],
-                "concepts": cs.get("concepts", [])[:5],
-                "key_figures": cs.get("key_figures", []),
-            }
-    return result
 
 
-def tool_ingest(params: dict):
-    path = params.get("path")
-    dry_run = params.get("dry_run", False)
-    auto_chapter = params.get("auto_chapter", False)
-    agent_mode = params.get("agent_mode", False)
+def _entity_to_dict(e) -> dict:
+    """将 GraphEntity 序列化为字典."""
+    return {
+        "type": e.entity_type,
+        "name": e.name,
+        "properties": e.properties,
+        "source_doc_ids": sorted(list(e.source_doc_ids)),
+        "source_chapter": e.source_chapter,
+    }
 
+
+def _relation_to_dict(r) -> dict:
+    """将 GraphRelation 序列化为字典."""
+    return {
+        "type": r.rel_type,
+        "from": r.from_name,
+        "to": r.to_name,
+        "from_type": r.from_type,
+        "to_type": r.to_type,
+        "properties": r.properties,
+        "source_doc_ids": sorted(list(r.source_doc_ids)),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Tool 实现
+# ---------------------------------------------------------------------------
+
+
+def _get_service() -> KnowledgeBaseService:
+    """获取 KnowledgeBaseService 实例（确保目录存在）."""
     Config.ensure_dirs()
-    if agent_mode:
-        from core.compatibility_pipeline import CompatibilityIngestionPipeline
-        pipe = CompatibilityIngestionPipeline()
-    else:
-        pipe = FlowSelector.create_ingestion_pipeline()
-    try:
-        doc_ids = pipe.ingest(path, dry_run=dry_run, auto_chapter=auto_chapter)
-        if not doc_ids:
-            return {"success": True, "doc_ids": [], "message": "No documents found or ingested."}
-        return {"success": True, "doc_ids": doc_ids, "message": f"Ingested {len(doc_ids)} document(s)."}
-    finally:
-        pipe.close()
+    return KnowledgeBaseService()
 
 
-def tool_search(params: dict):
+def tool_ingest(params: dict) -> dict:
+    """导入文档."""
+    path = params.get("path")
+    if not path:
+        return {"success": False, "error": "Missing required parameter: path"}
+    dry_run = params.get("dry_run", False)
+
+    svc = _get_service()
+    doc_ids = svc.ingest_document(str(path), dry_run=dry_run)
+    if not doc_ids:
+        return {"success": True, "doc_ids": [], "message": "No documents found or ingested."}
+    return {
+        "success": True,
+        "doc_ids": doc_ids,
+        "message": f"Ingested {len(doc_ids)} document(s).",
+    }
+
+
+def tool_search(params: dict) -> dict:
+    """语义向量搜索."""
     text = params.get("text")
+    if not text:
+        return {"success": False, "error": "Missing required parameter: text"}
     top_k = params.get("top_k", 5)
 
-    Config.ensure_dirs()
-    db = KnowledgeDB()
-    vec = VectorIndex()
+    svc = _get_service()
     try:
-        embedder = EmbeddingClient()
+        results = svc.search_semantic(str(text), top_k=top_k)
     except RuntimeError as e:
         return {"success": False, "error": str(e)}
 
-    try:
-        emb = embedder.embed([text])[0]
-        hits = vec.search(emb, top_k=top_k)
-        results = []
-        for db_id, score in hits:
-            chunk = db.get_chunk_by_db_id(db_id)
-            if not chunk:
-                continue
-            results.append({
-                "score": round(score, 4),
-                **_chunk_to_dict(chunk, db, preview_len=500),
-            })
-        return {"success": True, "results": results}
-    finally:
-        embedder.close()
+    return {
+        "success": True,
+        "results": [{"score": r["score"], **_chunk_to_dict(r["chunk"])} for r in results],
+    }
 
 
-def _parse_page(page_str: str):
-    if "-" in page_str:
-        a, b = page_str.split("-", 1)
-        return int(a), int(b)
-    p = int(page_str)
-    return p, p
-
-
-def tool_query(params: dict):
-    Config.ensure_dirs()
+def tool_query(params: dict) -> dict:
+    """结构化 chunk 查询."""
     doc_id = params.get("doc_id")
-    page = params.get("page")
     chapter = params.get("chapter")
     chapter_regex = params.get("chapter_regex")
     keyword = params.get("keyword")
+    concept = params.get("concept")
     top_k = params.get("top_k", 10)
 
-    db = KnowledgeDB()
-    results = []
-    if page:
-        ps, pe = _parse_page(page)
-        results = db.query_by_page(doc_id, ps, pe)
-    elif chapter:
-        results = db.query_by_chapter(doc_id, chapter)
-    elif chapter_regex:
-        results = db.query_by_chapter_regex(doc_id, chapter_regex)
-    elif keyword:
-        results = db.query_by_keyword(keyword)
-    elif params.get("concept"):
-        if not doc_id:
-            return {"success": False, "error": "concept query requires doc_id."}
-        results = db.query_by_concept(doc_id, params.get("concept"))
-    else:
-        return {"success": False, "error": "Provide page, chapter, chapter_regex, keyword, or concept."}
+    svc = _get_service()
+    try:
+        chunks = svc.query_chunks(
+            doc_id=doc_id,
+            chapter=chapter,
+            chapter_regex=chapter_regex,
+            keyword=keyword,
+            concept=concept,
+            top_k=top_k,
+        )
+    except ValueError as e:
+        return {"success": False, "error": str(e)}
 
-    return {"success": True, "results": [_chunk_to_dict(ck, db) for ck in results[:top_k]]}
+    return {"success": True, "results": [_chunk_to_dict(ck) for ck in chunks]}
 
 
-def tool_status(params: dict):
-    Config.ensure_dirs()
-    db = KnowledgeDB()
-    docs = db.list_documents()
+def tool_status(params: dict) -> dict:
+    """列出所有文档."""
+    svc = _get_service()
+    docs = svc.list_documents()
     return {
         "success": True,
         "documents": [
@@ -185,17 +169,17 @@ def tool_status(params: dict):
     }
 
 
-def tool_toc(params: dict):
-    Config.ensure_dirs()
-    db = KnowledgeDB()
+def tool_toc(params: dict) -> dict:
+    """获取文档目录或按标题搜索."""
+    svc = _get_service()
     doc_id = params.get("doc_id")
     match = params.get("match")
 
     if doc_id:
-        doc = db.get_document(doc_id)
+        doc = svc.get_document(doc_id)
         if not doc:
             return {"success": False, "error": f"Document {doc_id} not found."}
-        chapters = db.get_chapters(doc_id)
+        chapters = svc.db.get_chapters(doc_id)
         return {
             "success": True,
             "doc_id": doc_id,
@@ -213,7 +197,7 @@ def tool_toc(params: dict):
             ],
         }
     elif match:
-        docs = db.search_documents_by_title(match)
+        docs = svc.db.search_documents_by_title(match)
         return {
             "success": True,
             "match": match,
@@ -224,183 +208,213 @@ def tool_toc(params: dict):
                     "status": d.status,
                     "total_pages": d.total_pages,
                 }
-                for d in docs if d
+                for d in docs
+                if d
             ],
         }
     else:
         return {"success": False, "error": "Provide either doc_id or match."}
 
 
-def tool_progress(params: dict):
-    Config.ensure_dirs()
+def tool_progress(params: dict) -> dict:
+    """获取文档处理进度."""
     doc_id = params.get("doc_id")
-    db = KnowledgeDB()
-    with db._connect() as conn:
-        def count(status: str = None):
-            if status:
-                return conn.execute(
-                    "SELECT COUNT(*) as c FROM chunks WHERE doc_id = ? AND status = ?",
-                    (doc_id, status),
-                ).fetchone()["c"]
-            return conn.execute(
-                "SELECT COUNT(*) as c FROM chunks WHERE doc_id = ?", (doc_id,)
-            ).fetchone()["c"]
+    if not doc_id:
+        return {"success": False, "error": "Missing required parameter: doc_id"}
 
-        return {
-            "success": True,
-            "doc_id": doc_id,
-            "total": count(),
-            "done": count("done"),
-            "embedded": count("embedded"),
-            "skipped": count("skipped"),
-            "pending": count("pending"),
-            "failed": count("failed"),
-        }
+    svc = _get_service()
+    stats = svc.get_document_progress(doc_id)
+    return {"success": True, "doc_id": doc_id, **stats}
 
 
-def tool_reprocess(params: dict):
+def tool_reprocess(params: dict) -> dict:
+    """强制重新处理文档."""
     doc_id = params.get("doc_id")
-    Config.ensure_dirs()
-    pipe = FlowSelector.create_ingestion_pipeline()
+    if not doc_id:
+        return {"success": False, "error": "Missing required parameter: doc_id"}
+
+    svc = _get_service()
     try:
-        doc = pipe.db.get_document(doc_id)
-        if not doc:
-            return {"success": False, "error": f"Document {doc_id} not found."}
-        pipe._process_one(doc.source_path, dry_run=False, auto_chapter=False, force=True)
-        return {"success": True, "doc_id": doc_id, "message": "Reprocessed."}
-    finally:
-        pipe.close()
+        new_id = svc.reprocess_document(doc_id)
+        return {"success": True, "doc_id": new_id, "message": "Reprocessed."}
+    except (ValueError, RuntimeError) as e:
+        return {"success": False, "error": str(e)}
 
 
-def tool_get_content(params: dict):
-    Config.ensure_dirs()
-    db = KnowledgeDB()
+def tool_get_content(params: dict) -> dict:
+    """获取 chunk 完整内容."""
     doc_id = params.get("doc_id")
-    page = params.get("page")
     chapter = params.get("chapter")
     chunk_db_id = params.get("chunk_db_id")
 
-    if chunk_db_id is not None:
-        chunk = db.get_chunk_by_db_id(int(chunk_db_id))
-        if not chunk:
-            return {"success": False, "error": f"Chunk {chunk_db_id} not found."}
-        return {
-            "success": True,
-            "query_type": "chunk",
-            "doc_id": chunk.doc_id,
-            "chunk_db_id": chunk_db_id,
-            "chunk_id": chunk.chunk_id,
-            "page_start": chunk.page_start,
-            "page_end": chunk.page_end,
-            "chapter_title": chunk.chapter_title,
-            "content": chunk.content,
-            "total_chars": len(chunk.content),
-            "chunks": [
-                {
-                    "chunk_db_id": chunk_db_id,
-                    "chunk_id": chunk.chunk_id,
-                    "page_start": chunk.page_start,
-                    "page_end": chunk.page_end,
-                    "chapter_title": chunk.chapter_title,
-                }
-            ],
+    svc = _get_service()
+    try:
+        result = svc.get_chunk_content(
+            chunk_db_id=chunk_db_id,
+            doc_id=doc_id,
+            chapter=chapter,
+        )
+    except ValueError as e:
+        return {"success": False, "error": str(e)}
+
+    chunks = result["chunks"]
+    chunk_meta = [
+        {
+            "chunk_db_id": ck.id,
+            "chunk_id": ck.chunk_id,
+            "chapter_title": ck.chapter_title,
         }
+        for ck in chunks
+    ]
 
-    if page:
-        ps, pe = _parse_page(page)
-        chunks = db.query_by_page(doc_id, ps, pe)
-        query_type = "page"
-    elif chapter:
-        chunks = db.query_by_chapter(doc_id, chapter)
-        query_type = "chapter"
-    else:
-        return {"success": False, "error": "Provide page, chapter, or chunk_db_id."}
-
-    if not chunks:
-        return {"success": False, "error": "No content found for the given query."}
-
-    chunks.sort(key=lambda ck: (ck.page_start, ck.chunk_id))
-    parts = []
-    chunk_meta = []
-    with db._connect() as conn:
-        for ck in chunks:
-            parts.append(ck.content)
-            row = conn.execute(
-                "SELECT id FROM chunks WHERE doc_id = ? AND chunk_id = ?",
-                (ck.doc_id, ck.chunk_id),
-            ).fetchone()
-            chunk_meta.append({
-                "chunk_db_id": row["id"] if row else None,
-                "chunk_id": ck.chunk_id,
-                "page_start": ck.page_start,
-                "page_end": ck.page_end,
-                "chapter_title": ck.chapter_title,
-            })
-
-    full_content = "\n\n---\n\n".join(parts)
     first = chunks[0]
-    last = chunks[-1]
     return {
         "success": True,
-        "query_type": query_type,
+        "query_type": result["query_type"],
         "doc_id": first.doc_id,
         "chapter_title": first.chapter_title,
-        "page_start": first.page_start,
-        "page_end": last.page_end,
-        "content": full_content,
-        "total_chars": len(full_content),
+        "content": result["content"],
+        "total_chars": len(result["content"]),
         "chunks": chunk_meta,
     }
 
 
-def tool_auto_summarize(params: dict):
-    Config.ensure_dirs()
-    doc_id = params["doc_id"]
-    out_dir = Path(params.get("output_dir", "./auto_batches"))
-    batch_size = params.get("batch_size", 10)
-    target_chars = params.get("target_chars", 25000)
-    do_filter = params.get("filter", False)
-
-    out_dir = abh._resolve_output_dir(out_dir, doc_id).resolve()
-    result = abh.run_auto_summarize(
-        doc_id=doc_id,
-        out_dir=out_dir,
-        batch_size=batch_size,
-        target_chars=target_chars,
-        do_filter=do_filter,
-    )
-    # Ensure returned paths are absolute
-    for key in ("next_batch_txt", "next_batch_json"):
-        if key in result:
-            result[key] = str(Path(result[key]).resolve())
-    if "pending_batches" in result:
-        for item in result["pending_batches"]:
-            for k in ("txt", "json"):
-                if k in item:
-                    item[k] = str(Path(item[k]).resolve())
-    return {"success": True, **result}
+# ---------------------------------------------------------------------------
+# 图谱查询工具
+# ---------------------------------------------------------------------------
 
 
-def tool_synthesize_chapters(params: dict):
-    Config.ensure_dirs()
-    doc_id = params["doc_id"]
-    out_dir = Path(params.get("output_dir", "./auto_batches"))
-    out_dir = abh._resolve_output_dir(out_dir, doc_id).resolve()
-    result = abh.run_synthesize_chapters(
-        doc_id=doc_id,
-        out_dir=out_dir,
-    )
-    # Ensure returned paths are absolute
-    for key in ("next_chapter_txt", "next_chapter_json"):
-        if key in result:
-            result[key] = str(Path(result[key]).resolve())
-    if "pending_chapters" in result:
-        for item in result["pending_chapters"]:
-            for k in ("txt", "json"):
-                if k in item:
-                    item[k] = str(Path(item[k]).resolve())
-    return {"success": True, **result}
+def tool_graph_query(params: dict) -> dict:
+    """查询图谱实体.
 
+    参数:
+        entity_type: 实体类型（如 Module, Signal, Register）
+        name: 精确名称匹配
+        name_pattern: 名称模糊匹配（子串，大小写不敏感）
+    """
+    entity_type = params.get("entity_type")
+    name = params.get("name")
+    name_pattern = params.get("name_pattern")
+
+    svc = _get_service()
+
+    if name and entity_type:
+        # 精确查询
+        entity = svc.get_entity(entity_type, name)
+        if not entity:
+            return {"success": True, "count": 0, "entities": []}
+        return {"success": True, "count": 1, "entities": [_entity_to_dict(entity)]}
+
+    # 搜索查询
+    entities = svc.find_entities(entity_type=entity_type, name_pattern=name_pattern)
+    return {
+        "success": True,
+        "count": len(entities),
+        "entities": [_entity_to_dict(e) for e in entities],
+    }
+
+
+def tool_graph_neighbors(params: dict) -> dict:
+    """查询实体的邻居节点.
+
+    参数:
+        entity_type: 实体类型
+        name: 实体名称
+        rel_type: 关系类型过滤（可选）
+        direction: 方向 out/in/both（默认 out）
+    """
+    entity_type = params.get("entity_type")
+    name = params.get("name")
+    if not entity_type or not name:
+        return {"success": False, "error": "Missing entity_type or name"}
+
+    rel_type = params.get("rel_type")
+    direction = params.get("direction", "out")
+
+    svc = _get_service()
+    neighbors = svc.get_neighbors(entity_type, name, rel_type, direction)
+    return {
+        "success": True,
+        "center": {"type": entity_type, "name": name},
+        "direction": direction,
+        "count": len(neighbors),
+        "neighbors": [
+            {
+                "entity": _entity_to_dict(entity),
+                "relation": rel,
+            }
+            for entity, rel in neighbors
+        ],
+    }
+
+
+def tool_graph_path(params: dict) -> dict:
+    """查找两实体间的路径.
+
+    参数:
+        from_type, from_name: 起点实体
+        to_type, to_name: 终点实体
+        max_depth: 最大搜索深度（默认 3，最大 6）
+    """
+    from_type = params.get("from_type")
+    from_name = params.get("from_name")
+    to_type = params.get("to_type")
+    to_name = params.get("to_name")
+    if not all([from_type, from_name, to_type, to_name]):
+        return {"success": False, "error": "Missing from/to entity parameters"}
+
+    max_depth = params.get("max_depth", 3)
+    svc = _get_service()
+    paths = svc.find_path(str(from_type), str(from_name), str(to_type), str(to_name), max_depth)
+
+    # 将节点 ID 解析为 (type, name)
+    def _parse_nid(nid: str) -> dict:
+        parts = nid.split("::", 1)
+        return {"type": parts[0], "name": parts[1] if len(parts) > 1 else nid}
+
+    return {
+        "success": True,
+        "from": {"type": from_type, "name": from_name},
+        "to": {"type": to_type, "name": to_name},
+        "max_depth": max_depth,
+        "path_count": len(paths),
+        "paths": [[_parse_nid(nid) for nid in p] for p in paths],
+    }
+
+
+def tool_graph_subgraph(params: dict) -> dict:
+    """提取以某实体为中心的子图.
+
+    参数:
+        center_type, center_name: 中心实体
+        depth: 搜索深度（默认 1）
+        rel_types: 关系类型过滤列表（可选）
+    """
+    center_type = params.get("center_type")
+    center_name = params.get("center_name")
+    if not center_type or not center_name:
+        return {"success": False, "error": "Missing center_type or center_name"}
+
+    depth = params.get("depth", 1)
+    rel_types = set(params.get("rel_types", [])) if params.get("rel_types") else None
+
+    svc = _get_service()
+    subgraph = svc.get_subgraph(center_type, center_name, depth, rel_types)
+
+    return {
+        "success": True,
+        "center": {"type": center_type, "name": center_name},
+        "depth": depth,
+        "node_count": subgraph.node_count,
+        "edge_count": subgraph.edge_count,
+        "entities": [_entity_to_dict(e) for e in subgraph.entities()],
+        "relations": [_relation_to_dict(r) for r in subgraph.relations()],
+    }
+
+
+# ---------------------------------------------------------------------------
+# Tool 映射
+# ---------------------------------------------------------------------------
 
 TOOL_MAP = {
     "ingest": tool_ingest,
@@ -408,29 +422,41 @@ TOOL_MAP = {
     "query": tool_query,
     "status": tool_status,
     "toc": tool_toc,
-    "auto_summarize": tool_auto_summarize,
-    "synthesize_chapters": tool_synthesize_chapters,
     "progress": tool_progress,
     "reprocess": tool_reprocess,
     "get_content": tool_get_content,
+    "graph_query": tool_graph_query,
+    "graph_neighbors": tool_graph_neighbors,
+    "graph_path": tool_graph_path,
+    "graph_subgraph": tool_graph_subgraph,
 }
 
 
 if __name__ == "__main__":
     if len(sys.argv) < 2:
-        print(json.dumps({"success": False, "error": "Missing tool name argument"}, ensure_ascii=False))
+        print(
+            json.dumps(
+                {"success": False, "error": "Missing tool name argument"}, ensure_ascii=False
+            )
+        )
         sys.exit(1)
 
     tool_name = sys.argv[1]
     func = TOOL_MAP.get(tool_name)
     if not func:
-        print(json.dumps({"success": False, "error": f"Unknown tool: {tool_name}"}, ensure_ascii=False))
+        print(
+            json.dumps(
+                {"success": False, "error": f"Unknown tool: {tool_name}"}, ensure_ascii=False
+            )
+        )
         sys.exit(1)
 
     try:
         params = json.load(sys.stdin) if not sys.stdin.isatty() else {}
     except json.JSONDecodeError as e:
-        print(json.dumps({"success": False, "error": f"Invalid JSON input: {e}"}, ensure_ascii=False))
+        print(
+            json.dumps({"success": False, "error": f"Invalid JSON input: {e}"}, ensure_ascii=False)
+        )
         sys.exit(1)
 
     try:
