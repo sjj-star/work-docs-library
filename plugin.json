@@ -1,7 +1,7 @@
 {
   "name": "work-docs-library",
   "version": "1.0.0",
-  "description": "通用化技术文档知识库管理插件，支持 PDF/Word/Excel 提取、向量索引、语义搜索与 Agent 批量总结",
+  "description": "通用化技术文档知识库管理插件，支持 PDF 提取、知识图谱构建、向量索引与语义搜索",
   "config_file": "config.json",
   "inject": {
     "llm.api_key": "api_key",
@@ -26,16 +26,6 @@
           "dry_run": {
             "type": "boolean",
             "description": "预览模式，不调用 API",
-            "default": false
-          },
-          "auto_chapter": {
-            "type": "boolean",
-            "description": "使用 PDF 自动检测的目录关联章节",
-            "default": false
-          },
-          "agent_mode": {
-            "type": "boolean",
-            "description": "强制使用 Agent Skill Flow，仅嵌入不自动总结（即使配置了 LLM）",
             "default": false
           }
         },
@@ -72,7 +62,7 @@
     },
     {
       "name": "query",
-      "description": "按页码、章节标题或关键词查询 chunk",
+      "description": "按章节标题、关键词或概念查询 chunk",
       "command": [
         "venv/bin/python3",
         "scripts/plugin_router.py",
@@ -84,10 +74,6 @@
           "doc_id": {
             "type": "string",
             "description": "文档 ID"
-          },
-          "page": {
-            "type": "string",
-            "description": "页码范围，如 50-60"
           },
           "chapter": {
             "type": "string",
@@ -149,73 +135,6 @@
       }
     },
     {
-      "name": "auto_summarize",
-      "description": "自动批量总结：过滤低价值页、生成 batch txt、断点续传",
-      "command": [
-        "venv/bin/python3",
-        "scripts/plugin_router.py",
-        "auto_summarize"
-      ],
-      "parameters": {
-        "type": "object",
-        "properties": {
-          "doc_id": {
-            "type": "string",
-            "description": "文档 ID"
-          },
-          "output_dir": {
-            "type": "string",
-            "description": "输出目录",
-            "default": "./auto_batches"
-          },
-          "batch_size": {
-            "type": "integer",
-            "description": "每批最大 chunk 数",
-            "default": 10
-          },
-          "target_chars": {
-            "type": "integer",
-            "description": "每批目标字符数",
-            "default": 25000
-          },
-          "filter": {
-            "type": "boolean",
-            "description": "是否先过滤低价值 chunk",
-            "default": false
-          }
-        },
-        "required": [
-          "doc_id"
-        ]
-      }
-    },
-    {
-      "name": "synthesize_chapters",
-      "description": "章节级综合：在 chunk 总结完成后，按章节生成结构化摘要、概念定义与关系图",
-      "command": [
-        "venv/bin/python3",
-        "scripts/plugin_router.py",
-        "synthesize_chapters"
-      ],
-      "parameters": {
-        "type": "object",
-        "properties": {
-          "doc_id": {
-            "type": "string",
-            "description": "文档 ID"
-          },
-          "output_dir": {
-            "type": "string",
-            "description": "输出目录",
-            "default": "./auto_batches"
-          }
-        },
-        "required": [
-          "doc_id"
-        ]
-      }
-    },
-    {
       "name": "progress",
       "description": "显示文档的总结进度",
       "command": [
@@ -259,7 +178,7 @@
     },
     {
       "name": "get_content",
-      "description": "获取文档的完整章节、页面或 chunk 原始内容（不截断）",
+      "description": "获取文档的完整章节或 chunk 原始内容（不截断）",
       "command": [
         "venv/bin/python3",
         "scripts/plugin_router.py",
@@ -272,10 +191,6 @@
             "type": "string",
             "description": "文档 ID（查询 chapter/page 时必填）"
           },
-          "page": {
-            "type": "string",
-            "description": "页码范围如 50-60"
-          },
           "chapter": {
             "type": "string",
             "description": "章节标题子串匹配"
@@ -286,10 +201,146 @@
           }
         }
       }
+    },
+    {
+      "name": "graph_query",
+      "description": "查询知识图谱中的实体（按类型或名称搜索）",
+      "command": [
+        "venv/bin/python3",
+        "scripts/plugin_router.py",
+        "graph_query"
+      ],
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "entity_type": {
+            "type": "string",
+            "description": "实体类型，如 Module, Signal, Register"
+          },
+          "name": {
+            "type": "string",
+            "description": "精确名称匹配（需配合 entity_type）"
+          },
+          "name_pattern": {
+            "type": "string",
+            "description": "名称模糊匹配（子串，大小写不敏感）"
+          }
+        }
+      }
+    },
+    {
+      "name": "graph_neighbors",
+      "description": "查询知识图谱中某实体的邻居节点",
+      "command": [
+        "venv/bin/python3",
+        "scripts/plugin_router.py",
+        "graph_neighbors"
+      ],
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "entity_type": {
+            "type": "string",
+            "description": "实体类型"
+          },
+          "name": {
+            "type": "string",
+            "description": "实体名称"
+          },
+          "rel_type": {
+            "type": "string",
+            "description": "关系类型过滤"
+          },
+          "direction": {
+            "type": "string",
+            "description": "方向 out/in/both",
+            "default": "out"
+          }
+        },
+        "required": [
+          "entity_type",
+          "name"
+        ]
+      }
+    },
+    {
+      "name": "graph_path",
+      "description": "查找知识图谱中两实体间的路径",
+      "command": [
+        "venv/bin/python3",
+        "scripts/plugin_router.py",
+        "graph_path"
+      ],
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "from_type": {
+            "type": "string",
+            "description": "起点实体类型"
+          },
+          "from_name": {
+            "type": "string",
+            "description": "起点实体名称"
+          },
+          "to_type": {
+            "type": "string",
+            "description": "终点实体类型"
+          },
+          "to_name": {
+            "type": "string",
+            "description": "终点实体名称"
+          },
+          "max_depth": {
+            "type": "integer",
+            "description": "最大搜索深度",
+            "default": 3
+          }
+        },
+        "required": [
+          "from_type",
+          "from_name",
+          "to_type",
+          "to_name"
+        ]
+      }
+    },
+    {
+      "name": "graph_subgraph",
+      "description": "提取以某实体为中心的知识子图",
+      "command": [
+        "venv/bin/python3",
+        "scripts/plugin_router.py",
+        "graph_subgraph"
+      ],
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "center_type": {
+            "type": "string",
+            "description": "中心实体类型"
+          },
+          "center_name": {
+            "type": "string",
+            "description": "中心实体名称"
+          },
+          "depth": {
+            "type": "integer",
+            "description": "搜索深度",
+            "default": 1
+          },
+          "rel_types": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "关系类型过滤列表"
+          }
+        },
+        "required": [
+          "center_type",
+          "center_name"
+        ]
+      }
     }
-  ],
-  "runtime": {
-    "host": "kimi-code",
-    "host_version": "1.36.0"
-  }
+  ]
 }
