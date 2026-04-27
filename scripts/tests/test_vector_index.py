@@ -1,19 +1,24 @@
+"""test_vector_index 模块."""
+
 import numpy as np
 import pytest
-
 from core.vector_index import VectorIndex
 
 
 @pytest.fixture
 def make_index(tmp_path):
+    """make_index 函数."""
+
     def _make(dim=4):
         ip = tmp_path / f"index_{dim}.faiss"
         mp = tmp_path / f"map_{dim}.json"
         return VectorIndex(dim=dim, index_path=ip, id_map_path=mp)
+
     return _make
 
 
 def test_add_and_search(make_index):
+    """Test add and search."""
     vi = make_index(dim=4)
     vec = [1.0, 0.0, 0.0, 0.0]
     vi.add(100, vec)
@@ -24,11 +29,13 @@ def test_add_and_search(make_index):
 
 
 def test_search_empty_index(make_index):
+    """Test search empty index."""
     vi = make_index(dim=4)
     assert vi.search([1, 0, 0, 0], top_k=5) == []
 
 
 def test_remove_doc(make_index):
+    """Test remove doc."""
     vi = make_index(dim=4)
     vi.add(1, [1, 0, 0, 0])
     vi.add(2, [0, 1, 0, 0])
@@ -40,7 +47,7 @@ def test_remove_doc(make_index):
 
 
 def test_dimension_mismatch_error(make_index):
-    """维度不匹配时应抛出错误，不允许自动重建"""
+    """维度不匹配时应抛出错误，不允许自动重建."""
     vi = make_index(dim=4)
     vi.add(1, [1, 0, 0, 0])
     # 添加不同维度的向量应抛出 RuntimeError
@@ -49,6 +56,7 @@ def test_dimension_mismatch_error(make_index):
 
 
 def test_persistence(make_index, tmp_path):
+    """Test persistence."""
     vi = make_index(dim=4)
     vi.add(42, [0, 0, 0, 1])
     # Create new instance pointing to same files
@@ -61,13 +69,15 @@ def test_persistence(make_index, tmp_path):
 def test_load_migrates_old_dict_id_map(make_index, tmp_path):
     """Old id_map format was a dict {chunk_db_id: faiss_id}; ensure it migrates to list."""
     import json
+
     import faiss
+
     vi = make_index(dim=4)
     # Build a small faiss index manually
     index = faiss.IndexFlatIP(4)
     vec = np.array([[1, 0, 0, 0], [0, 1, 0, 0]], dtype=np.float32)
     faiss.normalize_L2(vec)
-    index.add(vec)
+    index.add(vec)  # type: ignore[arg-type]
     faiss.write_index(index, str(vi.index_path))
     # Write old-style dict id_map: {db_id -> faiss_internal_id}
     old_map = {100: 0, 200: 1}
