@@ -1,17 +1,20 @@
+"""office_parser 模块."""
+
 import hashlib
 from pathlib import Path
-from typing import List
 
 import docx
 import openpyxl
-
-from core.models import Chunk, Document, Chapter
+from core.models import Chapter, Document
 
 
 class OfficeParser:
+    """OfficeParser 类."""
+
     SUPPORTED = (".docx", ".xlsx")
 
     def parse(self, path: str) -> Document:
+        """Parse 函数."""
         p = Path(path)
         suffix = p.suffix.lower()
         if suffix == ".docx":
@@ -44,14 +47,6 @@ class OfficeParser:
             file_type="docx",
             total_pages=1,
             chapters=[Chapter(title="全文", start_page=1, end_page=1, level=1)],
-            chunks=[Chunk(
-                doc_id=file_hash,
-                chunk_id="docx_full",
-                content=content,
-                chunk_type="text",
-                page_start=1,
-                page_end=1,
-            )],
             file_hash=file_hash,
             status="pending",
         )
@@ -69,7 +64,6 @@ class OfficeParser:
                     rows.append(row_text)
             sheets_text.append(f"Sheet: {sheet_name}\n" + "\n".join(rows))
 
-        content = "\n\n".join(sheets_text)
         file_hash = hashlib.md5(Path(path).read_bytes()).hexdigest()
         total = len(wb.sheetnames)
         return Document(
@@ -78,15 +72,10 @@ class OfficeParser:
             source_path=str(Path(path).resolve()),
             file_type="xlsx",
             total_pages=total,
-            chapters=[Chapter(title=sheet, start_page=i + 1, end_page=i + 1, level=1) for i, sheet in enumerate(wb.sheetnames)],
-            chunks=[Chunk(
-                doc_id=file_hash,
-                chunk_id="xlsx_full",
-                content=content,
-                chunk_type="table",
-                page_start=1,
-                page_end=total,
-            )],
+            chapters=[
+                Chapter(title=sheet, start_page=i + 1, end_page=i + 1, level=1)
+                for i, sheet in enumerate(wb.sheetnames)
+            ],
             file_hash=file_hash,
             status="pending",
         )
