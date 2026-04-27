@@ -1,347 +1,196 @@
-# work-docs-library Agent 指南
+# work-docs-library Agent 自主式开发策略文档
 
-> 本文档供 AI Coding Agent 阅读。详细说明见 `README.md`。
-
-## 项目概述
-
-`work-docs-library` 是面向技术文档（PDF、Word、Excel）的自动化知识提取与检索 pipeline，以 **Kimi Code CLI Plugin** 形式运行。
-
-核心能力：多格式文档解析、SQLite 结构化存储、FAISS 向量语义索引、LLM 自动摘要、Agent 批量协作工作流（checkpoint/resume）。
-
-项目主要使用 **中文** 编写注释与文档。
+> 本文档供 AI Coding Agent 阅读，是项目权威技术参考与行动准则。项目详细介绍见 `README.md`，技术方案见 `DESIGN.md`。
 
 ---
 
-## 技术栈与运行时架构
+## 项目目标（一句话定义）
 
-| 层级 | 依赖 |
+从 IC 前端设计技术文档（PDF）中自动提取结构化实体与关系，构建**跨文档互通**的知识图谱，同时保留向量检索能力作为补充。
+
+**目标规模**：数百个文档，每个文档几十到万页级。全局图谱通过 NetworkX 内存存储管理，同名同类型实体自动对齐。
+
+---
+
+## 核心架构决策及原因
+
+| 决策 | 原因 |
 |------|------|
-| 解析 | `pymupdf`、`python-docx`、`openpyxl` |
-| 向量检索 | `faiss-cpu`、`numpy` |
-| 数据库 | SQLite（标准库 `sqlite3`） |
-| LLM API | `requests`（OpenAI-compatible HTTP API） |
-| 环境配置 | `python-dotenv` + `config.json`（三层优先级） |
-| 测试 | `pytest` |
-
-- **Python 版本要求**：>= 3.11
-- **平台**：主要测试于 Linux，兼容 macOS/Windows
-
-### 双模式运行时架构
-
-系统根据配置自动选择两种互斥的操作模式：
-
-1. **LLM API Flow**（高质量处理模式）
-   - 前提：同时配置了 LLM 对话模型和 Embedding 模型
-   - 行为：调用 `LLMAPIIngestionPipeline`，执行**两阶段处理**：
-     - **Phase A**（Parse & Embed）：解析 → 存储 chunks → 嵌入 → `status="embedded"`
-     - **Phase B**（LLM Enhance）：层次化文本总结、图像分析、章节摘要 → 持久化到 DB → `status="done"`
-   - **断点续传**：若 Phase B 中断，再次 `ingest` 会检测到已有 `embedded` chunks 并跳过 Phase A 直接续传
-   - 异常处理：任何阶段失败时文档状态变为 `"failed"`
-
-2. **Agent Skill Flow**（高效批处理模式）
-   - 前提：仅配置了 Embedding 模型
-   - 行为：调用 `CompatibilityIngestionPipeline`，仅执行向量化，不自动总结
-   - 后续需通过 `agent_batch_helper.py` 将 pending chunk 分批导出，由外部 Agent 阅读并回写摘要
-
-```
-文档 → Parser → Document/Chunk → SQLite
-                 ↓
-          FlowSelector 选择模式
-                 ↓
-    LLM API Flow  ←→  Agent Skill Flow
-                 ↓
-         Embedding → FAISS 向量索引
-                 ↓
-       Query / Search CLI / Plugin Tool
-```
-
-### 存储布局
-
-- `knowledge_base/workdocs.db` — SQLite 数据库（4 张表）
-- `knowledge_base/faiss.index` — FAISS 向量索引
-- `knowledge_base/id_map.json` — FAISS 内部 ID 到 chunk 的映射
-- `knowledge_base/images/<file_hash>/` — 从 PDF 提取的图片
-- `auto_batches/<doc_id>/` — `agent_batch_helper.py` 生成的批次文件（checkpoint/resume）
-
-> 完整数据库 Schema、数据流向、查询接口、FAISS 细节见 `README.md` → **数据库与存储架构**。
+| **Batch API 优先** | 成本为同步 API 的 50%；超大 JSONL 自动拆分并行提交；分钟级延迟可接受 |
+| **KnowledgeBaseService 统一服务层** | 封装 DB + VectorIndex + GraphStore，为 Plugin 工具和上层应用提供一致 API；禁止工具直接访问 `db._connect()` |
+| **NetworkX 而非 Neo4j** | 轻量、JSON 序列化、当前查询深度不超过 3 跳，无需引入外部服务 |
+| **零数据丢失** | 技术文档信息密度高，任何截断/过滤都可能导致关键寄存器/信号丢失 |
+| **树形章节解析** | 按 Markdown 标题层级拆分是唯一允许的结构性拆分；禁止基于内容相关性的过滤 |
+| **Multimodal 图片流式处理** | 图片（时序图、架构框图）是文档语义不可分割的一部分，必须按原文顺序嵌入文档流 |
+| **SQLite + FAISS** | 单用户、本地部署、零运维；FAISS IndexFlatIP 经 L2 归一化后等效于余弦相似度 |
+| **Prompt 外部化** | 所有 LLM 提示词在 `scripts/prompts/*.txt` 中，用户可编辑，无需改代码 |
+| **config.json + .env 双轨配置** | `config.json` 存非敏感参数（模型、端点），`.env` 存 API Key；三层优先级（环境变量 > config.json > .env > 默认值） |
 
 ---
 
-## 配置系统
+## 代码规范
 
-三层优先级（高 → 低）：**环境变量(Kimi CLI注入) > `config.json` > `.env`**。
-
-- `config.json`：主配置入口。仓库自带空值模板，Kimi CLI 通过 `plugin.json` 的 `inject` 自动注入 OAuth token。被 `.gitignore` 忽略（已用 `git add -f` 强制提交初始版本）。
-- `.env`：开发/独立运行回退配置。
-
-`_resolve_config(env_name, json_path, default)` 实现解析逻辑，完整说明见 `README.md` → **配置说明**。
-
----
-
-## 数据库 Schema（开发者速查）
-
-### 核心表
-
-| 表 | 关键字段 | 开发注意 |
-|---|----------|----------|
-| `documents` | `doc_id` (MD5), `source_path`, `status` | `status`: `pending` → `processing` → `done`/`failed` |
-| `chunks` | `id` (PK=chunk_db_id), `doc_id`, `content`, `metadata`, `status` | `metadata` 存 embedding、images、vision_desc；`status`: `pending` → `embedded` → `done` |
-| `chapter_summaries` | `doc_id` + `chapter_title`, `summary`, `concepts`, `relationships` | `upsert_chapter_summary()` 使用 `ON CONFLICT` 更新 |
-| `concept_index` | `doc_id` + `concept_name`, `definition`, `first_mentioned_page` | `upsert_concept()` 使用 `ON CONFLICT IGNORE` |
-
-> **⚠️ 状态语义差异**：`documents.status="done"` 在 LLM API Flow 中表示全阶段完成；在 Agent Skill Flow 中表示嵌入完成（后续摘要由外部 Agent 补充）。
-
-### 查询接口速查
-
-| 方法 | 用途 |
-|------|------|
-| `query_by_page(doc_id, ps, pe)` | 页码重叠查询 |
-| `query_by_chapter(doc_id, title)` | 章节标题 LIKE 匹配 |
-| `query_by_keyword(keyword)` | 关键词 LIKE 搜索 |
-| `query_by_concept(doc_id, concept)` | 概念名联合搜索 |
-| `get_chunk_by_db_id(db_id)` | 精确单条 |
-| `get_embedded_but_unsummarized_chunks(doc_id?)` | **Agent Batch 核心**：获取待总结的 chunks |
-| `get_pending_chunks(doc_id?)` | 获取尚未嵌入的 chunks |
-| `update_chunk_metadata(db_id, metadata)` | 更新 chunk metadata JSON |
-
-> 完整 Schema 说明、表关系图、状态生命周期见 `README.md` → **数据库与存储架构**。
-
----
-
-## 目录结构与代码组织
-
-```
-work-docs-library/
-├── plugin.json                   # Kimi CLI Plugin 定义（10 个 tools，含 inject 配置）
-├── config.json                   # 配置入口（空值模板，Kimi CLI 自动注入凭证）
-├── scripts/
-│   ├── plugin_router.py          # Plugin 统一入口：stdin JSON → stdout JSON
-│   ├── main.py                   # 独立 CLI 主入口
-│   ├── doc_extractor.py          # 传统 CLI（ingest/status/query/search/toc…）
-│   ├── agent_batch_helper.py     # Agent 批量协作 CLI（list/dump/apply/filter/progress/auto）
-│   ├── requirements.txt          # Python 依赖
-│   ├── .env.example / .env       # 环境变量模板 / 实际配置（gitignored）
-│   ├── prompts/
-│   │   ├── summarize.txt         # LLM chunk 摘要 system 提示词（代码读取）
-│   │   ├── summarize_user.txt    # LLM chunk 摘要 user 提示词模板（含 {{text}} 占位符）
-│   │   ├── structural_summarize.txt  # 章节级结构化摘要提示词（代码读取）
-│   │   └── filter_config.json    # 低价值内容过滤规则
-│   ├── core/                     # 业务逻辑层
-│   │   ├── config.py             # 配置中心（三层优先级解析）
-│   │   ├── flow_selector.py      # 双模式流程选择器
-│   │   ├── models.py             # 数据模型：Chapter、Chunk、Document
-│   │   ├── db.py                 # KnowledgeDB：SQLite 增删改查
-│   │   ├── vector_index.py       # VectorIndex：FAISS 管理
-│   │   ├── pipeline.py           # IngestionPipeline：通用摄入管道
-│   │   ├── llm_api_pipeline.py   # LLMAPIIngestionPipeline（LLM API Flow）
-│   │   ├── compatibility_pipeline.py  # CompatibilityIngestionPipeline（Agent Skill Flow）
-│   │   ├── llm_chat_client.py    # LLMChatClient：对话/总结/图像分析
-│   │   ├── embedding_client.py   # EmbeddingClient：向量化
-│   │   ├── llm_chat_client.py    # BaseLLMClient + LLMChatClient：LLM 对话客户端
-│   │   ├── context_manager.py    # 上下文窗口管理
-│   │   └── chapter_editor.py     # 交互式章节编辑器
-│   ├── parsers/                  # IO / 解析层
-│   │   ├── pdf_parser.py         # PDF 解析器（pymupdf）
-│   │   ├── office_parser.py      # DOCX / XLSX 解析
-│   │   └── image_utils.py        # 图片压缩
-│   └── tests/                    # pytest 测试集（179 个用例）
-└── venv/                         # Python 虚拟环境
-```
-
-### 核心模块职责速查
-
-| 模块 | 关键类/函数 | 职责 |
-|------|-------------|------|
-| `core/config.py` | `Config` | 统一配置中心，三层优先级：环境变量 > `config.json` > `.env` |
-| `core/flow_selector.py` | `FlowSelector` | 根据配置自动选择 `LLM_API_FLOW` 或 `AGENT_SKILL_FLOW` |
-| `core/models.py` | `Chapter`, `Chunk`, `Document` | 领域模型，使用 `dataclass` 定义 |
-| `core/db.py` | `KnowledgeDB` | SQLite 操作，参数化查询防注入 |
-| `core/vector_index.py` | `VectorIndex` | FAISS 索引封装，维度不匹配时自动重建 |
-| `core/pipeline.py` | `IngestionPipeline` | 通用摄入管道：扫描 → 解析 → chunk → 嵌入 → 入库 |
-| `core/llm_api_pipeline.py` | `LLMAPIIngestionPipeline` | LLM API Flow 专用，两阶段处理，支持断点续传 |
-| `core/compatibility_pipeline.py` | `CompatibilityIngestionPipeline` | Agent Skill Flow 兼容管道，仅向量化 |
-| `core/llm_chat_client.py` | `LLMChatClient` | 对话客户端，支持聊天、总结、vision 描述、思考模式 |
-| `core/embedding_client.py` | `EmbeddingClient` | 向量化客户端，支持批处理、首次维度验证 |
-| `parsers/pdf_parser.py` | `PDFParser` | PDF 文本/图片/矢量图提取，含图表区域启发式识别 |
-| `parsers/office_parser.py` | `OfficeParser` | DOCX / XLSX 解析（DOCX 目前解析为单 chunk） |
-
----
-
-## 构建与测试
-
-```bash
-# 环境准备
-cd /path/to/work-docs-library
-python3 -m venv venv
-source venv/bin/activate
-pip install -r scripts/requirements.txt
-
-# 配置
-cp scripts/.env.example scripts/.env
-# 或编辑 config.json 补充非注入参数（Plugin 模式）
-
-# 验证配置
-PYTHONPATH=scripts ./venv/bin/python scripts/main.py --validate-config dummy_path
-
-# 运行全部测试（179 个用例）
-PYTHONPATH=scripts ./venv/bin/python -m pytest scripts/tests/ -v
-
-# 独立 CLI
-PYTHONPATH=scripts ./venv/bin/python scripts/main.py /path/to/document.pdf --verbose
-PYTHONPATH=scripts ./venv/bin/python scripts/doc_extractor.py ingest --path ./docs
-PYTHONPATH=scripts ./venv/bin/python scripts/agent_batch_helper.py auto --doc-id <HASH> --filter
-```
-
-> 完整 CLI 参考、程序化使用示例见 `README.md` → **CLI 参考 / 程序化使用**。
-
----
-
-## 代码风格指南
+### 强制工具链
+- **ruff**：代码格式化与 lint（`ruff check scripts/` / `ruff format scripts/`）
+- **pyright**：类型检查（`pyright scripts/`）
+- **pytest**：测试执行（`PYTHONPATH=scripts pytest scripts/tests/ -v`）
 
 ### 日志规范
-- **诊断/进度/错误信息统一使用 `logging`**，格式：`"%(asctime)s | %(levelname)-8s | %(name)s | %(message)s"`
-- CLI 格式化结果展示保留 `print()`，禁止随意使用 `print()` 输出调试信息
+- 统一使用 `logging`，格式：`"%(asctime)s | %(levelname)-8s | %(name)s | %(message)s"`
+- 禁止随意使用 `print()` 输出调试信息
 
 ### 类型与模型
-- 领域模型使用 `dataclass`（`Chapter`、`Chunk`、`Document`）
-- `Chunk.status`：`pending`、`embedded`、`done`、`skipped`、`failed`
-- `Document.status`：`pending`、`processing`、`done`、`failed`
+- 领域模型使用 `dataclass`（`Chunk`、`Document`、`GraphEntity`、`GraphRelation`）
+- `Chunk.status`：`pending` → `embedded` → `done`（含 `skipped`、`failed`，`ChunkStatus` StrEnum）
+- `Document.status`：`pending` → `processing` → `done` / `failed`（`DocumentStatus` StrEnum）
 
 ### 数据库安全
-- **所有 SQL 必须使用参数化查询**（`?` 占位符），禁止字符串拼接
-- `KnowledgeDB._connect()` 使用上下文管理器管理连接生命周期
+- **所有 SQL 必须使用参数化查询**（`?` 占位符）
+- `KnowledgeDB._connect()` 使用上下文管理器
 
-### 路径安全
-- 文件读取操作需校验路径在 skill 根目录内：`Path(path).resolve().relative_to(skill_root)`
+### Prompt 管理
+- 所有 LLM 提示词必须在 `scripts/prompts/*.txt` 中
+- 代码通过 `Config.PROMPT_DIR / f"{name}.txt"` 读取
+- 修改提示词后无需重启，下次调用自动生效
 
-### 配置访问
-- 统一通过 `core.config.Config` 读取配置
-- 数值型配置通过 `_initialize_numeric_configs()` 初始化，无效值自动回退到默认值
+---
 
-### 向后兼容
-- `core/llm_client.py` 中的旧版客户端保留，供存量代码导入
-- 新代码优先使用 `core/llm_chat_client.py` 和 `core/embedding_client.py`
+## 开发计划
+
+### 当前阶段（已完成）
+- ✅ DocGraphPipeline 重构：Batch API 架构、树形章节解析、multimodal 图片处理
+- ✅ 零数据丢失：移除所有源数据过滤和截断
+- ✅ Prompt 外部化：所有提示词在 `scripts/prompts/*.txt`
+- ✅ 代码清理：删除 11 个旧文件、4 个旧 prompt 文件、7 个旧测试文件
+- ✅ **API 接口重构**：新增 `KnowledgeBaseService` 统一服务层；Plugin 工具从 8 个扩展至 12 个（新增 4 个图谱查询工具）
+- ✅ **图谱查询增强**：`GraphStore.find_path()` BFS 路径搜索、`search_entities()` 模糊搜索
+- ✅ **跨文档知识互通**：全局统一图谱 `global.json` + 文档子图快照 `{doc_id}.json`，同名同类型实体自动去重
+- ✅ **章节级增量更新**：`content_hash` 指纹比较，未变章节复用实体缓存与 embedding，仅 LLM 提取变更/新增章节
+- ✅ **本地 PDF 解析器 TOC 驱动式章节识别**：基于 PDF 内置 TOC 直接匹配定位 heading，解决编号/标题分离和表格噪声问题
+- ✅ **本地 PDF 解析器 Markdown 格式修复**：解决标题重复和段落内换行被误分段问题，输出格式与 BigModel Expert 保持一致
+- ✅ **完整章节层级构造**：使用 PDF TOC 真实层级生成 `#`/`##`/`###`/`####`，不再扁平化为两级
+- ✅ **段落内换行保留原始 `\n`**：LLM 直接理解换行语义，零额外 token，无 HTML 标签污染
+- ✅ **ChapterParser 多级树重构**：栈结构构建真正的多级树，递归传播 preface
+- ✅ **BatchBuilder 层级设计**：`#` 为文档标题，`##` 为硬边界，`###` 为基本 chunk 单位
+- ✅ **数据模型清理**：移除 `Document.chunks`、`Document.metadata`、`Chunk.page_start/page_end` 等无功能实体字段；引入 `StrEnum` 约束状态值
+- ✅ **数据库 schema 简化**：移除 `chapters_override`、`page_start`、`page_end` 列；新增 `_schema_meta` 版本管理表；新增 `query_by_doc()` 辅助方法
+- ✅ 193 个测试全部通过
+
+### 下一阶段（精确到下一步）
+1. **可视化**：图谱可视化导出（Graphviz / D3.js）
+2. **评估体系**：实体提取准确率、关系提取召回率的自动化评估
+3. **DOCX/XLSX 接入 pipeline**：当前解析器代码存在但未接入 `DocGraphPipeline`
+4. ~~**BigModel Batch 初始化失败降级**：若 API key 未配置，自动降级到同步 EmbeddingClient~~ ✅ 已实现
+
+---
+
+## Agent 自主开发原则
+
+### 可以自主决定的事项
+- 代码重构（变量重命名、函数拆分、模块移动）
+- 新增单元测试或调整测试结构
+- 更新日志格式、错误提示信息
+- 优化算法实现（不改变输入输出语义）
+- 更新本文档（AGENTS.md）和 README.md、DESIGN.md
+
+### 必须询问用户的事项
+- 修改核心数据模型（`Chunk`、`Document`、`GraphEntity`、`GraphRelation` 的字段）
+- 修改数据库 Schema（新增/删除/修改表或字段）
+- 修改配置系统的优先级或解析逻辑
+- 新增外部依赖（`requirements.txt` 变更）
+- 修改 Pipeline 核心流程（解析 → 章节树 → batch 构建 → 实体提取 → 图谱 → 向量化）
+- 删除已有功能或文件
+- 涉及真实 API 调用的操作（测试除外）
+- 修改 `plugin.json` 插件定义（除非用户明确要求）
+
+---
+
+## 文件修改权限规则
+
+| 文件/目录 | 权限 | 说明 |
+|-----------|------|------|
+| `scripts/core/*.py` | ⚠️ 需批准 | 核心模块，修改前必须说明影响范围 |
+| `scripts/prompts/*.txt` | ✅ 可改 | 提示词文件，运行时读取 |
+| `scripts/tests/*.py` | ✅ 可改 | 测试文件 |
+| `scripts/parsers/*.py` | ⚠️ 需批准 | 解析器影响数据输入质量 |
+| `plugin.json` | ⚠️ 需批准 | 插件定义，用户明确要求时可修改 |
+| `config.json` | ✅ 可改 | 用户持久化配置模板 |
+| `README.md` / `AGENTS.md` / `DESIGN.md` | ✅ 可改 | 文档必须随代码同步更新 |
+| `knowledge_base/` | ❌ 禁止 | 运行时生成数据 |
 
 ---
 
 ## 测试策略
 
+### 核心原则
+- **Mock 优先**：所有涉及外部 API 的测试使用 Fake 客户端，**禁止调用真实 API**
+- **回归即修复**：任何导致测试失败的变更必须当场修复
+- **193 个测试用例必须全部通过**
+
+### 测试文件清单
 | 测试文件 | 说明 |
 |----------|------|
-| `test_pdf_parser.py` | 图表提取核心测试（44+ 用例） |
-| `test_plugin_router.py` | FlowSelector、get_content、失败恢复、断点续传 |
-| `test_agent_batch_helper.py` | 批处理、断点续传、过滤规则、race condition |
-| `test_pipeline.py` | 文档处理流程测试 |
+| `test_plugin_router.py` | Plugin 工具路由、参数解析 |
+| `test_pdf_parser.py` | PDF 解析核心测试 |
+| `test_office_parser.py` | DOCX / XLSX 解析测试 |
 | `test_db.py` | SQLite 操作、事务管理 |
-| `test_vector_index.py` | FAISS 索引增删查、持久化、维度迁移 |
-| `test_llm_client.py` | LLM 对话、总结、图像分析 Mock |
-| `test_dual_client.py` | 双客户端架构、配置验证、Kimi 适配 |
-| `test_integration.py` | 端到端集成测试 |
-| `test_config_json.py` | 配置优先级、凭证注入、文件加载 |
+| `test_vector_index.py` | FAISS 索引增删查、持久化 |
+| `test_llm_client.py` | LLM 客户端 Mock |
+| `test_config_json.py` | 配置优先级、凭证注入 |
+| `test_models.py` | 数据模型测试（含 StrEnum） |
+| `test_chapter_parser.py` | ChapterParser 树形章节解析测试 |
+| `test_image_utils.py` | 图片压缩工具测试 |
+| `test_graph_store.py` | NetworkX 图谱存储 CRUD、子图、路径搜索、持久化测试 |
+| `test_batch_clients.py` | Batch API 客户端（Kimi + BigModel）Mock 测试 |
+| `test_knowledge_base_service.py` | KnowledgeBaseService 统一服务层测试 |
 
-### Mock 规范
-- 测试 LLM/Embedding 客户端时，**禁止直接调用真实 API**
-- 使用 `monkeypatch.setattr(Config, ...)` 而非 `monkeypatch.setenv` 来 mock 配置，避免 `.env` 加载顺序导致 mock 失效
-
-> 完整测试分类、性能指标、稳定性分析见 `README.md` → **开发与测试**。
-
----
-
-## Agent Batch 机制（开发者必读）
-
-`batch_*.txt` 是 Agent Skill Flow 的核心协作媒介——由脚本生成、由 Agent 阅读、由 Agent 产出 `batch_*.json` 回写数据库。
-
-### 核心流程
-
-1. `run_auto_summarize()` 过滤低价值 chunk，按同章节优先分组，写入 `batch_001.txt`
-2. Agent 阅读 txt，产出 `batch_001.json`：`[{chunk_db_id, summary, keywords, entities, relationships}]`
-3. 再次调用 `run_auto_summarize()`：发现 json 存在 → `_apply_json_file()` → 回写 DB → 删除 json → 继续下一 batch
-
-### 关键设计
-
-- **分组逻辑**：`_smart_batch()` 同章节优先，目标 25000 字符/12 个 chunk，尾部小 batch 合并
-- **图片注入**：`_enrich_batch_with_images()` 检查 `metadata["images"]`，若无 `vision_desc` 则提示 `AGENT VISION REQUIRED`
-- **断点续传**：`checkpoint.json` 记录 batch_map 和已应用批次，resume 时直接续传
-- **文件生命周期**：全部完成后 txt/json/checkpoint 全部清理
-
-> 完整流程图、文件格式详细说明、闭环机制见 `README.md` → **Agent Batch 机制详解**。
+### Mock 方法
+使用 `monkeypatch.setattr` 替换客户端类方法：
+```python
+# 示例：mock KimiBatchClient
+monkeypatch.setattr(
+    "core.batch_clients.KimiBatchClient.submit_parallel_batches",
+    lambda self, reqs: [{"entities": [], "relationships": [], "image_descriptions": {}}]
+)
+```
 
 ---
 
-## 章节综合机制（`synthesize_chapters`）
+## 配置系统说明
 
-`synthesize_chapters` 与 `auto_summarize` 是**两个独立的 Agent 协作流水线**，执行顺序上 `auto_summarize` 先、`synthesize_chapters` 后。
+### 三层优先级（高 → 低）
+```
+环境变量（Kimi CLI 运行时注入，如 llm.api_key）
+  ↓
+config.json（用户持久化配置，项目根目录）
+  ↓
+.env 文件（环境变量回退，如 WORKDOCS_LLM_API_KEY）
+  ↓
+代码硬编码默认值
+```
 
-| 对比项 | `auto_summarize` | `synthesize_chapters` |
-|--------|-----------------|----------------------|
-| **处理对象** | 单个 chunk（`status='embedded'`） | 整个章节（多个 `status='done'` 的 chunk 聚合） |
-| **输入** | chunk 原始 `content` | chunk 的 `summary`、`entities`、`relationships`、`vision_insights` |
-| **输出** | chunk 级 `summary` + `keywords` | 章节级结构化摘要：`summary`、`concepts`、`relationships`、`key_figures`、`key_tables` |
-| **写入表** | `chunks` | `chapter_summaries` + `concept_index` |
-| **文件前缀** | `batch_*.txt` / `batch_*.json` | `chapter_synthesis_*.txt` / `chapter_synthesis_*.json` |
-| **Checkpoint** | `checkpoint.json` | `chapter_checkpoint.json` |
-
-> 完整对比说明、txt/json 格式详细说明见 `README.md` → **章节综合机制**。
-
----
-
-## 已知限制与常见陷阱
-
-1. **DOCX 单 chunk 限制**：`.docx` 文件目前被解析为单个 `Chunk`，超大文档可能导致嵌入/token 超限。
-2. **矢量图提取**：PDF 中的矢量图不会通过 `page.get_images()` 直接提取。项目通过识别 `Figure X-X.` 标题来渲染周围区域作为补偿。
-3. **FAISS 与 SQLite 非原子**：极端情况下（进程崩溃、磁盘满），可能出现 FAISS 索引与 SQLite 元数据不一致。可通过 `reprocess` 命令重建文档解决。
-4. **Vision API 开销**：开启 `auto_vision=1` 后，每个包含图片的页面都会调用一次 Vision API，费用可能较高。
-5. **LLM 客户端 timeout**：默认 HTTP timeout 为 120 秒，已增加 3 次指数退避重试（1s / 2s / 4s）。
-6. **Embedding 维度不可变**：FAISS 索引创建后维度固定。更换模型导致维度变化时，必须删除旧索引并重新处理文档。
-7. **过滤规则**：`agent_batch_helper.py filter/auto` 依赖 `scripts/prompts/filter_config.json`，修改规则后无需重启，下次运行自动生效。
-8. **提示词定制**：`scripts/prompts/summarize.txt`、`summarize_user.txt`、`structural_summarize.txt` 被 `BaseLLMClient._load_prompt()` 读取。修改提示词后无需重启，下次调用自动生效。若文件不存在，使用内置默认值。
-8. **后台运行限制**：Kimi CLI 插件架构为单次 subprocess 调用，无法真正后台运行。超长文档依赖断点续传降低重试成本。
-
-> 安全性分析、代码风格详细分析见 `README.md` → **功能稳定性 / 安全性 / 代码风格分析**。
+### 关键配置项速查
+| 变量名 | 默认值 |
+|--------|--------|
+| `WORKDOCS_LLM_MODEL` | `kimi-k2.5` |
+| `WORKDOCS_EMBEDDING_MODEL` | `embedding-3` |
+| `WORKDOCS_EMBEDDING_DIMENSION` | `1024` |
+| `WORKDOCS_EMBEDDING_BASE_URL` | `https://open.bigmodel.cn/api/paas/v4` |
+| `WORKDOCS_LLM_BATCH_MAX_CHARS` | `10000` |
+| `WORKDOCS_EMBED_BATCH_MAX_CHARS` | `4000` |
+| `WORKDOCS_LLM_VISION_MAX_EDGE` | `1024` |
+| `WORKDOCS_LLM_VISION_QUALITY` | `85` |
 
 ---
 
-## Plugin 工具速查
+## 官方 API 开发文档
 
-| Tool | 说明 | 关键参数 |
-|------|------|----------|
-| `ingest` | 提取并存储文档 | `path`, `dry_run`, `auto_chapter`, `agent_mode` |
-| `search` | 语义向量搜索 | `text`, `top_k` |
-| `query` | 结构化查询 | `doc_id`, `page`, `chapter`, `keyword`, `concept` |
-| `get_content` | 获取完整未截断内容 | `doc_id` + `page`/`chapter`/`chunk_db_id` |
-| `status` | 列出所有文档 | 无 |
-| `toc` | 目录/标题搜索 | `doc_id` 或 `match` |
-| `auto_summarize` | Agent 批量总结流水线 | `doc_id`, `batch_size`, `filter` |
-| `synthesize_chapters` | 章节综合 | `doc_id` |
-| `progress` | 处理进度 | `doc_id` |
-| `reprocess` | 强制重新处理 | `doc_id` |
-
-**注意**：`plugin.json` 中所有 tool 的 `command` 固定为 `venv/bin/python3`，不依赖系统 PATH。
-
----
-
-## 相关文件索引
-
-| 文件 | 作用 |
-|------|------|
-| `plugin.json` | Kimi CLI Plugin 工具定义（10 个 tools，含 inject 配置） |
-| `config.json` | 配置入口（空值模板，Kimi CLI 自动注入凭证） |
-| `scripts/plugin_router.py` | Plugin 运行时路由（stdin JSON → stdout JSON） |
-| `scripts/main.py` | 独立 CLI 主入口 |
-| `scripts/doc_extractor.py` | 传统 CLI（子命令：ingest/status/query/search/toc…） |
-| `scripts/agent_batch_helper.py` | Agent 批量协作 CLI（子命令：list/dump/apply/filter/progress/auto） |
-| `scripts/core/config.py` | 配置中心（三层优先级解析） |
-| `scripts/core/flow_selector.py` | 双模式流程选择器 |
-| `scripts/core/models.py` | 数据模型 |
-| `scripts/core/db.py` | SQLite 数据库操作 |
-| `scripts/core/vector_index.py` | FAISS 向量索引 |
-| `scripts/core/pipeline.py` | 通用摄入管道 |
-| `scripts/core/llm_api_pipeline.py` | LLM API Flow 专用管道 |
-| `scripts/core/compatibility_pipeline.py` | Agent Skill Flow 兼容管道 |
-| `scripts/core/llm_chat_client.py` | LLM 对话客户端 |
-| `scripts/core/embedding_client.py` | Embedding 向量化客户端 |
-| `scripts/parsers/pdf_parser.py` | PDF 解析器 |
-| `scripts/parsers/office_parser.py` | Office 解析器 |
-| `scripts/prompts/filter_config.json` | 低价值 chunk 过滤规则 |
-| `scripts/requirements.txt` | Python 依赖清单 |
-| `scripts/.env.example` | 环境变量模板 |
++ [Kimi Code CLI 插件](https://moonshotai.github.io/kimi-cli/zh/customization/plugins.html)
++ [Kimi API 概述](https://platform.kimi.com/docs/api/overview)
++ [Kimi 模型参数参考](https://platform.kimi.com/docs/api/models-overview)
++ [Kimi 使用 Batch API 批量处理任务](https://platform.kimi.com/docs/guide/use-batch-api)
++ [BigModel API 使用概述](https://docs.bigmodel.cn/cn/api/introduction)
++ [BigModel 结构化输出](https://docs.bigmodel.cn/cn/guide/capabilities/struct-output)
++ [BigModel Embedding-3](https://docs.bigmodel.cn/cn/guide/models/embedding/embedding-3)
++ [BigModel 批量处理](https://docs.bigmodel.cn/cn/guide/tools/batch)
++ [BigModel 新文件解析服务](https://docs.bigmodel.cn/cn/guide/tools/file-parser)
