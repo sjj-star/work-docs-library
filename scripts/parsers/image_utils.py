@@ -1,10 +1,14 @@
+"""image_utils 模块."""
+
 from pathlib import Path
-from typing import Union
 
 from PIL import Image
 
 
-def compress_image(src_path: Union[str, Path], dst_path: Union[str, Path], max_edge: int = 1024, quality: int = 85) -> Path:
+def compress_image(
+    src_path: str | Path, dst_path: str | Path, max_edge: int = 1024, quality: int = 85
+) -> Path:
+    """compress_image 函数."""
     img = Image.open(src_path)
     if img.mode in ("RGBA", "P"):
         img = img.convert("RGB")
