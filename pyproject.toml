@@ -1,0 +1,59 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "work-docs-library"
+version = "0.1.0"
+description = "面向 IC 前端设计技术文档的自动化知识提取 pipeline"
+readme = "README.md"
+license = {text = "MIT"}
+requires-python = ">=3.11"
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+
+[tool.ruff.lint]
+select = [
+    "E",   # pycodestyle errors
+    "W",   # pycodestyle warnings
+    "F",   # Pyflakes
+    "I",   # isort
+    "N",   # pep8-naming
+    "D",   # pydocstyle
+    "UP",  # pyupgrade
+]
+ignore = [
+    "D203",  # incorrect-blank-line-before-class (与 D211 互斥)
+    "D213",  # multi-line-summary-second-line (与 D212 互斥)
+]
+
+[tool.ruff.lint.per-file-ignores]
+"scripts/tests/*" = ["D100", "D101", "D102", "D103", "D107"]
+"scripts/core/__init__.py" = ["D104"]
+"scripts/parsers/__init__.py" = ["D104"]
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+
+[tool.pyright]
+include = ["scripts"]
+exclude = [
+    "scripts/tests/fixtures",
+    "**/__pycache__",
+]
+venvPath = "."
+venv = "venv"
+typeCheckingMode = "standard"
+reportMissingImports = "error"
+reportMissingModuleSource = "warning"
+
+[tool.pytest.ini_options]
+testpaths = ["scripts/tests"]
+pythonpath = ["scripts"]
+addopts = "-q --tb=short"
