@@ -19,15 +19,22 @@
 - IMPLEMENTS: Feature → Module（功能由模块实现）
 - CONTAINS: Module → Module（模块包含子模块）
 - HAS_INTERFACE: Module → Interface
-- HAS_SIGNAL: Interface → Signal
+- HAS_SIGNAL: Module → Signal
 - HAS_REGISTER: Module → Register
 - HAS_FIELD: Register → RegisterField
-- REQUIRES: Feature → Scenario（功能需要验证场景）
-- VALIDATES: Scenario → Feature
-- BELONGS_TO: Module → ClockDomain
+- REQUIRES: Feature/Module → Feature/Module（依赖需求）
+- VALIDATES: TestCase → Feature/Module（验证覆盖）
+- BELONGS_TO: Signal/Register → ClockDomain/ResetDomain（时钟/复位域归属）
 - AT_ADDRESS: Register → MemoryMap（含 address_offset 属性）
-- CONNECTS_TO: Module → Module（模块间连接）
-- DOCUMENTED_BY: Entity → TestCase
+- CONNECTS_TO: Interface/Signal → Interface/Signal（连接关系）
+- DOCUMENTED_BY: Entity → Document（文档来源追溯）
+- DRIVES: Signal/Module → Signal（驱动关系，如时钟驱动、数据驱动）
+- DRIVEN_BY: Signal → Signal/Module（被驱动关系）
+- TIMING_PATH: Entity → Entity（时序路径，用于 STA 分析）
+- CLOCK_GATED_BY: Module/Signal → Signal（时钟门控控制）
+- RESET_BY: Module/Signal → Signal（复位来源）
+- PARAMETERIZED_BY: Module → Parameter（参数化配置）
+- INSTANCE_OF: Module → Module（实例化关系，instance → definition）
 
 ## 输出格式（必须严格遵守）
 
@@ -73,7 +80,11 @@
 
 1. 只提取当前文档中明确提及的实体和关系
 2. properties 中可包含 description, address_offset, width, bits, access, reset_value
-3. 寄存器表格信息要完整提取（地址、字段、位宽、访问类型、复位值）
+3. **表格提取**：文档中的表格（无论是 HTML `<table>` 标签格式还是纯文本对齐格式）必须完整识别并提取其中的实体
+   - 寄存器表格：提取每一行的 Register 实体，包含 address_offset、width、bits、access、reset_value
+   - 信号表格：提取每一行的 Signal 实体，包含 direction、width、description
+   - 模块层级表格：提取 Module 实体及 CONTAINS 关系
+   - 时序参数表格：提取 TIMING_PATH 关系
 4. 图片中的信息也要提取（如信号时序图、架构框图）——对每张图片提供简洁的文字描述
 5. `image_id` 直接使用 `[image_id: XXX]` 标记中的值，不要自行编造
 6. chapter_title 填写该图片所在章节的标题
