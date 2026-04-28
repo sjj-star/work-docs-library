@@ -62,7 +62,7 @@
 - ✅ 零数据丢失：移除所有源数据过滤和截断
 - ✅ Prompt 外部化：所有提示词在 `scripts/prompts/*.txt`
 - ✅ 代码清理：删除 11 个旧文件、4 个旧 prompt 文件、7 个旧测试文件
-- ✅ **API 接口重构**：新增 `KnowledgeBaseService` 统一服务层；Plugin 工具从 8 个扩展至 12 个（新增 4 个图谱查询工具）
+- ✅ **API 接口重构**：新增 `KnowledgeBaseService` 统一服务层；Plugin 工具从 8 个扩展至 **22 个**（新增 14 个工具）
 - ✅ **图谱查询增强**：`GraphStore.find_path()` BFS 路径搜索、`search_entities()` 模糊搜索
 - ✅ **跨文档知识互通**：全局统一图谱 `global.json` + 文档子图快照 `{doc_id}.json`，同名同类型实体自动去重
 - ✅ **章节级增量更新**：`content_hash` 指纹比较，未变章节复用实体缓存与 embedding，仅 LLM 提取变更/新增章节
@@ -74,13 +74,20 @@
 - ✅ **BatchBuilder 层级设计**：`#` 为文档标题，`##` 为硬边界，`###` 为基本 chunk 单位
 - ✅ **数据模型清理**：移除 `Document.chunks`、`Document.metadata`、`Chunk.page_start/page_end` 等无功能实体字段；引入 `StrEnum` 约束状态值
 - ✅ **数据库 schema 简化**：移除 `chapters_override`、`page_start`、`page_end` 列；新增 `_schema_meta` 版本管理表；新增 `query_by_doc()` 辅助方法
-- ✅ 193 个测试全部通过
+- ✅ **数据质量增强**：`GraphEntity`/`GraphRelation` 新增 `confidence`/`verified`/`created_at`/`updated_at`/`feedback_score` 字段
+- ✅ **图谱动态更新接口**：Plugin 暴露 `graph_add/update/delete entity/relation`、`graph_verify_entity` 等 6 个写工具
+- ✅ **冲突检测与日志**：同名实体属性差异自动记录 `conflict_logs` 表，供人工审核
+- ✅ **语义-图谱联合查询**：`search_with_graph()` 先 FAISS 语义搜索再扩展关联子图
+- ✅ **chunk+实体联合返回**：`get_content_with_entities()` 返回 chunk 及其关联的图谱实体/关系
+- ✅ **用户反馈机制**：`graph_feedback` 工具支持对实体/关系打分（+1/-1），`feedback_score` 实时汇总
+- ✅ **IC 关系扩展**：新增 `DRIVES`/`DRIVEN_BY`/`TIMING_PATH`/`CLOCK_GATED_BY`/`RESET_BY`/`PARAMETERIZED_BY`/`INSTANCE_OF`
+- ✅ **属性索引优化**：`NetworkXGraphStore` 内部维护 `property_index`，`find_by_property()` 从 O(N) 降至 O(1)
+- ✅ 215 个测试全部通过
 
 ### 下一阶段（精确到下一步）
 1. **可视化**：图谱可视化导出（Graphviz / D3.js）
 2. **评估体系**：实体提取准确率、关系提取召回率的自动化评估
 3. **DOCX/XLSX 接入 pipeline**：当前解析器代码存在但未接入 `DocGraphPipeline`
-4. ~~**BigModel Batch 初始化失败降级**：若 API key 未配置，自动降级到同步 EmbeddingClient~~ ✅ 已实现
 
 ---
 
@@ -125,7 +132,7 @@
 ### 核心原则
 - **Mock 优先**：所有涉及外部 API 的测试使用 Fake 客户端，**禁止调用真实 API**
 - **回归即修复**：任何导致测试失败的变更必须当场修复
-- **193 个测试用例必须全部通过**
+- **215 个测试用例必须全部通过**
 
 ### 测试文件清单
 | 测试文件 | 说明 |
@@ -140,7 +147,7 @@
 | `test_models.py` | 数据模型测试（含 StrEnum） |
 | `test_chapter_parser.py` | ChapterParser 树形章节解析测试 |
 | `test_image_utils.py` | 图片压缩工具测试 |
-| `test_graph_store.py` | NetworkX 图谱存储 CRUD、子图、路径搜索、持久化测试 |
+| `test_graph_store.py` | NetworkX 图谱存储 CRUD、冲突检测、属性索引、子图、路径搜索、持久化测试 |
 | `test_batch_clients.py` | Batch API 客户端（Kimi + BigModel）Mock 测试 |
 | `test_knowledge_base_service.py` | KnowledgeBaseService 统一服务层测试 |
 

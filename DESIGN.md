@@ -30,6 +30,13 @@
 - **当前需求足够**：支持邻居查询、子图提取、BFS 路径搜索（`find_path`，深度上限 6），NetworkX 的内存遍历性能完全满足
 - **预留接口**：`GraphStore` 抽象基类已预留 Neo4j 迁移接口，未来需求变化时可无缝替换
 
+**增强功能**：
+- **数据质量标记**：`GraphEntity`/`GraphRelation` 新增 `confidence`/`verified`/`created_at`/`updated_at`/`feedback_score` 字段，支持置信度追踪和人工验证
+- **动态 CRUD**：支持运行时 `update_entity`/`delete_entity`/`update_relation`/`delete_relation`/`verify_entity`，Agent 可直接修正图谱
+- **冲突检测**：同名实体属性差异时自动记录 `conflict_logs`，保留旧值到列表形式而非静默覆盖
+- **属性索引**：内部维护 `property_index: dict[(entity_type, key, value), set[nid]]`，`find_by_property()` 从 O(N) 降至 O(1)
+- **关系过滤**：`find_path()` 和 `get_neighbors()` 支持按 `rel_types` 过滤
+
 **权衡**：
 - 内存存储，单图规模受限于可用内存（当前目标文档为几十到几百页，远未触及瓶颈）
 - 不支持并发写入（当前为单用户本地部署，不成为问题）
@@ -291,6 +298,55 @@
 
 ---
 
+## 联合查询与 Agent 自主推理
+
+**设计**：`search_with_graph()` 实现语义搜索与图谱查询的联合。
+
+**流程**：
+1. FAISS 语义搜索 → top_k 个最相关 chunk
+2. 读取 chunk `metadata` 中缓存的 `extracted_entities`
+3. 对每个实体在全局图上做 `get_subgraph(center, graph_depth)` 扩展
+4. 返回 `{chunks, related_entities, subgraphs}`
+
+**chunk+实体联合返回**：`get_content_with_entities(chunk_db_id)` 返回 chunk 内容 + 全局图中最新状态的关联实体/关系（而非 metadata 中的处理时快照）。
+
+**Agent 自主推理能力**：
+- Agent 可先用 `search_with_graph` 找到相关文本和图谱实体
+- 再用 `graph_neighbors`/`graph_path`/`graph_subgraph` 做多跳推理
+- 发现错误时用 `graph_feedback` 标记，`feedback_score` 实时汇总到实体属性
+- 发现缺失/错误关联时用 `graph_add_entity`/`graph_add_relation`/`graph_update_entity` 动态修正
+
+---
+
+## 反馈与数据质量闭环
+
+**设计**：`feedback` 表 + `graph_feedback` 工具建立数据质量闭环。
+
+**机制**：
+- 用户对实体/关系提交 `rating`（+1 正确 / -1 错误）+ `comment`
+- `get_entity_feedback_score()` 汇总评分，同步更新到 `GraphEntity.feedback_score`
+- `confidence` 字段标记 LLM 提取置信度（默认 1.0）
+- `verified` 字段标记人工验证状态
+- 低 confidence 或负 feedback_score 的实体可被 Agent 优先复核
+
+---
+
+## IC 设计关系类型扩展
+
+**新增关系类型**（覆盖 STA、CDC、电源域、参数化等场景）：
+
+| 关系类型 | 语义 |
+|---------|------|
+| `DRIVES` | Signal/Module → Signal（驱动关系） |
+| `DRIVEN_BY` | Signal → Signal/Module（被驱动关系） |
+| `TIMING_PATH` | Entity → Entity（时序路径，STA 分析） |
+| `CLOCK_GATED_BY` | Module/Signal → Signal（时钟门控控制） |
+| `RESET_BY` | Module/Signal → Signal（复位来源） |
+| `PARAMETERIZED_BY` | Module → Parameter（参数化配置） |
+| `INSTANCE_OF` | Module → Module（实例化：instance → definition） |
+
+---
+
 ## 已知限制与权衡汇总
 
 | 限制 | 原因 | 缓解措施 |
@@ -304,6 +360,8 @@
 | **图片需先文字化** | embedding-3 不支持图片输入 | LLM 先生成 `image_descriptions`，再合并到 chunk 文本 |
 | **本地 PDF 解析目录页换行** | 目录页多行条目保留为多行 | 目录页对知识提取影响小，接受此行为 |
 | **本地 PDF 解析依赖 TOC** | 无 TOC 的 PDF 回退到启发式规则 | `_fallback_heading_detection` 提供降级方案 |
+| **冲突日志无关系级记录** | `add_relation` 冲突只记录 property_key，不记录完整关系上下文 | 冲突日志包含 from/to/type 信息，可定位 |
+| **反馈不反向更新 chunk metadata** | 全局图更新后，chunk metadata 中的 extracted_entities 仍是处理时快照 | `get_content_with_entities` 查全局图获取最新状态 |
 
 ---
 
