@@ -1,0 +1,20 @@
+{
+  "llm": {
+    "provider": "",
+    "api_key": "",
+    "endpoint": "",
+    "model": "",
+    "thinking_enabled": false
+  },
+  "embedding": {
+    "provider": "",
+    "api_key": "",
+    "endpoint": "",
+    "model": "",
+    "dimension": 0
+  },
+  "bigmodel": {
+    "api_key": ""
+  },
+  "batch_size": 0
+}
