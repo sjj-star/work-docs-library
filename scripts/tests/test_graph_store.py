@@ -84,6 +84,11 @@ def test_graph_entity_to_dict_from_dict():
         "properties": {"addr": "0x00", "width": 32},
         "source_doc_ids": ["doc1"],
         "source_chapter": "ch3",
+        "confidence": 1.0,
+        "verified": False,
+        "created_at": "",
+        "updated_at": "",
+        "feedback_score": 0,
     }
     restored = GraphEntity.from_dict(d)
     assert restored == e
@@ -108,6 +113,11 @@ def test_graph_relation_to_dict_from_dict():
         "to_type": "Register",
         "properties": {"access": "RW"},
         "source_doc_ids": [],
+        "confidence": 1.0,
+        "verified": False,
+        "created_at": "",
+        "updated_at": "",
+        "feedback_score": 0,
     }
     restored = GraphRelation.from_dict(d)
     assert restored == r
@@ -203,7 +213,7 @@ def test_add_relation_and_get_neighbors_out(graph_store, sample_entities, sample
 
     neighbors = graph_store.get_neighbors("Module", "TOP", direction="out")
     assert len(neighbors) == 2
-    names = {n.name for n, _ in neighbors}
+    names = {n.name for n, _, _ in neighbors}
     assert names == {"SUB", "CLK"}
 
 
@@ -218,6 +228,7 @@ def test_get_neighbors_in(graph_store, sample_entities, sample_relations):
     assert len(neighbors) == 1
     assert neighbors[0][0].name == "TOP"
     assert neighbors[0][1] == "CONTAINS"
+    assert neighbors[0][2] == {}  # rel_properties
 
 
 def test_get_neighbors_both(graph_store, sample_entities, sample_relations):
@@ -242,7 +253,7 @@ def test_get_neighbors_both(graph_store, sample_entities, sample_relations):
     # 入边: TOP --CONTAINS--> SUB
     # 出边: SUB --HAS_SIGNAL--> CLK
     assert len(neighbors) == 2
-    names = {n.name for n, _ in neighbors}
+    names = {n.name for n, _, _ in neighbors}
     assert names == {"TOP", "CLK"}
 
 
@@ -743,3 +754,204 @@ def test_search_entities_no_match(graph_store, sample_entities):
     for e in sample_entities:
         graph_store.add_entity(e)
     assert graph_store.search_entities("NONEXISTENT") == []
+
+
+# ---------------------------------------------------------------------------
+# 10. CRUD 与冲突检测
+# ---------------------------------------------------------------------------
+
+
+def test_update_entity(graph_store):
+    """update_entity 更新属性."""
+    graph_store.add_entity(GraphEntity(entity_type="Module", name="M1", properties={"a": 1}))
+    ok = graph_store.update_entity("Module", "M1", properties={"a": 2, "b": 3}, confidence=0.8)
+    assert ok is True
+    e = graph_store.get_entity("Module", "M1")
+    assert e.properties == {"a": 2, "b": 3}
+    assert e.confidence == 0.8
+
+
+def test_update_entity_missing(graph_store):
+    """update_entity 对不存在的实体返回 False."""
+    assert graph_store.update_entity("Module", "X", properties={"a": 1}) is False
+
+
+def test_delete_entity(graph_store):
+    """delete_entity 删除实体并级联删除关联边."""
+    graph_store.add_entity(GraphEntity(entity_type="Module", name="A"))
+    graph_store.add_entity(GraphEntity(entity_type="Module", name="B"))
+    graph_store.add_relation(
+        GraphRelation(
+            rel_type="CONTAINS", from_name="A", to_name="B", from_type="Module", to_type="Module"
+        )
+    )
+    assert graph_store.stats()["edges"] == 1
+    ok = graph_store.delete_entity("Module", "A")
+    assert ok is True
+    assert graph_store.stats()["nodes"] == 1
+    assert graph_store.stats()["edges"] == 0
+
+
+def test_delete_entity_missing(graph_store):
+    """delete_entity 对不存在的实体返回 False."""
+    assert graph_store.delete_entity("Module", "X") is False
+
+
+def test_verify_entity(graph_store):
+    """verify_entity 标记验证状态."""
+    graph_store.add_entity(GraphEntity(entity_type="Module", name="M1"))
+    assert graph_store.get_entity("Module", "M1").verified is False
+    assert graph_store.verify_entity("Module", "M1", True) is True
+    assert graph_store.get_entity("Module", "M1").verified is True
+    assert graph_store.verify_entity("Module", "M1", False) is True
+    assert graph_store.get_entity("Module", "M1").verified is False
+
+
+def test_add_entity_conflict_detection(graph_store):
+    """add_entity 合并时检测属性冲突."""
+    graph_store.add_entity(GraphEntity(entity_type="Register", name="R1", properties={"width": 32}))
+    conflicts = graph_store.add_entity(
+        GraphEntity(entity_type="Register", name="R1", properties={"width": 64})
+    )
+    assert len(conflicts) == 1
+    assert conflicts[0]["property_key"] == "width"
+    assert conflicts[0]["old_value"] == 32
+    assert conflicts[0]["new_value"] == 64
+    # 属性应被更新
+    e = graph_store.get_entity("Register", "R1")
+    assert e.properties["width"] == 64
+
+
+def test_add_relation_conflict_detection(graph_store):
+    """add_relation 合并时检测属性冲突."""
+    graph_store.add_entity(GraphEntity(entity_type="Module", name="A"))
+    graph_store.add_entity(GraphEntity(entity_type="Module", name="B"))
+    graph_store.add_relation(
+        GraphRelation(
+            rel_type="CONTAINS",
+            from_name="A",
+            to_name="B",
+            from_type="Module",
+            to_type="Module",
+            properties={"order": 1},
+        )
+    )
+    conflicts = graph_store.add_relation(
+        GraphRelation(
+            rel_type="CONTAINS",
+            from_name="A",
+            to_name="B",
+            from_type="Module",
+            to_type="Module",
+            properties={"order": 2},
+        )
+    )
+    assert len(conflicts) == 1
+    assert conflicts[0]["property_key"] == "order"
+
+
+# ---------------------------------------------------------------------------
+# 11. 路径搜索增强
+# ---------------------------------------------------------------------------
+
+
+def test_find_path_with_rel_types_filter(graph_store):
+    """find_path 支持按关系类型过滤."""
+    for name in ("A", "B", "C", "D"):
+        graph_store.add_entity(GraphEntity(entity_type="Module", name=name))
+    graph_store.add_relation(
+        GraphRelation(
+            rel_type="CONTAINS", from_name="A", to_name="B", from_type="Module", to_type="Module"
+        )
+    )
+    graph_store.add_relation(
+        GraphRelation(
+            rel_type="HAS_SIGNAL", from_name="B", to_name="C", from_type="Module", to_type="Module"
+        )
+    )
+    graph_store.add_relation(
+        GraphRelation(
+            rel_type="CONTAINS", from_name="C", to_name="D", from_type="Module", to_type="Module"
+        )
+    )
+
+    # 不过滤：A->B->C->D
+    paths = graph_store.find_path("Module", "A", "Module", "D", max_depth=4)
+    assert len(paths) == 1
+
+    # 只走 CONTAINS：A 无法到 D（B->C 是 HAS_SIGNAL）
+    paths_filtered = graph_store.find_path(
+        "Module", "A", "Module", "D", max_depth=4, rel_types={"CONTAINS"}
+    )
+    assert len(paths_filtered) == 0
+
+
+# ---------------------------------------------------------------------------
+# 12. 属性索引优化
+# ---------------------------------------------------------------------------
+
+
+def test_find_by_property_uses_index(graph_store):
+    """find_by_property 通过索引正确返回结果."""
+    graph_store.add_entity(GraphEntity(entity_type="Register", name="R1", properties={"width": 32}))
+    graph_store.add_entity(GraphEntity(entity_type="Register", name="R2", properties={"width": 64}))
+    graph_store.add_entity(GraphEntity(entity_type="Signal", name="S1", properties={"width": 32}))
+
+    results = graph_store.find_by_property("Register", "width", 32)
+    assert len(results) == 1
+    assert results[0].name == "R1"
+
+    results = graph_store.find_by_property("Register", "width", 64)
+    assert len(results) == 1
+    assert results[0].name == "R2"
+
+    results = graph_store.find_by_property("Signal", "width", 32)
+    assert len(results) == 1
+    assert results[0].name == "S1"
+
+
+def test_property_index_updated_on_delete(graph_store):
+    """删除实体后属性索引应同步更新."""
+    graph_store.add_entity(GraphEntity(entity_type="Register", name="R1", properties={"width": 32}))
+    assert len(graph_store.find_by_property("Register", "width", 32)) == 1
+    graph_store.delete_entity("Register", "R1")
+    assert len(graph_store.find_by_property("Register", "width", 32)) == 0
+
+
+def test_property_index_updated_on_update(graph_store):
+    """update_entity 后属性索引应同步更新."""
+    graph_store.add_entity(GraphEntity(entity_type="Register", name="R1", properties={"width": 32}))
+    graph_store.update_entity("Register", "R1", properties={"width": 64})
+    assert len(graph_store.find_by_property("Register", "width", 32)) == 0
+    assert len(graph_store.find_by_property("Register", "width", 64)) == 1
+
+
+# ---------------------------------------------------------------------------
+# 13. 子图文本化增强
+# ---------------------------------------------------------------------------
+
+
+def test_subgraph_text_includes_sources_and_verified(graph_store):
+    """to_text_context 包含来源和验证标记."""
+    graph_store.add_entity(
+        GraphEntity(entity_type="Module", name="M1", source_doc_ids={"doc1"}, verified=True)
+    )
+    graph_store.add_entity(
+        GraphEntity(entity_type="Signal", name="S1", source_doc_ids={"doc1", "doc2"})
+    )
+    graph_store.add_relation(
+        GraphRelation(
+            rel_type="HAS_SIGNAL",
+            from_name="M1",
+            to_name="S1",
+            from_type="Module",
+            to_type="Signal",
+            properties={"width": 32},
+        )
+    )
+
+    sg = graph_store.get_subgraph("Module", "M1", depth=1)
+    text = sg.to_text_context()
+    assert "[来源: doc1]" in text
+    assert "✓" in text  # verified mark
+    assert "width=32" in text

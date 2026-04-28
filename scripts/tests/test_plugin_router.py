@@ -243,6 +243,7 @@ def test_get_content_by_chapter(patched_config, monkeypatch):
 
     # Query by chunk_db_id to get content (chapter titles may be empty for untitled docs)
     import sqlite3
+
     with sqlite3.connect(str(Config.DB_PATH)) as conn:
         row = conn.execute("SELECT id FROM chunks WHERE doc_id = ?", (doc_id,)).fetchone()
         chunk_db_id = row[0]
@@ -643,3 +644,128 @@ def test_graph_tools_missing_params():
     assert plugin_router.tool_graph_neighbors({})["success"] is False
     assert plugin_router.tool_graph_path({})["success"] is False
     assert plugin_router.tool_graph_subgraph({})["success"] is False
+
+
+def test_graph_add_entity(monkeypatch):
+    """graph_add_entity 添加实体."""
+    svc = _make_graph_service()
+    monkeypatch.setattr(plugin_router, "_get_service", lambda: svc)
+
+    result = plugin_router.tool_graph_add_entity(
+        {"entity_type": "Module", "name": "NEW", "properties": {"desc": "test"}}
+    )
+    assert result["success"] is True
+    assert result["entity"]["name"] == "NEW"
+    assert result["conflicts"] == []
+
+
+def test_graph_update_entity(monkeypatch):
+    """graph_update_entity 更新实体."""
+    svc = _make_graph_service()
+    monkeypatch.setattr(plugin_router, "_get_service", lambda: svc)
+
+    plugin_router.tool_graph_add_entity({"entity_type": "Module", "name": "M1"})
+    result = plugin_router.tool_graph_update_entity(
+        {"entity_type": "Module", "name": "M1", "properties": {"a": 1}, "verified": True}
+    )
+    assert result["success"] is True
+
+    # 验证更新生效
+    e = svc.graph.get_entity("Module", "M1")
+    assert e is not None
+    assert e.properties == {"a": 1}
+    assert e.verified is True
+
+
+def test_graph_delete_entity(monkeypatch):
+    """graph_delete_entity 删除实体."""
+    svc = _make_graph_service()
+    monkeypatch.setattr(plugin_router, "_get_service", lambda: svc)
+
+    plugin_router.tool_graph_add_entity({"entity_type": "Module", "name": "DEL"})
+    result = plugin_router.tool_graph_delete_entity({"entity_type": "Module", "name": "DEL"})
+    assert result["success"] is True
+    assert svc.graph.get_entity("Module", "DEL") is None
+
+
+def test_graph_add_relation(monkeypatch):
+    """graph_add_relation 添加关系."""
+    svc = _make_graph_service()
+    monkeypatch.setattr(plugin_router, "_get_service", lambda: svc)
+
+    plugin_router.tool_graph_add_entity({"entity_type": "Module", "name": "A"})
+    plugin_router.tool_graph_add_entity({"entity_type": "Module", "name": "B"})
+    result = plugin_router.tool_graph_add_relation(
+        {
+            "rel_type": "CONTAINS",
+            "from_type": "Module",
+            "from_name": "A",
+            "to_type": "Module",
+            "to_name": "B",
+        }
+    )
+    assert result["success"] is True
+    assert result["conflicts"] == []
+
+
+def test_graph_delete_relation(monkeypatch):
+    """graph_delete_relation 删除关系."""
+    svc = _make_graph_service()
+    monkeypatch.setattr(plugin_router, "_get_service", lambda: svc)
+
+    plugin_router.tool_graph_add_entity({"entity_type": "Module", "name": "A"})
+    plugin_router.tool_graph_add_entity({"entity_type": "Module", "name": "B"})
+    plugin_router.tool_graph_add_relation(
+        {
+            "rel_type": "CONTAINS",
+            "from_type": "Module",
+            "from_name": "A",
+            "to_type": "Module",
+            "to_name": "B",
+        }
+    )
+    result = plugin_router.tool_graph_delete_relation(
+        {
+            "rel_type": "CONTAINS",
+            "from_type": "Module",
+            "from_name": "A",
+            "to_type": "Module",
+            "to_name": "B",
+        }
+    )
+    assert result["success"] is True
+
+
+def test_graph_verify_entity(monkeypatch):
+    """graph_verify_entity 标记验证."""
+    svc = _make_graph_service()
+    monkeypatch.setattr(plugin_router, "_get_service", lambda: svc)
+
+    plugin_router.tool_graph_add_entity({"entity_type": "Module", "name": "V1"})
+    result = plugin_router.tool_graph_verify_entity(
+        {"entity_type": "Module", "name": "V1", "verified": True}
+    )
+    assert result["success"] is True
+    assert result["verified"] is True
+
+
+def test_graph_conflicts_empty(monkeypatch):
+    """graph_conflicts 无冲突时返回空列表."""
+    svc = _make_graph_service()
+    monkeypatch.setattr(plugin_router, "_get_service", lambda: svc)
+
+    result = plugin_router.tool_graph_conflicts({})
+    assert result["success"] is True
+    assert result["count"] == 0
+
+
+def test_graph_feedback(monkeypatch):
+    """graph_feedback 提交反馈."""
+    svc = _make_graph_service()
+    monkeypatch.setattr(plugin_router, "_get_service", lambda: svc)
+
+    result = plugin_router.tool_graph_feedback(
+        {"rating": 1, "entity_type": "Module", "entity_name": "M1", "comment": "Good"}
+    )
+    assert result["success"] is True
+    assert result["feedback_id"] > 0
