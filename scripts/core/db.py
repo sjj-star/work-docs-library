@@ -68,6 +68,31 @@ class KnowledgeDB:
         CREATE INDEX IF NOT EXISTS idx_chunks_doc ON chunks(doc_id);
         CREATE INDEX IF NOT EXISTS idx_chunks_type ON chunks(chunk_type);
         CREATE INDEX IF NOT EXISTS idx_chunks_chapter ON chunks(doc_id, chapter_title);
+        CREATE TABLE IF NOT EXISTS conflict_logs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            entity_type TEXT,
+            name TEXT,
+            property_key TEXT,
+            old_value TEXT,
+            new_value TEXT,
+            timestamp TEXT,
+            doc_id TEXT
+        );
+        CREATE TABLE IF NOT EXISTS feedback (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            entity_type TEXT,
+            entity_name TEXT,
+            relation_from_type TEXT,
+            relation_from_name TEXT,
+            relation_to_type TEXT,
+            relation_to_name TEXT,
+            relation_type TEXT,
+            rating INTEGER,
+            comment TEXT,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP
+        );
+        CREATE INDEX IF NOT EXISTS idx_conflict_entity ON conflict_logs(entity_type, name);
+        CREATE INDEX IF NOT EXISTS idx_feedback_entity ON feedback(entity_type, entity_name);
         """
         with self._connect() as conn:
             conn.executescript(sql)
@@ -331,6 +356,144 @@ class KnowledgeDB:
         """按 ID 删除单个 chunk."""
         with self._connect() as conn:
             conn.execute("DELETE FROM chunks WHERE id = ?", (db_id,))
+
+    # -- 冲突日志 --
+
+    def insert_conflict_logs(self, logs: list[dict]) -> None:
+        """批量插入冲突日志."""
+        if not logs:
+            return
+        with self._connect() as conn:
+            for log in logs:
+                conn.execute(
+                    """
+                    INSERT INTO conflict_logs
+                    (entity_type, name, property_key, old_value, new_value, timestamp, doc_id)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        log.get("entity_type", ""),
+                        log.get("name", ""),
+                        log.get("property_key", ""),
+                        str(log.get("old_value", "")),
+                        str(log.get("new_value", "")),
+                        log.get("timestamp", ""),
+                        log.get("doc_id", ""),
+                    ),
+                )
+
+    def query_conflict_logs(
+        self,
+        entity_type: str | None = None,
+        name: str | None = None,
+        limit: int = 100,
+    ) -> list[dict]:
+        """查询冲突日志."""
+        sql = "SELECT * FROM conflict_logs WHERE 1=1"
+        params: list = []
+        if entity_type:
+            sql += " AND entity_type = ?"
+            params.append(entity_type)
+        if name:
+            sql += " AND name = ?"
+            params.append(name)
+        sql += " ORDER BY timestamp DESC LIMIT ?"
+        params.append(limit)
+        with self._connect() as conn:
+            rows = conn.execute(sql, params).fetchall()
+        return [
+            {
+                "id": r["id"],
+                "entity_type": r["entity_type"],
+                "name": r["name"],
+                "property_key": r["property_key"],
+                "old_value": r["old_value"],
+                "new_value": r["new_value"],
+                "timestamp": r["timestamp"],
+                "doc_id": r["doc_id"],
+            }
+            for r in rows
+        ]
+
+    # -- 反馈 --
+
+    def insert_feedback(
+        self,
+        rating: int,
+        entity_type: str | None = None,
+        entity_name: str | None = None,
+        relation_type: str | None = None,
+        relation_from_type: str | None = None,
+        relation_from_name: str | None = None,
+        relation_to_type: str | None = None,
+        relation_to_name: str | None = None,
+        comment: str = "",
+    ) -> int:
+        """插入反馈记录."""
+        with self._connect() as conn:
+            cur = conn.execute(
+                """
+                INSERT INTO feedback
+                (entity_type, entity_name, relation_from_type, relation_from_name,
+                 relation_to_type, relation_to_name, relation_type, rating, comment)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    entity_type or "",
+                    entity_name or "",
+                    relation_from_type or "",
+                    relation_from_name or "",
+                    relation_to_type or "",
+                    relation_to_name or "",
+                    relation_type or "",
+                    rating,
+                    comment,
+                ),
+            )
+            assert cur.lastrowid is not None
+            return cur.lastrowid
+
+    def query_feedback(
+        self,
+        entity_type: str | None = None,
+        entity_name: str | None = None,
+        limit: int = 100,
+    ) -> list[dict]:
+        """查询反馈记录."""
+        sql = "SELECT * FROM feedback WHERE 1=1"
+        params: list = []
+        if entity_type:
+            sql += " AND entity_type = ?"
+            params.append(entity_type)
+        if entity_name:
+            sql += " AND entity_name = ?"
+            params.append(entity_name)
+        sql += " ORDER BY created_at DESC LIMIT ?"
+        params.append(limit)
+        with self._connect() as conn:
+            rows = conn.execute(sql, params).fetchall()
+        return [
+            {
+                "id": r["id"],
+                "entity_type": r["entity_type"],
+                "entity_name": r["entity_name"],
+                "relation_type": r["relation_type"],
+                "rating": r["rating"],
+                "comment": r["comment"],
+                "created_at": r["created_at"],
+            }
+            for r in rows
+        ]
+
+    def get_entity_feedback_score(self, entity_type: str, entity_name: str) -> int:
+        """获取实体的累计反馈评分."""
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT SUM(rating) as score FROM feedback"
+                " WHERE entity_type = ? AND entity_name = ?",
+                (entity_type, entity_name),
+            ).fetchone()
+        return row["score"] or 0
 
     def _rows_to_chunks(self, rows: list[sqlite3.Row]) -> list[Chunk]:
         chunks = []
