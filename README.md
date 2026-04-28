@@ -40,8 +40,7 @@ flowchart TB
     A[PDF] --> B[BigModel Expert 解析]
     B --> C[Markdown 文本 + 图片]
     C --> D[ChapterParser 树形解析]
-    D --> E1[TableParser 规则提取表格]
-    E1 --> E[BatchBuilder 构建 batch]
+    D --> E[BatchBuilder 构建 batch]
     E --> F[EntityExtractor multimodal batch]
     F --> G[LLM Batch API]
     G --> H[entities + relationships + image_descriptions]
@@ -218,9 +217,19 @@ Kimi CLI 通过 `plugin.json` 注册以下工具：
 | `reprocess` | 强制重新处理文档 |
 | `get_content` | 获取完整未截断内容 |
 | `graph_query` | 查询知识图谱实体（按类型/名称） |
-| `graph_neighbors` | 查询实体的邻居节点 |
-| `graph_path` | 查找两实体间的路径 |
+| `graph_neighbors` | 查询实体的邻居节点（含关系属性） |
+| `graph_path` | 查找两实体间的路径（支持关系过滤） |
 | `graph_subgraph` | 提取以某实体为中心的子图 |
+| `graph_add_entity` | 添加/更新图谱实体 |
+| `graph_update_entity` | 更新实体属性 |
+| `graph_delete_entity` | 删除实体（级联删边） |
+| `graph_add_relation` | 添加/更新图谱关系 |
+| `graph_delete_relation` | 删除关系 |
+| `graph_verify_entity` | 标记实体为已验证 |
+| `graph_search_with_graph` | 语义搜索 + 关联图谱扩展 |
+| `graph_get_content_with_entities` | 获取 chunk 及关联实体 |
+| `graph_feedback` | 提交对实体/关系的反馈 |
+| `graph_conflicts` | 查询冲突日志 |
 
 ---
 
