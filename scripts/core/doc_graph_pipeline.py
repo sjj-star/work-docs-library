@@ -34,8 +34,6 @@ from .embedding_client import EmbeddingClient
 from .graph_store import (
     ALL_NODE_TYPES,
     ALL_REL_TYPES,
-    NODE_REGISTER,
-    NODE_SIGNAL,
     GraphEntity,
     GraphRelation,
     GraphStore,
@@ -390,82 +388,6 @@ class BatchBuilder:
 
 
 # ---------------------------------------------------------------------------
-# 表格解析器：从 Markdown 表格提取结构化数据
-# ---------------------------------------------------------------------------
-
-
-class TableParser:
-    """解析 Markdown 表格为结构化数据."""
-
-    @classmethod
-    def extract_tables(cls, text: str) -> list[dict[str, Any]]:
-        """从文本中提取所有 Markdown 表格.
-
-        Returns:
-            [{"headers": [...], "rows": [[...], ...], "title": str, "context": str}, ...]
-
-        """
-        tables = []
-        lines = text.splitlines()
-        i = 0
-
-        while i < len(lines):
-            # 寻找表格开始（含 | 的行）
-            if "|" in lines[i] and i + 1 < len(lines) and "---" in lines[i + 1]:
-                # 找到表格标题（前面的非空行）
-                title = ""
-                for j in range(max(0, i - 3), i):
-                    candidate = lines[j].strip()
-                    if candidate and not candidate.startswith("|"):
-                        title = candidate
-                        break
-
-                # 解析表头
-                headers = [h.strip() for h in lines[i].split("|") if h.strip()]
-
-                # 跳过分隔行
-                i += 2
-
-                # 解析数据行
-                rows = []
-                while i < len(lines) and "|" in lines[i]:
-                    row = [c.strip() for c in lines[i].split("|") if c.strip() or c == ""]
-                    # 处理空单元格
-                    cells = lines[i].split("|")
-                    row = []
-                    for cell in cells:
-                        stripped = cell.strip()
-                        if stripped or cell:  # 保留空字符串表示空单元格
-                            row.append(stripped)
-                    # 去掉首尾空元素（由行首/行尾的 | 产生）
-                    while row and row[0] == "":
-                        row.pop(0)
-                    while row and row[-1] == "":
-                        row.pop()
-                    if row:
-                        rows.append(row)
-                    i += 1
-
-                # 上下文：表格前后的文本
-                context_start = max(0, i - len(rows) - 5)
-                context_end = min(len(lines), i + 3)
-                context = "\n".join(lines[context_start:context_end]).strip()
-
-                tables.append(
-                    {
-                        "headers": headers,
-                        "rows": rows,
-                        "title": title,
-                        "context": context,
-                    }
-                )
-            else:
-                i += 1
-
-        return tables
-
-
-# ---------------------------------------------------------------------------
 # LLM 实体提取器
 # ---------------------------------------------------------------------------
 
@@ -680,85 +602,6 @@ class EntityExtractor:
                 logger.warning(f"JSON 解析失败 | raw={raw[:200]}...")
                 return None
 
-    def extract_from_table(self, table, doc_id=""):
-        """extract_from_table 函数."""
-        entities, relations = [], []
-        headers = [h.lower() for h in table.get("headers", [])]
-        rows = table.get("rows", [])
-        title = table.get("title", "")
-        if not rows:
-            return entities, relations
-
-        is_register_table = any(
-            k in " ".join(headers) for k in ["register", "address", "offset", "field", "bit"]
-        )
-        is_signal_table = any(
-            k in " ".join(headers) for k in ["signal", "pin", "direction", "width"]
-        )
-
-        if is_register_table:
-            name_idx = self._find_col(headers, ["register", "name", "寄存器"])
-            addr_idx = self._find_col(headers, ["address", "offset", "addr", "地址"])
-            desc_idx = self._find_col(headers, ["description", "desc", "描述"])
-            for row in rows:
-                if name_idx is None or name_idx >= len(row):
-                    continue
-                reg_name = row[name_idx].strip()
-                if not reg_name:
-                    continue
-                props = {"description": ""}
-                if addr_idx is not None and addr_idx < len(row):
-                    props["address_offset"] = row[addr_idx].strip()
-                if desc_idx is not None and desc_idx < len(row):
-                    props["description"] = row[desc_idx].strip()
-                entities.append(
-                    GraphEntity(
-                        entity_type=NODE_REGISTER,
-                        name=reg_name,
-                        properties=props,
-                        source_doc_ids={doc_id},
-                        source_chapter=title,
-                    )
-                )
-
-        elif is_signal_table:
-            name_idx = self._find_col(headers, ["signal", "name", "pin", "信号"])
-            dir_idx = self._find_col(headers, ["direction", "type", "方向"])
-            width_idx = self._find_col(headers, ["width", "size", "位宽"])
-            desc_idx = self._find_col(headers, ["description", "desc", "描述"])
-            for row in rows:
-                if name_idx is None or name_idx >= len(row):
-                    continue
-                sig_name = row[name_idx].strip()
-                if not sig_name:
-                    continue
-                props = {}
-                if dir_idx is not None and dir_idx < len(row):
-                    props["direction"] = row[dir_idx].strip()
-                if width_idx is not None and width_idx < len(row):
-                    props["width"] = row[width_idx].strip()
-                if desc_idx is not None and desc_idx < len(row):
-                    props["description"] = row[desc_idx].strip()
-                entities.append(
-                    GraphEntity(
-                        entity_type=NODE_SIGNAL,
-                        name=sig_name,
-                        properties=props,
-                        source_doc_ids={doc_id},
-                        source_chapter=title,
-                    )
-                )
-
-        return entities, relations
-
-    @staticmethod
-    def _find_col(headers, keywords):
-        for i, h in enumerate(headers):
-            for kw in keywords:
-                if kw in h:
-                    return i
-        return None
-
 
 class DocGraphPipeline:
     """文档图谱处理管道.
@@ -806,7 +649,6 @@ class DocGraphPipeline:
 
         # 子组件
         self.chapter_parser = ChapterParser()
-        self.table_parser = TableParser()
         self.entity_extractor = EntityExtractor(self.kimi_batch)
         self.embedding_batch_client = self.bigmodel_batch
 
@@ -917,11 +759,7 @@ class DocGraphPipeline:
         tree_chapters = self.chapter_parser.parse_tree(extracted_text)
         logger.info(f"章节解析完成 | roots={len(tree_chapters)}")
 
-        # --- Step 3: 表格解析（规则提取，不依赖 LLM）---
-        tables = self.table_parser.extract_tables(extracted_text)
-        logger.info(f"表格解析完成 | tables={len(tables)}")
-
-        # --- Step 4: 图片整理（仅统计数量，不记录坐标）---
+        # --- Step 3: 图片整理（仅统计数量，不记录坐标）---
         logger.info(f"图片整理完成 | images={len(bigmodel_images)}")
 
         # 扁平化章节列表（用于 chunk 存储和向量化）
@@ -1015,13 +853,7 @@ class DocGraphPipeline:
                 )
             all_image_descriptions.extend(cached_imgs)
 
-        # 6b: 从表格提取（规则解析）
-        for table in tables:
-            ents, rels = self.entity_extractor.extract_from_table(table, doc_id=doc_id)
-            all_entities.extend(ents)
-            all_relations.extend(rels)
-
-        # 6c: 从变更/新增章节提取（LLM Batch API，multimodal：文本 + 图片流式处理）
+        # 6b: 从变更/新增章节提取（LLM Batch API，multimodal：文本 + 图片流式处理）
         if self.kimi_batch and batches:
             ents, rels, img_descs = self.entity_extractor.extract_from_batches(
                 batches=batches,
