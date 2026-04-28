@@ -145,3 +145,53 @@ def test_get_pending_chunks(db, sample_doc):
     pending = db.get_pending_chunks("doc1")
     assert len(pending) == 1
     assert pending[0][3] == "pending"
+
+
+def test_conflict_logs(db):
+    """冲突日志插入和查询."""
+    logs = [
+        {
+            "entity_type": "Register",
+            "name": "CTRL",
+            "property_key": "width",
+            "old_value": "32",
+            "new_value": "64",
+            "timestamp": "2026-01-01T00:00:00",
+            "doc_id": "doc1",
+        }
+    ]
+    db.insert_conflict_logs(logs)
+    results = db.query_conflict_logs()
+    assert len(results) == 1
+    assert results[0]["property_key"] == "width"
+    assert results[0]["old_value"] == "32"
+
+    # 按实体过滤
+    results = db.query_conflict_logs(entity_type="Register", name="CTRL")
+    assert len(results) == 1
+    results = db.query_conflict_logs(entity_type="Signal")
+    assert len(results) == 0
+
+
+def test_feedback(db):
+    """反馈插入和查询."""
+    fid = db.insert_feedback(
+        rating=1,
+        entity_type="Module",
+        entity_name="TOP",
+        comment="Correct",
+    )
+    assert fid > 0
+
+    results = db.query_feedback(entity_type="Module", entity_name="TOP")
+    assert len(results) == 1
+    assert results[0]["rating"] == 1
+    assert results[0]["comment"] == "Correct"
+
+    score = db.get_entity_feedback_score("Module", "TOP")
+    assert score == 1
+
+    # 添加负反馈
+    db.insert_feedback(rating=-1, entity_type="Module", entity_name="TOP")
+    score = db.get_entity_feedback_score("Module", "TOP")
+    assert score == 0
