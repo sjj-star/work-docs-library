@@ -10,7 +10,7 @@ from .config import Config
 from .db import KnowledgeDB
 from .doc_graph_pipeline import DocGraphPipeline
 from .embedding_client import EmbeddingClient
-from .graph_store import GraphEntity, NetworkXGraphStore, SubGraphView
+from .graph_store import GraphEntity, GraphRelation, NetworkXGraphStore, SubGraphView
 from .models import Chunk, Document
 from .vector_index import VectorIndex
 
@@ -336,7 +336,7 @@ class KnowledgeBaseService:
         name: str,
         rel_type: str | None = None,
         direction: str = "out",
-    ) -> list[tuple[GraphEntity, str]]:
+    ) -> list[tuple[GraphEntity, str, dict]]:
         """获取实体的邻居节点."""
         return self.graph.get_neighbors(entity_type, name, rel_type, direction)
 
@@ -369,6 +369,261 @@ class KnowledgeBaseService:
         """返回当前内存中图谱的统计信息."""
         return self.graph.stats()
 
+    # -- 图谱动态更新（CRUD）--
+
+    def add_entity(self, entity: GraphEntity) -> list[dict]:
+        """添加或更新实体. 返回冲突日志列表."""
+        conflicts = self.graph.add_entity(entity)
+        if conflicts:
+            self.db.insert_conflict_logs(conflicts)
+        self._save_global_graph()
+        return conflicts
+
+    def update_entity(
+        self,
+        entity_type: str,
+        name: str,
+        properties: dict | None = None,
+        confidence: float | None = None,
+        verified: bool | None = None,
+        feedback_score: int | None = None,
+    ) -> bool:
+        """更新实体属性."""
+        ok = self.graph.update_entity(
+            entity_type, name, properties, confidence, verified, feedback_score
+        )
+        if ok:
+            self._save_global_graph()
+        return ok
+
+    def delete_entity(self, entity_type: str, name: str) -> bool:
+        """删除实体."""
+        ok = self.graph.delete_entity(entity_type, name)
+        if ok:
+            self._save_global_graph()
+        return ok
+
+    def add_relation(self, relation) -> list[dict]:
+        """添加或更新关系. 返回冲突日志列表."""
+        conflicts = self.graph.add_relation(relation)
+        if conflicts:
+            self.db.insert_conflict_logs(conflicts)
+        self._save_global_graph()
+        return conflicts
+
+    def update_relation(
+        self,
+        from_type: str,
+        from_name: str,
+        to_type: str,
+        to_name: str,
+        rel_type: str,
+        properties: dict | None = None,
+        confidence: float | None = None,
+        verified: bool | None = None,
+    ) -> bool:
+        """更新关系属性."""
+        ok = self.graph.update_relation(
+            from_type, from_name, to_type, to_name, rel_type, properties, confidence, verified
+        )
+        if ok:
+            self._save_global_graph()
+        return ok
+
+    def delete_relation(
+        self,
+        from_type: str,
+        from_name: str,
+        to_type: str,
+        to_name: str,
+        rel_type: str,
+    ) -> bool:
+        """删除关系."""
+        ok = self.graph.delete_relation(from_type, from_name, to_type, to_name, rel_type)
+        if ok:
+            self._save_global_graph()
+        return ok
+
+    def verify_entity(self, entity_type: str, name: str, verified: bool = True) -> bool:
+        """标记实体验证状态."""
+        ok = self.graph.verify_entity(entity_type, name, verified)
+        if ok:
+            self._save_global_graph()
+        return ok
+
+    # -- 冲突日志查询 --
+
+    def get_conflict_logs(
+        self,
+        entity_type: str | None = None,
+        name: str | None = None,
+        limit: int = 100,
+    ) -> list[dict]:
+        """查询冲突日志."""
+        return self.db.query_conflict_logs(entity_type, name, limit)
+
+    # -- 语义-图谱联合查询 --
+
+    def search_with_graph(
+        self,
+        text: str,
+        top_k: int = 5,
+        graph_depth: int = 1,
+    ) -> dict:
+        """语义搜索 + 图谱联合查询.
+
+        先 FAISS 语义搜索找到相关 chunk，再读取 chunk metadata 中的提取实体，
+        在全局图上做子图扩展。
+
+        Returns:
+            {"chunks": [...], "related_entities": [...], "subgraphs": [...]}
+        """
+        embedder = EmbeddingClient()
+        try:
+            emb = embedder.embed([str(text)])[0]
+            hits = self.vec.search(emb, top_k=top_k)
+        finally:
+            embedder.close()
+
+        chunks = []
+        related_entities: list[dict] = []
+        subgraphs: list[dict] = []
+        seen_entities: set[str] = set()
+
+        for db_id, score in hits:
+            chunk = self.db.get_chunk_by_db_id(db_id)
+            if not chunk:
+                continue
+            chunks.append({"score": round(float(score), 4), "chunk": chunk})
+
+            # 从 chunk metadata 中提取实体名
+            meta_entities = chunk.metadata.get("extracted_entities", [])
+            for me in meta_entities:
+                et = me.get("type", "")
+                en = me.get("name", "")
+                if not et or not en:
+                    continue
+                eid = f"{et}::{en}"
+                if eid in seen_entities:
+                    continue
+                seen_entities.add(eid)
+
+                # 查全局图获取最新状态
+                entity = self.graph.get_entity(et, en)
+                if entity:
+                    related_entities.append(entity.to_dict())
+                    # 子图扩展
+                    if graph_depth > 0:
+                        sg = self.graph.get_subgraph(et, en, depth=graph_depth)
+                        subgraphs.append(
+                            {
+                                "center": {"type": et, "name": en},
+                                "depth": graph_depth,
+                                "node_count": sg.node_count,
+                                "edge_count": sg.edge_count,
+                                "text_context": sg.to_text_context(),
+                            }
+                        )
+
+        return {
+            "chunks": chunks,
+            "related_entities": related_entities,
+            "subgraphs": subgraphs,
+        }
+
+    def get_content_with_entities(
+        self,
+        chunk_db_id: int,
+    ) -> dict:
+        """获取 chunk 内容及其关联的图谱实体.
+
+        Returns:
+            {"chunk": Chunk, "entities": [GraphEntity,...], "relations": [GraphRelation,...]}
+        """
+        chunk = self.db.get_chunk_by_db_id(chunk_db_id)
+        if not chunk:
+            raise ValueError(f"Chunk {chunk_db_id} not found")
+
+        entities: list[GraphEntity] = []
+        relations: list[GraphRelation] = []
+        seen: set[str] = set()
+
+        # 从 metadata 解析缓存的实体/关系
+        for me in chunk.metadata.get("extracted_entities", []):
+            et = me.get("type", "")
+            en = me.get("name", "")
+            if et and en:
+                eid = f"{et}::{en}"
+                if eid not in seen:
+                    seen.add(eid)
+                    # 查全局图获取最新状态
+                    global_e = self.graph.get_entity(et, en)
+                    if global_e:
+                        entities.append(global_e)
+
+        for mr in chunk.metadata.get("extracted_relations", []):
+            rt = mr.get("type", "")
+            fn = mr.get("from", "")
+            tn = mr.get("to", "")
+            if rt and fn and tn:
+                # 尝试解析类型
+                ft = mr.get("from_type", "")
+                tt = mr.get("to_type", "")
+                relations.append(
+                    GraphRelation(
+                        rel_type=rt,
+                        from_name=fn,
+                        to_name=tn,
+                        from_type=ft,
+                        to_type=tt,
+                        properties=mr.get("properties", {}),
+                    )
+                )
+
+        return {"chunk": chunk, "entities": entities, "relations": relations}
+
+    # -- 反馈 --
+
+    def submit_feedback(
+        self,
+        rating: int,
+        entity_type: str | None = None,
+        entity_name: str | None = None,
+        relation_type: str | None = None,
+        relation_from_type: str | None = None,
+        relation_from_name: str | None = None,
+        relation_to_type: str | None = None,
+        relation_to_name: str | None = None,
+        comment: str = "",
+    ) -> int:
+        """提交反馈. 返回反馈记录 ID."""
+        feedback_id = self.db.insert_feedback(
+            rating=rating,
+            entity_type=entity_type,
+            entity_name=entity_name,
+            relation_type=relation_type,
+            relation_from_type=relation_from_type,
+            relation_from_name=relation_from_name,
+            relation_to_type=relation_to_type,
+            relation_to_name=relation_to_name,
+            comment=comment,
+        )
+        # 同步更新内存中的 feedback_score
+        if entity_type and entity_name:
+            score = self.db.get_entity_feedback_score(entity_type, entity_name)
+            self.graph.update_entity(entity_type, entity_name, feedback_score=score)
+            self._save_global_graph()
+        return feedback_id
+
+    def get_feedback(
+        self,
+        entity_type: str | None = None,
+        entity_name: str | None = None,
+        limit: int = 100,
+    ) -> list[dict]:
+        """查询反馈."""
+        return self.db.query_feedback(entity_type, entity_name, limit)
+
     def load_document_graph(self, doc_id: str) -> None:
         """增量加载指定文档的图谱到全局图（兼容旧接口）."""
         graph_path = Config.DB_PATH.parent / "graphs" / f"{doc_id}.json"
@@ -383,5 +638,3 @@ class KnowledgeBaseService:
     # ------------------------------------------------------------------
     # 内部辅助
     # ------------------------------------------------------------------
-
-

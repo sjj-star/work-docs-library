@@ -341,6 +341,376 @@
           "center_name"
         ]
       }
+    },
+    {
+      "name": "graph_add_entity",
+      "description": "添加或更新知识图谱中的实体",
+      "command": [
+        "venv/bin/python3",
+        "scripts/plugin_router.py",
+        "graph_add_entity"
+      ],
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "entity_type": {
+            "type": "string",
+            "description": "实体类型，如 Module, Signal, Register"
+          },
+          "name": {
+            "type": "string",
+            "description": "实体名称"
+          },
+          "properties": {
+            "type": "object",
+            "description": "实体属性字典"
+          },
+          "source_doc_ids": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "来源文档 ID 列表"
+          },
+          "confidence": {
+            "type": "number",
+            "description": "置信度 0.0-1.0",
+            "default": 1.0
+          },
+          "verified": {
+            "type": "boolean",
+            "description": "是否已人工验证",
+            "default": false
+          }
+        },
+        "required": [
+          "entity_type",
+          "name"
+        ]
+      }
+    },
+    {
+      "name": "graph_update_entity",
+      "description": "更新知识图谱实体的属性",
+      "command": [
+        "venv/bin/python3",
+        "scripts/plugin_router.py",
+        "graph_update_entity"
+      ],
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "entity_type": {
+            "type": "string",
+            "description": "实体类型"
+          },
+          "name": {
+            "type": "string",
+            "description": "实体名称"
+          },
+          "properties": {
+            "type": "object",
+            "description": "新属性字典（覆盖原有 properties）"
+          },
+          "confidence": {
+            "type": "number",
+            "description": "新置信度"
+          },
+          "verified": {
+            "type": "boolean",
+            "description": "新验证状态"
+          }
+        },
+        "required": [
+          "entity_type",
+          "name"
+        ]
+      }
+    },
+    {
+      "name": "graph_delete_entity",
+      "description": "删除知识图谱中的实体（级联删除关联边）",
+      "command": [
+        "venv/bin/python3",
+        "scripts/plugin_router.py",
+        "graph_delete_entity"
+      ],
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "entity_type": {
+            "type": "string",
+            "description": "实体类型"
+          },
+          "name": {
+            "type": "string",
+            "description": "实体名称"
+          }
+        },
+        "required": [
+          "entity_type",
+          "name"
+        ]
+      }
+    },
+    {
+      "name": "graph_add_relation",
+      "description": "添加或更新知识图谱中的关系",
+      "command": [
+        "venv/bin/python3",
+        "scripts/plugin_router.py",
+        "graph_add_relation"
+      ],
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "rel_type": {
+            "type": "string",
+            "description": "关系类型"
+          },
+          "from_type": {
+            "type": "string",
+            "description": "起点实体类型"
+          },
+          "from_name": {
+            "type": "string",
+            "description": "起点实体名称"
+          },
+          "to_type": {
+            "type": "string",
+            "description": "终点实体类型"
+          },
+          "to_name": {
+            "type": "string",
+            "description": "终点实体名称"
+          },
+          "properties": {
+            "type": "object",
+            "description": "关系属性字典"
+          },
+          "confidence": {
+            "type": "number",
+            "description": "置信度 0.0-1.0",
+            "default": 1.0
+          },
+          "verified": {
+            "type": "boolean",
+            "description": "是否已人工验证",
+            "default": false
+          }
+        },
+        "required": [
+          "rel_type",
+          "from_type",
+          "from_name",
+          "to_type",
+          "to_name"
+        ]
+      }
+    },
+    {
+      "name": "graph_delete_relation",
+      "description": "删除知识图谱中的关系",
+      "command": [
+        "venv/bin/python3",
+        "scripts/plugin_router.py",
+        "graph_delete_relation"
+      ],
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "rel_type": {
+            "type": "string",
+            "description": "关系类型"
+          },
+          "from_type": {
+            "type": "string",
+            "description": "起点实体类型"
+          },
+          "from_name": {
+            "type": "string",
+            "description": "起点实体名称"
+          },
+          "to_type": {
+            "type": "string",
+            "description": "终点实体类型"
+          },
+          "to_name": {
+            "type": "string",
+            "description": "终点实体名称"
+          }
+        },
+        "required": [
+          "rel_type",
+          "from_type",
+          "from_name",
+          "to_type",
+          "to_name"
+        ]
+      }
+    },
+    {
+      "name": "graph_verify_entity",
+      "description": "标记知识图谱实体为已验证或取消验证",
+      "command": [
+        "venv/bin/python3",
+        "scripts/plugin_router.py",
+        "graph_verify_entity"
+      ],
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "entity_type": {
+            "type": "string",
+            "description": "实体类型"
+          },
+          "name": {
+            "type": "string",
+            "description": "实体名称"
+          },
+          "verified": {
+            "type": "boolean",
+            "description": "验证状态",
+            "default": true
+          }
+        },
+        "required": [
+          "entity_type",
+          "name"
+        ]
+      }
+    },
+    {
+      "name": "graph_search_with_graph",
+      "description": "语义搜索并联合查询关联的知识图谱实体和子图",
+      "command": [
+        "venv/bin/python3",
+        "scripts/plugin_router.py",
+        "graph_search_with_graph"
+      ],
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "text": {
+            "type": "string",
+            "description": "搜索文本"
+          },
+          "top_k": {
+            "type": "integer",
+            "description": "语义搜索返回数量",
+            "default": 5
+          },
+          "graph_depth": {
+            "type": "integer",
+            "description": "图谱扩展深度",
+            "default": 1
+          }
+        },
+        "required": [
+          "text"
+        ]
+      }
+    },
+    {
+      "name": "graph_get_content_with_entities",
+      "description": "获取 chunk 内容及其关联的知识图谱实体和关系",
+      "command": [
+        "venv/bin/python3",
+        "scripts/plugin_router.py",
+        "graph_get_content_with_entities"
+      ],
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "chunk_db_id": {
+            "type": "integer",
+            "description": "Chunk 数据库 ID"
+          }
+        },
+        "required": [
+          "chunk_db_id"
+        ]
+      }
+    },
+    {
+      "name": "graph_feedback",
+      "description": "提交对知识图谱实体或关系的反馈（正确/错误标记）",
+      "command": [
+        "venv/bin/python3",
+        "scripts/plugin_router.py",
+        "graph_feedback"
+      ],
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "rating": {
+            "type": "integer",
+            "description": "评分 +1（正确）或 -1（错误）"
+          },
+          "entity_type": {
+            "type": "string",
+            "description": "目标实体类型"
+          },
+          "entity_name": {
+            "type": "string",
+            "description": "目标实体名称"
+          },
+          "relation_type": {
+            "type": "string",
+            "description": "目标关系类型"
+          },
+          "from_type": {
+            "type": "string",
+            "description": "关系起点实体类型"
+          },
+          "from_name": {
+            "type": "string",
+            "description": "关系起点实体名称"
+          },
+          "to_type": {
+            "type": "string",
+            "description": "关系终点实体类型"
+          },
+          "to_name": {
+            "type": "string",
+            "description": "关系终点实体名称"
+          },
+          "comment": {
+            "type": "string",
+            "description": "评论说明"
+          }
+        },
+        "required": [
+          "rating"
+        ]
+      }
+    },
+    {
+      "name": "graph_conflicts",
+      "description": "查询知识图谱冲突日志（同名实体属性覆盖记录）",
+      "command": [
+        "venv/bin/python3",
+        "scripts/plugin_router.py",
+        "graph_conflicts"
+      ],
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "entity_type": {
+            "type": "string",
+            "description": "实体类型过滤"
+          },
+          "name": {
+            "type": "string",
+            "description": "实体名称过滤"
+          },
+          "limit": {
+            "type": "integer",
+            "description": "最大返回数量",
+            "default": 100
+          }
+        }
+      }
     }
   ]
 }
