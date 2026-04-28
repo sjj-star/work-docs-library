@@ -273,12 +273,8 @@ class PDFParser:
             return []
 
         def _is_header_footer_rect(r: fitz.Rect, is_drawing: bool = False) -> bool:
-            h_margin = page_rect.y0 + (
-                effective_header + 20 if is_drawing else effective_header
-            )
-            f_margin = page_rect.y1 - (
-                effective_footer + 20 if is_drawing else effective_footer
-            )
+            h_margin = page_rect.y0 + (effective_header + 20 if is_drawing else effective_header)
+            f_margin = page_rect.y1 - (effective_footer + 20 if is_drawing else effective_footer)
             return r.y1 < h_margin or r.y0 > f_margin
 
         # 1. Build hard separators (header strip, footer strip, captions, table bodies)
@@ -705,9 +701,7 @@ class PDFParser:
             # 4b2. 用 TOC 识别 heading
             page_toc_entries = toc_by_page.get(page_idx, [])
             if page_toc_entries:
-                text_blocks = self._identify_headings_by_toc(
-                    text_blocks, page_toc_entries
-                )
+                text_blocks = self._identify_headings_by_toc(text_blocks, page_toc_entries)
             else:
                 text_blocks = self._fallback_heading_detection(
                     text_blocks, heading_threshold, has_bold_fonts
@@ -1001,9 +995,7 @@ class PDFParser:
             avg_size = block.get("avg_size", 0.0)
             is_bold = block.get("is_bold", False)
 
-            looks_like_heading = bool(
-                re.match(r"^\d+(?:\.\d+)*\s+.+", text)
-            )
+            looks_like_heading = bool(re.match(r"^\d+(?:\.\d+)*\s+.+", text))
             if (
                 looks_like_heading
                 and avg_size >= heading_threshold + 2.0
@@ -1321,9 +1313,11 @@ class PDFParser:
                 for level, title in chapter_starts[page_idx]:
                     # 清洗：去除尾部页码 + 特殊 Unicode 空格替换为普通空格
                     cleaned_title = re.sub(r"[\.]+\s*\d+\s*$", "", title).strip()
-                    cleaned_title = re.sub(
-                        r"[\s\u00A0\u2000-\u200F\u202F\u205F\u3000]+", " ", cleaned_title
-                    ).strip().lower()
+                    cleaned_title = (
+                        re.sub(r"[\s\u00A0\u2000-\u200F\u202F\u205F\u3000]+", " ", cleaned_title)
+                        .strip()
+                        .lower()
+                    )
                     if cleaned_title in self._SKIP_HEADING_TITLES:
                         continue
                     # 用于检测和插入的标题也清洗特殊空格
