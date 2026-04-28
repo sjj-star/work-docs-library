@@ -8,6 +8,7 @@ import json
 import logging
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -71,6 +72,14 @@ REL_BELONGS_TO = "BELONGS_TO"
 REL_AT_ADDRESS = "AT_ADDRESS"
 REL_CONNECTS_TO = "CONNECTS_TO"
 REL_DOCUMENTED_BY = "DOCUMENTED_BY"
+# IC 设计深层关系
+REL_DRIVES = "DRIVES"
+REL_DRIVEN_BY = "DRIVEN_BY"
+REL_TIMING_PATH = "TIMING_PATH"
+REL_CLOCK_GATED_BY = "CLOCK_GATED_BY"
+REL_RESET_BY = "RESET_BY"
+REL_PARAMETERIZED_BY = "PARAMETERIZED_BY"
+REL_INSTANCE_OF = "INSTANCE_OF"
 
 ALL_REL_TYPES = {
     REL_IMPLEMENTS,
@@ -85,12 +94,24 @@ ALL_REL_TYPES = {
     REL_AT_ADDRESS,
     REL_CONNECTS_TO,
     REL_DOCUMENTED_BY,
+    REL_DRIVES,
+    REL_DRIVEN_BY,
+    REL_TIMING_PATH,
+    REL_CLOCK_GATED_BY,
+    REL_RESET_BY,
+    REL_PARAMETERIZED_BY,
+    REL_INSTANCE_OF,
 }
 
 
 # ---------------------------------------------------------------------------
 # 数据模型
 # ---------------------------------------------------------------------------
+
+
+def _now_iso() -> str:
+    """返回当前 ISO 格式时间戳."""
+    return datetime.now().isoformat()
 
 
 @dataclass
@@ -102,6 +123,11 @@ class GraphEntity:
     properties: dict[str, Any] = field(default_factory=dict)
     source_doc_ids: set[str] = field(default_factory=set)
     source_chapter: str = ""
+    confidence: float = 1.0
+    verified: bool = False
+    created_at: str = ""
+    updated_at: str = ""
+    feedback_score: int = 0
 
     def to_dict(self) -> dict[str, Any]:
         """to_dict 函数."""
@@ -111,6 +137,11 @@ class GraphEntity:
             "properties": self.properties,
             "source_doc_ids": sorted(list(self.source_doc_ids)),
             "source_chapter": self.source_chapter,
+            "confidence": self.confidence,
+            "verified": self.verified,
+            "created_at": self.created_at,
+            "updated_at": self.updated_at,
+            "feedback_score": self.feedback_score,
         }
 
     @classmethod
@@ -122,6 +153,11 @@ class GraphEntity:
             properties=d.get("properties", {}),
             source_doc_ids=_normalize_sids(d.get("source_doc_ids", [])),
             source_chapter=d.get("source_chapter", ""),
+            confidence=d.get("confidence", 1.0),
+            verified=d.get("verified", False),
+            created_at=d.get("created_at", ""),
+            updated_at=d.get("updated_at", ""),
+            feedback_score=d.get("feedback_score", 0),
         )
 
 
@@ -136,6 +172,11 @@ class GraphRelation:
     to_type: str = ""
     properties: dict[str, Any] = field(default_factory=dict)
     source_doc_ids: set[str] = field(default_factory=set)
+    confidence: float = 1.0
+    verified: bool = False
+    created_at: str = ""
+    updated_at: str = ""
+    feedback_score: int = 0
 
     def to_dict(self) -> dict[str, Any]:
         """to_dict 函数."""
@@ -147,6 +188,11 @@ class GraphRelation:
             "to_type": self.to_type,
             "properties": self.properties,
             "source_doc_ids": sorted(list(self.source_doc_ids)),
+            "confidence": self.confidence,
+            "verified": self.verified,
+            "created_at": self.created_at,
+            "updated_at": self.updated_at,
+            "feedback_score": self.feedback_score,
         }
 
     @classmethod
@@ -160,6 +206,11 @@ class GraphRelation:
             to_type=d.get("to_type", ""),
             properties=d.get("properties", {}),
             source_doc_ids=_normalize_sids(d.get("source_doc_ids", [])),
+            confidence=d.get("confidence", 1.0),
+            verified=d.get("verified", False),
+            created_at=d.get("created_at", ""),
+            updated_at=d.get("updated_at", ""),
+            feedback_score=d.get("feedback_score", 0),
         )
 
 
@@ -172,13 +223,13 @@ class GraphStore(ABC):
     """图谱存储抽象接口，预留 NetworkX / Neo4j 双实现."""
 
     @abstractmethod
-    def add_entity(self, entity: GraphEntity) -> None:
-        """添加或更新实体节点."""
+    def add_entity(self, entity: GraphEntity) -> list[dict]:
+        """添加或更新实体节点. 返回冲突日志列表（属性覆盖事件）."""
         ...
 
     @abstractmethod
-    def add_relation(self, relation: GraphRelation) -> None:
-        """添加关系边."""
+    def add_relation(self, relation: GraphRelation) -> list[dict]:
+        """添加关系边. 返回冲突日志列表（属性覆盖事件）."""
         ...
 
     @abstractmethod
@@ -193,10 +244,10 @@ class GraphStore(ABC):
         name: str,
         rel_type: str | None = None,
         direction: str = "out",  # "out", "in", "both"
-    ) -> list[tuple[GraphEntity, str]]:
+    ) -> list[tuple[GraphEntity, str, dict]]:
         """获取邻居节点.
 
-        返回: [(neighbor_entity, rel_type), ...].
+        返回: [(neighbor_entity, rel_type, rel_properties), ...].
         """
         ...
 
@@ -269,8 +320,17 @@ class GraphStore(ABC):
         to_type: str,
         to_name: str,
         max_depth: int = 3,
+        rel_types: set[str] | None = None,
     ) -> list[list[str]]:
         """查找从起点到终点的所有路径（BFS，限制深度）.
+
+        Args:
+            from_type: 起点实体类型
+            from_name: 起点实体名称
+            to_type: 终点实体类型
+            to_name: 终点实体名称
+            max_depth: 最大搜索深度
+            rel_types: 仅遍历指定关系类型的边，None 表示不限
 
         Returns:
             每条路径是节点 ID 列表，如 [["Module::A", "Signal::B", "Register::C"], ...]
@@ -292,6 +352,76 @@ class GraphStore(ABC):
         """
         ...
 
+    @abstractmethod
+    def update_entity(
+        self,
+        entity_type: str,
+        name: str,
+        properties: dict[str, Any] | None = None,
+        confidence: float | None = None,
+        verified: bool | None = None,
+        feedback_score: int | None = None,
+    ) -> bool:
+        """更新实体属性.
+
+        Returns:
+            是否成功找到并更新实体.
+        """
+        ...
+
+    @abstractmethod
+    def delete_entity(self, entity_type: str, name: str) -> bool:
+        """删除实体（级联删除关联边）.
+
+        Returns:
+            是否成功删除.
+        """
+        ...
+
+    @abstractmethod
+    def update_relation(
+        self,
+        from_type: str,
+        from_name: str,
+        to_type: str,
+        to_name: str,
+        rel_type: str,
+        properties: dict[str, Any] | None = None,
+        confidence: float | None = None,
+        verified: bool | None = None,
+    ) -> bool:
+        """更新关系属性.
+
+        Returns:
+            是否成功找到并更新关系.
+        """
+        ...
+
+    @abstractmethod
+    def delete_relation(
+        self,
+        from_type: str,
+        from_name: str,
+        to_type: str,
+        to_name: str,
+        rel_type: str,
+    ) -> bool:
+        """删除关系.
+
+        Returns:
+            是否成功删除.
+        """
+        ...
+
+    @abstractmethod
+    def verify_entity(self, entity_type: str, name: str, verified: bool = True) -> bool:
+        """标记实体验证状态.
+
+        Returns:
+            是否成功找到并更新.
+        """
+        ...
+
 
 # ---------------------------------------------------------------------------
 # NetworkX 实现
@@ -304,6 +434,8 @@ class NetworkXGraphStore(GraphStore):
     def __init__(self) -> None:
         """初始化 NetworkXGraphStore."""
         self._g = nx.DiGraph()
+        # 属性索引: {(entity_type, key, value): {nid, ...}}
+        self._property_index: dict[tuple[str, str, Any], set[str]] = {}
         logger.info("NetworkX 图谱存储已初始化")
 
     # -- 内部辅助 --
@@ -315,22 +447,96 @@ class NetworkXGraphStore(GraphStore):
         parts = node_id.split("::", 1)
         return (parts[0], parts[1]) if len(parts) == 2 else ("", node_id)
 
+    def _node_to_entity(self, nid: str, data: dict) -> GraphEntity:
+        """将 NetworkX 节点数据转换为 GraphEntity."""
+        return GraphEntity(
+            entity_type=data.get("entity_type", ""),
+            name=data.get("name", nid),
+            properties=data.get("properties", {}),
+            source_doc_ids=_normalize_sids(data.get("source_doc_ids", set())),
+            source_chapter=data.get("source_chapter", ""),
+            confidence=data.get("confidence", 1.0),
+            verified=data.get("verified", False),
+            created_at=data.get("created_at", ""),
+            updated_at=data.get("updated_at", ""),
+            feedback_score=data.get("feedback_score", 0),
+        )
+
+    def _edge_to_relation(self, u: str, v: str, data: dict) -> GraphRelation:
+        """将 NetworkX 边数据转换为 GraphRelation."""
+        u_type, u_name = self._parse_node_id(u)
+        v_type, v_name = self._parse_node_id(v)
+        return GraphRelation(
+            rel_type=data.get("rel_type", ""),
+            from_name=u_name,
+            to_name=v_name,
+            from_type=u_type,
+            to_type=v_type,
+            properties=data.get("properties", {}),
+            source_doc_ids=_normalize_sids(data.get("source_doc_ids", set())),
+            confidence=data.get("confidence", 1.0),
+            verified=data.get("verified", False),
+            created_at=data.get("created_at", ""),
+            updated_at=data.get("updated_at", ""),
+            feedback_score=data.get("feedback_score", 0),
+        )
+
     # -- 实体操作 --
 
-    def add_entity(self, entity: GraphEntity) -> None:
-        """add_entity 函数."""
+    def _add_to_property_index(self, nid: str, entity_type: str, properties: dict) -> None:
+        """将实体属性加入索引."""
+        for k, v in properties.items():
+            key = (entity_type, k, v)
+            if key not in self._property_index:
+                self._property_index[key] = set()
+            self._property_index[key].add(nid)
+
+    def _remove_from_property_index(self, nid: str, entity_type: str, properties: dict) -> None:
+        """从索引中移除实体属性."""
+        for k, v in properties.items():
+            key = (entity_type, k, v)
+            if key in self._property_index:
+                self._property_index[key].discard(nid)
+                if not self._property_index[key]:
+                    del self._property_index[key]
+
+    def add_entity(self, entity: GraphEntity) -> list[dict]:
+        """add_entity 函数. 返回冲突日志列表."""
         nid = self._node_id(entity.entity_type, entity.name)
+        conflicts: list[dict] = []
+        now = _now_iso()
         if nid in self._g:
-            # 合并 properties，source 字段为空时保留旧值
             existing = self._g.nodes[nid]
-            merged_props = dict(existing.get("properties", {}))
-            merged_props.update(entity.properties)
+            # 先移除旧属性索引
+            old_props = dict(existing.get("properties", {}))
+            self._remove_from_property_index(nid, entity.entity_type, old_props)
+            # 合并 properties，检测冲突
+            merged_props = old_props
+            for k, v in entity.properties.items():
+                if k in merged_props and merged_props[k] != v:
+                    conflicts.append(
+                        {
+                            "entity_type": entity.entity_type,
+                            "name": entity.name,
+                            "property_key": k,
+                            "old_value": merged_props[k],
+                            "new_value": v,
+                            "timestamp": now,
+                        }
+                    )
+                merged_props[k] = v
             existing["properties"] = merged_props
+            # 加入新属性索引
+            self._add_to_property_index(nid, entity.entity_type, merged_props)
             # 合并来源文档集合
             existing_sids = _normalize_sids(existing.get("source_doc_ids", set()))
             existing_sids.update(entity.source_doc_ids)
             existing["source_doc_ids"] = existing_sids
             existing["source_chapter"] = entity.source_chapter or existing.get("source_chapter", "")
+            # 更新元数据（取最小 confidence，保持 verified 为 True）
+            existing["confidence"] = min(existing.get("confidence", 1.0), entity.confidence)
+            existing["verified"] = existing.get("verified", False) or entity.verified
+            existing["updated_at"] = now
         else:
             self._g.add_node(
                 nid,
@@ -339,78 +545,53 @@ class NetworkXGraphStore(GraphStore):
                 properties=entity.properties,
                 source_doc_ids=set(entity.source_doc_ids),
                 source_chapter=entity.source_chapter,
+                confidence=entity.confidence,
+                verified=entity.verified,
+                created_at=entity.created_at or now,
+                updated_at=now,
+                feedback_score=entity.feedback_score,
             )
-        logger.debug(f"添加实体 | {nid}")
+            self._add_to_property_index(nid, entity.entity_type, entity.properties)
+        logger.debug(f"添加实体 | {nid} | conflicts={len(conflicts)}")
+        return conflicts
 
     def get_entity(self, entity_type: str, name: str) -> GraphEntity | None:
         """get_entity 函数."""
         nid = self._node_id(entity_type, name)
         if nid not in self._g:
             return None
-        data = self._g.nodes[nid]
-        return GraphEntity(
-            entity_type=data.get("entity_type", entity_type),
-            name=data.get("name", name),
-            properties=data.get("properties", {}),
-            source_doc_ids=_normalize_sids(data.get("source_doc_ids", set())),
-            source_chapter=data.get("source_chapter", ""),
-        )
+        return self._node_to_entity(nid, self._g.nodes[nid])
 
     def find_by_type(self, entity_type: str) -> list[GraphEntity]:
         """find_by_type 函数."""
         results = []
         for nid, data in self._g.nodes(data=True):
             if data.get("entity_type") == entity_type:
-                results.append(
-                    GraphEntity(
-                        entity_type=data.get("entity_type", ""),
-                        name=data.get("name", ""),
-                        properties=data.get("properties", {}),
-                        source_doc_ids=_normalize_sids(data.get("source_doc_ids", set())),
-                        source_chapter=data.get("source_chapter", ""),
-                    )
-                )
+                results.append(self._node_to_entity(nid, data))
         return results
 
     def find_by_property(self, entity_type: str, key: str, value: Any) -> list[GraphEntity]:
-        """find_by_property 函数."""
+        """find_by_property 函数. 使用属性索引加速（O(1) 查找）."""
+        index_key = (entity_type, key, value)
+        nids = self._property_index.get(index_key, set())
         results = []
-        for nid, data in self._g.nodes(data=True):
-            if data.get("entity_type") == entity_type:
-                props = data.get("properties", {})
-                if props.get(key) == value:
-                    results.append(
-                        GraphEntity(
-                            entity_type=data.get("entity_type", ""),
-                            name=data.get("name", ""),
-                            properties=props,
-                            source_doc_ids=_normalize_sids(data.get("source_doc_ids", set())),
-                            source_chapter=data.get("source_chapter", ""),
-                        )
-                    )
+        for nid in nids:
+            if nid in self._g:
+                results.append(self._node_to_entity(nid, self._g.nodes[nid]))
         return results
 
     def all_entities(self) -> list[GraphEntity]:
         """all_entities 函数."""
-        results = []
-        for nid, data in self._g.nodes(data=True):
-            results.append(
-                GraphEntity(
-                    entity_type=data.get("entity_type", ""),
-                    name=data.get("name", ""),
-                    properties=data.get("properties", {}),
-                    source_doc_ids=_normalize_sids(data.get("source_doc_ids", set())),
-                    source_chapter=data.get("source_chapter", ""),
-                )
-            )
-        return results
+        return [self._node_to_entity(nid, data) for nid, data in self._g.nodes(data=True)]
 
     # -- 关系操作 --
 
-    def add_relation(self, relation: GraphRelation) -> None:
-        """add_relation 函数."""
+    def add_relation(self, relation: GraphRelation) -> list[dict]:
+        """add_relation 函数. 返回冲突日志列表."""
         from_nid = self._node_id(relation.from_type or "", relation.from_name)
         to_nid = self._node_id(relation.to_type or "", relation.to_name)
+        conflicts: list[dict] = []
+        now = _now_iso()
 
         # 确保节点存在（自动创建空节点）
         if from_nid not in self._g:
@@ -419,6 +600,11 @@ class NetworkXGraphStore(GraphStore):
                 entity_type=relation.from_type or "",
                 name=relation.from_name,
                 source_doc_ids=set(),
+                confidence=1.0,
+                verified=False,
+                created_at=now,
+                updated_at=now,
+                feedback_score=0,
             )
         if to_nid not in self._g:
             self._g.add_node(
@@ -426,17 +612,41 @@ class NetworkXGraphStore(GraphStore):
                 entity_type=relation.to_type or "",
                 name=relation.to_name,
                 source_doc_ids=set(),
+                confidence=1.0,
+                verified=False,
+                created_at=now,
+                updated_at=now,
+                feedback_score=0,
             )
 
         # 检查是否已存在相同边，合并 source_doc_ids
         existing = self._g.get_edge_data(from_nid, to_nid)
         if existing:
+            # 检测属性冲突
+            merged_props = dict(existing.get("properties", {}))
+            for k, v in relation.properties.items():
+                if k in merged_props and merged_props[k] != v:
+                    conflicts.append(
+                        {
+                            "from_type": relation.from_type,
+                            "from_name": relation.from_name,
+                            "to_type": relation.to_type,
+                            "to_name": relation.to_name,
+                            "rel_type": relation.rel_type,
+                            "property_key": k,
+                            "old_value": merged_props[k],
+                            "new_value": v,
+                            "timestamp": now,
+                        }
+                    )
+                merged_props[k] = v
+            existing["properties"] = merged_props
             existing_sids = _normalize_sids(existing.get("source_doc_ids", set()))
             existing_sids.update(relation.source_doc_ids)
             existing["source_doc_ids"] = existing_sids
-            merged_props = dict(existing.get("properties", {}))
-            merged_props.update(relation.properties)
-            existing["properties"] = merged_props
+            existing["confidence"] = min(existing.get("confidence", 1.0), relation.confidence)
+            existing["verified"] = existing.get("verified", False) or relation.verified
+            existing["updated_at"] = now
         else:
             self._g.add_edge(
                 from_nid,
@@ -444,8 +654,16 @@ class NetworkXGraphStore(GraphStore):
                 rel_type=relation.rel_type,
                 properties=relation.properties,
                 source_doc_ids=set(relation.source_doc_ids),
+                confidence=relation.confidence,
+                verified=relation.verified,
+                created_at=relation.created_at or now,
+                updated_at=now,
+                feedback_score=relation.feedback_score,
             )
-        logger.debug(f"添加关系 | {from_nid} -[{relation.rel_type}]-> {to_nid}")
+        logger.debug(
+            f"添加关系 | {from_nid} -[{relation.rel_type}]-> {to_nid} | conflicts={len(conflicts)}"
+        )
+        return conflicts
 
     def get_neighbors(
         self,
@@ -453,8 +671,11 @@ class NetworkXGraphStore(GraphStore):
         name: str,
         rel_type: str | None = None,
         direction: str = "out",
-    ) -> list[tuple[GraphEntity, str]]:
-        """get_neighbors 函数."""
+    ) -> list[tuple[GraphEntity, str, dict]]:
+        """get_neighbors 函数.
+
+        返回: [(neighbor_entity, rel_type, rel_properties), ...].
+        """
         nid = self._node_id(entity_type, name)
         if nid not in self._g:
             return []
@@ -464,34 +685,22 @@ class NetworkXGraphStore(GraphStore):
         if direction in ("out", "both"):
             for _, target, edge_data in self._g.out_edges(nid, data=True):
                 if rel_type is None or edge_data.get("rel_type") == rel_type:
-                    t_data = self._g.nodes[target]
                     results.append(
                         (
-                            GraphEntity(
-                                entity_type=t_data.get("entity_type", ""),
-                                name=t_data.get("name", ""),
-                                properties=t_data.get("properties", {}),
-                                source_doc_ids=_normalize_sids(t_data.get("source_doc_ids", set())),
-                                source_chapter=t_data.get("source_chapter", ""),
-                            ),
+                            self._node_to_entity(target, self._g.nodes[target]),
                             edge_data.get("rel_type", ""),
+                            dict(edge_data.get("properties", {})),
                         )
                     )
 
         if direction in ("in", "both"):
             for source, _, edge_data in self._g.in_edges(nid, data=True):
                 if rel_type is None or edge_data.get("rel_type") == rel_type:
-                    s_data = self._g.nodes[source]
                     results.append(
                         (
-                            GraphEntity(
-                                entity_type=s_data.get("entity_type", ""),
-                                name=s_data.get("name", ""),
-                                properties=s_data.get("properties", {}),
-                                source_doc_ids=_normalize_sids(s_data.get("source_doc_ids", set())),
-                                source_chapter=s_data.get("source_chapter", ""),
-                            ),
+                            self._node_to_entity(source, self._g.nodes[source]),
                             edge_data.get("rel_type", ""),
+                            dict(edge_data.get("properties", {})),
                         )
                     )
 
@@ -499,21 +708,7 @@ class NetworkXGraphStore(GraphStore):
 
     def all_relations(self) -> list[GraphRelation]:
         """all_relations 函数."""
-        results = []
-        for u, v, data in self._g.edges(data=True):
-            u_type, u_name = self._parse_node_id(u)
-            v_type, v_name = self._parse_node_id(v)
-            results.append(
-                GraphRelation(
-                    rel_type=data.get("rel_type", ""),
-                    from_name=u_name,
-                    to_name=v_name,
-                    from_type=u_type,
-                    to_type=v_type,
-                    properties=data.get("properties", {}),
-                )
-            )
-        return results
+        return [self._edge_to_relation(u, v, data) for u, v, data in self._g.edges(data=True)]
 
     # -- 子图查询 --
 
@@ -587,6 +782,12 @@ class NetworkXGraphStore(GraphStore):
             sids = self._g.edges[u, v].get("source_doc_ids", [])
             if isinstance(sids, list):
                 self._g.edges[u, v]["source_doc_ids"] = set(sids)
+        # 重建属性索引
+        self._property_index.clear()
+        for nid, data in self._g.nodes(data=True):
+            et = data.get("entity_type", "")
+            props = data.get("properties", {})
+            self._add_to_property_index(nid, et, props)
         logger.info(
             f"图谱已加载 | nodes={self._g.number_of_nodes()} | "
             f"edges={self._g.number_of_edges()} | path={path}"
@@ -595,6 +796,7 @@ class NetworkXGraphStore(GraphStore):
     def clear(self) -> None:
         """Clear 函数."""
         self._g.clear()
+        self._property_index.clear()
         logger.info("图谱已清空")
 
     def stats(self) -> dict[str, int]:
@@ -669,6 +871,7 @@ class NetworkXGraphStore(GraphStore):
         to_type: str,
         to_name: str,
         max_depth: int = 3,
+        rel_types: set[str] | None = None,
     ) -> list[list[str]]:
         """find_path 函数."""
         from_nid = self._node_id(from_type, from_name)
@@ -679,9 +882,8 @@ class NetworkXGraphStore(GraphStore):
 
         # 限制 max_depth 防止爆炸（默认 3，最大 6）
         max_depth = min(max(max_depth, 1), 6)
-        all_paths: list[list[str]] = []
 
-        # BFS 收集所有简单路径（不重复节点），限制深度
+        # BFS 收集所有简单路径（不重复节点），限制深度，支持关系过滤
         def _bfs_paths(start: str, target: str, max_d: int) -> list[list[str]]:
             queue: list[tuple[str, list[str]]] = [(start, [start])]
             paths: list[list[str]] = []
@@ -692,13 +894,13 @@ class NetworkXGraphStore(GraphStore):
                     continue
                 if len(path) >= max_d + 1:
                     continue
-                for _, nxt, _ in self._g.out_edges(current, data=True):
+                for _, nxt, edge_data in self._g.out_edges(current, data=True):
                     if nxt not in path:
-                        queue.append((nxt, path + [nxt]))
+                        if rel_types is None or edge_data.get("rel_type") in rel_types:
+                            queue.append((nxt, path + [nxt]))
             return paths
 
-        all_paths = _bfs_paths(from_nid, to_nid, max_depth)
-        return all_paths
+        return _bfs_paths(from_nid, to_nid, max_depth)
 
     def search_entities(
         self, query: str, entity_types: set[str] | None = None
@@ -712,16 +914,106 @@ class NetworkXGraphStore(GraphStore):
             if entity_types and et not in entity_types:
                 continue
             if q in name.lower():
-                results.append(
-                    GraphEntity(
-                        entity_type=et,
-                        name=name,
-                        properties=data.get("properties", {}),
-                        source_doc_ids=_normalize_sids(data.get("source_doc_ids", set())),
-                        source_chapter=data.get("source_chapter", ""),
-                    )
-                )
+                results.append(self._node_to_entity(nid, data))
         return results
+
+    # -- 动态更新（CRUD）--
+
+    def update_entity(
+        self,
+        entity_type: str,
+        name: str,
+        properties: dict[str, Any] | None = None,
+        confidence: float | None = None,
+        verified: bool | None = None,
+        feedback_score: int | None = None,
+    ) -> bool:
+        """更新实体属性."""
+        nid = self._node_id(entity_type, name)
+        if nid not in self._g:
+            return False
+        now = _now_iso()
+        if properties is not None:
+            old_props = dict(self._g.nodes[nid].get("properties", {}))
+            self._remove_from_property_index(nid, entity_type, old_props)
+            self._g.nodes[nid]["properties"] = properties
+            self._add_to_property_index(nid, entity_type, properties)
+        if confidence is not None:
+            self._g.nodes[nid]["confidence"] = confidence
+        if verified is not None:
+            self._g.nodes[nid]["verified"] = verified
+        if feedback_score is not None:
+            self._g.nodes[nid]["feedback_score"] = feedback_score
+        self._g.nodes[nid]["updated_at"] = now
+        return True
+
+    def delete_entity(self, entity_type: str, name: str) -> bool:
+        """删除实体（级联删除关联边）."""
+        nid = self._node_id(entity_type, name)
+        if nid not in self._g:
+            return False
+        # 移除属性索引
+        old_props = dict(self._g.nodes[nid].get("properties", {}))
+        self._remove_from_property_index(nid, entity_type, old_props)
+        self._g.remove_node(nid)
+        return True
+
+    def update_relation(
+        self,
+        from_type: str,
+        from_name: str,
+        to_type: str,
+        to_name: str,
+        rel_type: str,
+        properties: dict[str, Any] | None = None,
+        confidence: float | None = None,
+        verified: bool | None = None,
+    ) -> bool:
+        """更新关系属性."""
+        from_nid = self._node_id(from_type, from_name)
+        to_nid = self._node_id(to_type, to_name)
+        if not self._g.has_edge(from_nid, to_nid):
+            return False
+        data = self._g.edges[from_nid, to_nid]
+        if data.get("rel_type") != rel_type:
+            return False
+        now = _now_iso()
+        if properties is not None:
+            data["properties"] = properties
+        if confidence is not None:
+            data["confidence"] = confidence
+        if verified is not None:
+            data["verified"] = verified
+        data["updated_at"] = now
+        return True
+
+    def delete_relation(
+        self,
+        from_type: str,
+        from_name: str,
+        to_type: str,
+        to_name: str,
+        rel_type: str,
+    ) -> bool:
+        """删除关系."""
+        from_nid = self._node_id(from_type, from_name)
+        to_nid = self._node_id(to_type, to_name)
+        if not self._g.has_edge(from_nid, to_nid):
+            return False
+        data = self._g.edges[from_nid, to_nid]
+        if data.get("rel_type") != rel_type:
+            return False
+        self._g.remove_edge(from_nid, to_nid)
+        return True
+
+    def verify_entity(self, entity_type: str, name: str, verified: bool = True) -> bool:
+        """标记实体验证状态."""
+        nid = self._node_id(entity_type, name)
+        if nid not in self._g:
+            return False
+        self._g.nodes[nid]["verified"] = verified
+        self._g.nodes[nid]["updated_at"] = _now_iso()
+        return True
 
 
 # ---------------------------------------------------------------------------
@@ -736,6 +1028,42 @@ class SubGraphView:
         """初始化 SubGraphView."""
         self._g = g
 
+    def _node_to_entity(self, nid: str, data: dict) -> GraphEntity:
+        """将 NetworkX 节点数据转换为 GraphEntity."""
+        return GraphEntity(
+            entity_type=data.get("entity_type", ""),
+            name=data.get("name", nid),
+            properties=data.get("properties", {}),
+            source_doc_ids=_normalize_sids(data.get("source_doc_ids", set())),
+            source_chapter=data.get("source_chapter", ""),
+            confidence=data.get("confidence", 1.0),
+            verified=data.get("verified", False),
+            created_at=data.get("created_at", ""),
+            updated_at=data.get("updated_at", ""),
+            feedback_score=data.get("feedback_score", 0),
+        )
+
+    def _edge_to_relation(self, u: str, v: str, data: dict) -> GraphRelation:
+        """将 NetworkX 边数据转换为 GraphRelation."""
+        u_type = self._g.nodes[u].get("entity_type", "")
+        u_name = self._g.nodes[u].get("name", u)
+        v_type = self._g.nodes[v].get("entity_type", "")
+        v_name = self._g.nodes[v].get("name", v)
+        return GraphRelation(
+            rel_type=data.get("rel_type", ""),
+            from_name=u_name,
+            to_name=v_name,
+            from_type=u_type,
+            to_type=v_type,
+            properties=data.get("properties", {}),
+            source_doc_ids=_normalize_sids(data.get("source_doc_ids", set())),
+            confidence=data.get("confidence", 1.0),
+            verified=data.get("verified", False),
+            created_at=data.get("created_at", ""),
+            updated_at=data.get("updated_at", ""),
+            feedback_score=data.get("feedback_score", 0),
+        )
+
     def to_text_context(self) -> str:
         """将子图转换为文本上下文，供 LLM 使用."""
         lines = []
@@ -744,7 +1072,13 @@ class SubGraphView:
             name = data.get("name", "")
             props = data.get("properties", {})
             prop_str = ", ".join(f"{k}={v}" for k, v in props.items() if v)
-            lines.append(f"- [{entity_type}] {name}" + (f" ({prop_str})" if prop_str else ""))
+            sids = sorted(_normalize_sids(data.get("source_doc_ids", set())))
+            sources = f" [来源: {', '.join(sids)}]" if sids else ""
+            verified_mark = " ✓" if data.get("verified", False) else ""
+            lines.append(
+                f"- [{entity_type}] {name}{verified_mark}{sources}"
+                + (f" ({prop_str})" if prop_str else "")
+            )
 
         if self._g.number_of_edges() > 0:
             lines.append("\n关系:")
@@ -752,7 +1086,10 @@ class SubGraphView:
                 u_name = self._g.nodes[u].get("name", u)
                 v_name = self._g.nodes[v].get("name", v)
                 rel = data.get("rel_type", "")
-                lines.append(f"  {u_name} --[{rel}]--> {v_name}")
+                rel_props = data.get("properties", {})
+                rel_prop_str = ", ".join(f"{k}={v}" for k, v in rel_props.items() if v)
+                rel_extra = f" ({rel_prop_str})" if rel_prop_str else ""
+                lines.append(f"  {u_name} --[{rel}]{rel_extra}--> {v_name}")
 
         return "\n".join(lines)
 
@@ -762,38 +1099,11 @@ class SubGraphView:
 
     def entities(self) -> list[GraphEntity]:
         """Entities 函数."""
-        results = []
-        for nid, data in self._g.nodes(data=True):
-            results.append(
-                GraphEntity(
-                    entity_type=data.get("entity_type", ""),
-                    name=data.get("name", ""),
-                    properties=data.get("properties", {}),
-                    source_doc_ids=_normalize_sids(data.get("source_doc_ids", set())),
-                    source_chapter=data.get("source_chapter", ""),
-                )
-            )
-        return results
+        return [self._node_to_entity(nid, data) for nid, data in self._g.nodes(data=True)]
 
     def relations(self) -> list[GraphRelation]:
         """Relations 函数."""
-        results = []
-        for u, v, data in self._g.edges(data=True):
-            u_type = self._g.nodes[u].get("entity_type", "")
-            u_name = self._g.nodes[u].get("name", "")
-            v_type = self._g.nodes[v].get("entity_type", "")
-            v_name = self._g.nodes[v].get("name", "")
-            results.append(
-                GraphRelation(
-                    rel_type=data.get("rel_type", ""),
-                    from_name=u_name,
-                    to_name=v_name,
-                    from_type=u_type,
-                    to_type=v_type,
-                    properties=data.get("properties", {}),
-                )
-            )
-        return results
+        return [self._edge_to_relation(u, v, data) for u, v, data in self._g.edges(data=True)]
 
     @property
     def node_count(self) -> int:

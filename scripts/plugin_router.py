@@ -12,6 +12,7 @@ import sys
 from pathlib import Path
 
 from core.config import Config
+from core.graph_store import GraphEntity, GraphRelation
 from core.knowledge_base_service import KnowledgeBaseService
 
 _SKILL_ROOT = Path(__file__).resolve().parent.parent
@@ -61,6 +62,11 @@ def _entity_to_dict(e) -> dict:
         "properties": e.properties,
         "source_doc_ids": sorted(list(e.source_doc_ids)),
         "source_chapter": e.source_chapter,
+        "confidence": e.confidence,
+        "verified": e.verified,
+        "created_at": e.created_at,
+        "updated_at": e.updated_at,
+        "feedback_score": e.feedback_score,
     }
 
 
@@ -74,6 +80,11 @@ def _relation_to_dict(r) -> dict:
         "to_type": r.to_type,
         "properties": r.properties,
         "source_doc_ids": sorted(list(r.source_doc_ids)),
+        "confidence": r.confidence,
+        "verified": r.verified,
+        "created_at": r.created_at,
+        "updated_at": r.updated_at,
+        "feedback_score": r.feedback_score,
     }
 
 
@@ -342,8 +353,9 @@ def tool_graph_neighbors(params: dict) -> dict:
             {
                 "entity": _entity_to_dict(entity),
                 "relation": rel,
+                "relation_properties": rel_props,
             }
-            for entity, rel in neighbors
+            for entity, rel, rel_props in neighbors
         ],
     }
 
@@ -413,6 +425,291 @@ def tool_graph_subgraph(params: dict) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# 图谱动态更新工具
+# ---------------------------------------------------------------------------
+
+
+def tool_graph_add_entity(params: dict) -> dict:
+    """添加或更新知识图谱实体.
+
+    参数:
+        entity_type: 实体类型
+        name: 实体名称
+        properties: 属性字典（可选）
+        source_doc_ids: 来源文档 ID 列表（可选）
+        confidence: 置信度 0.0-1.0（默认 1.0）
+        verified: 是否已验证（默认 false）
+    """
+    entity_type = params.get("entity_type")
+    name = params.get("name")
+    if not entity_type or not name:
+        return {"success": False, "error": "Missing entity_type or name"}
+
+    entity = GraphEntity(
+        entity_type=entity_type,
+        name=name,
+        properties=params.get("properties", {}),
+        source_doc_ids=set(params.get("source_doc_ids", [])),
+        confidence=params.get("confidence", 1.0),
+        verified=params.get("verified", False),
+    )
+    svc = _get_service()
+    conflicts = svc.add_entity(entity)
+    return {
+        "success": True,
+        "entity": _entity_to_dict(entity),
+        "conflicts": conflicts,
+        "message": f"Entity {entity_type}::{name} added/updated. Conflicts: {len(conflicts)}",
+    }
+
+
+def tool_graph_update_entity(params: dict) -> dict:
+    """更新知识图谱实体属性.
+
+    参数:
+        entity_type: 实体类型
+        name: 实体名称
+        properties: 新属性字典（可选，会覆盖原有 properties）
+        confidence: 新置信度（可选）
+        verified: 新验证状态（可选）
+    """
+    entity_type = params.get("entity_type")
+    name = params.get("name")
+    if not entity_type or not name:
+        return {"success": False, "error": "Missing entity_type or name"}
+
+    svc = _get_service()
+    ok = svc.update_entity(
+        entity_type=entity_type,
+        name=name,
+        properties=params.get("properties"),
+        confidence=params.get("confidence"),
+        verified=params.get("verified"),
+    )
+    if not ok:
+        return {"success": False, "error": f"Entity {entity_type}::{name} not found"}
+    return {"success": True, "entity_type": entity_type, "name": name, "message": "Updated."}
+
+
+def tool_graph_delete_entity(params: dict) -> dict:
+    """删除知识图谱实体（级联删除关联边）.
+
+    参数:
+        entity_type: 实体类型
+        name: 实体名称
+    """
+    entity_type = params.get("entity_type")
+    name = params.get("name")
+    if not entity_type or not name:
+        return {"success": False, "error": "Missing entity_type or name"}
+
+    svc = _get_service()
+    ok = svc.delete_entity(entity_type, name)
+    if not ok:
+        return {"success": False, "error": f"Entity {entity_type}::{name} not found"}
+    return {"success": True, "entity_type": entity_type, "name": name, "message": "Deleted."}
+
+
+def tool_graph_add_relation(params: dict) -> dict:
+    """添加或更新知识图谱关系.
+
+    参数:
+        rel_type: 关系类型
+        from_type, from_name: 起点实体
+        to_type, to_name: 终点实体
+        properties: 属性字典（可选）
+        confidence: 置信度（默认 1.0）
+        verified: 是否已验证（默认 false）
+    """
+    rel_type = params.get("rel_type")
+    from_type = params.get("from_type")
+    from_name = params.get("from_name")
+    to_type = params.get("to_type")
+    to_name = params.get("to_name")
+    if not all([rel_type, from_type, from_name, to_type, to_name]):
+        return {"success": False, "error": "Missing required relation parameters"}
+
+    relation = GraphRelation(
+        rel_type=str(rel_type),
+        from_type=str(from_type),
+        from_name=str(from_name),
+        to_type=str(to_type),
+        to_name=str(to_name),
+        properties=params.get("properties", {}),
+        confidence=params.get("confidence", 1.0),
+        verified=params.get("verified", False),
+    )
+    svc = _get_service()
+    conflicts = svc.add_relation(relation)
+    return {
+        "success": True,
+        "relation": _relation_to_dict(relation),
+        "conflicts": conflicts,
+        "message": f"Relation {rel_type} added/updated. Conflicts: {len(conflicts)}",
+    }
+
+
+def tool_graph_delete_relation(params: dict) -> dict:
+    """删除知识图谱关系.
+
+    参数:
+        rel_type: 关系类型
+        from_type, from_name: 起点实体
+        to_type, to_name: 终点实体
+    """
+    rel_type = params.get("rel_type")
+    from_type = params.get("from_type")
+    from_name = params.get("from_name")
+    to_type = params.get("to_type")
+    to_name = params.get("to_name")
+    if not all([rel_type, from_type, from_name, to_type, to_name]):
+        return {"success": False, "error": "Missing required relation parameters"}
+
+    svc = _get_service()
+    ok = svc.delete_relation(
+        str(from_type), str(from_name), str(to_type), str(to_name), str(rel_type)
+    )
+    if not ok:
+        return {"success": False, "error": "Relation not found"}
+    return {
+        "success": True,
+        "rel_type": rel_type,
+        "from": f"{from_type}::{from_name}",
+        "to": f"{to_type}::{to_name}",
+        "message": "Deleted.",
+    }
+
+
+def tool_graph_verify_entity(params: dict) -> dict:
+    """标记知识图谱实体为已验证.
+
+    参数:
+        entity_type: 实体类型
+        name: 实体名称
+        verified: 验证状态（默认 true）
+    """
+    entity_type = params.get("entity_type")
+    name = params.get("name")
+    if not entity_type or not name:
+        return {"success": False, "error": "Missing entity_type or name"}
+
+    verified = params.get("verified", True)
+    svc = _get_service()
+    ok = svc.verify_entity(entity_type, name, verified)
+    if not ok:
+        return {"success": False, "error": f"Entity {entity_type}::{name} not found"}
+    return {
+        "success": True,
+        "entity_type": entity_type,
+        "name": name,
+        "verified": verified,
+        "message": f"Verified={verified}.",
+    }
+
+
+def tool_graph_search_with_graph(params: dict) -> dict:
+    """语义搜索 + 图谱联合查询.
+
+    参数:
+        text: 搜索文本
+        top_k: 语义搜索返回数量（默认 5）
+        graph_depth: 图谱扩展深度（默认 1）
+    """
+    text = params.get("text")
+    if not text:
+        return {"success": False, "error": "Missing required parameter: text"}
+    top_k = params.get("top_k", 5)
+    graph_depth = params.get("graph_depth", 1)
+
+    svc = _get_service()
+    try:
+        result = svc.search_with_graph(str(text), top_k=top_k, graph_depth=graph_depth)
+    except RuntimeError as e:
+        return {"success": False, "error": str(e)}
+
+    return {
+        "success": True,
+        "text": text,
+        "chunks": [{"score": c["score"], **_chunk_to_dict(c["chunk"])} for c in result["chunks"]],
+        "related_entities": result["related_entities"],
+        "subgraphs": result["subgraphs"],
+    }
+
+
+def tool_graph_get_content_with_entities(params: dict) -> dict:
+    """获取 chunk 内容及其关联的图谱实体.
+
+    参数:
+        chunk_db_id: Chunk 数据库 ID
+    """
+    chunk_db_id = params.get("chunk_db_id")
+    if chunk_db_id is None:
+        return {"success": False, "error": "Missing required parameter: chunk_db_id"}
+
+    svc = _get_service()
+    try:
+        result = svc.get_content_with_entities(int(chunk_db_id))
+    except ValueError as e:
+        return {"success": False, "error": str(e)}
+
+    return {
+        "success": True,
+        "chunk": _chunk_to_dict(result["chunk"]),
+        "entities": [_entity_to_dict(e) for e in result["entities"]],
+        "relations": [_relation_to_dict(r) for r in result["relations"]],
+    }
+
+
+def tool_graph_feedback(params: dict) -> dict:
+    """提交对实体或关系的反馈.
+
+    参数:
+        rating: 评分 +1（正确）或 -1（错误）
+        entity_type, entity_name: 目标实体（可选）
+        relation_type, from_type, from_name, to_type, to_name: 目标关系（可选）
+        comment: 评论（可选）
+    """
+    rating = params.get("rating")
+    if rating not in (1, -1):
+        return {"success": False, "error": "rating must be +1 or -1"}
+
+    svc = _get_service()
+    feedback_id = svc.submit_feedback(
+        rating=rating,
+        entity_type=params.get("entity_type"),
+        entity_name=params.get("entity_name"),
+        relation_type=params.get("relation_type"),
+        relation_from_type=params.get("from_type"),
+        relation_from_name=params.get("from_name"),
+        relation_to_type=params.get("to_type"),
+        relation_to_name=params.get("to_name"),
+        comment=params.get("comment", ""),
+    )
+    return {
+        "success": True,
+        "feedback_id": feedback_id,
+        "message": "Feedback submitted.",
+    }
+
+
+def tool_graph_conflicts(params: dict) -> dict:
+    """查询知识图谱冲突日志.
+
+    参数:
+        entity_type: 实体类型过滤（可选）
+        name: 实体名称过滤（可选）
+        limit: 最大返回数量（默认 100）
+    """
+    svc = _get_service()
+    logs = svc.get_conflict_logs(
+        entity_type=params.get("entity_type"),
+        name=params.get("name"),
+        limit=params.get("limit", 100),
+    )
+    return {"success": True, "count": len(logs), "logs": logs}
+
+
+# ---------------------------------------------------------------------------
 # Tool 映射
 # ---------------------------------------------------------------------------
 
@@ -429,6 +726,16 @@ TOOL_MAP = {
     "graph_neighbors": tool_graph_neighbors,
     "graph_path": tool_graph_path,
     "graph_subgraph": tool_graph_subgraph,
+    "graph_add_entity": tool_graph_add_entity,
+    "graph_update_entity": tool_graph_update_entity,
+    "graph_delete_entity": tool_graph_delete_entity,
+    "graph_add_relation": tool_graph_add_relation,
+    "graph_delete_relation": tool_graph_delete_relation,
+    "graph_verify_entity": tool_graph_verify_entity,
+    "graph_search_with_graph": tool_graph_search_with_graph,
+    "graph_get_content_with_entities": tool_graph_get_content_with_entities,
+    "graph_feedback": tool_graph_feedback,
+    "graph_conflicts": tool_graph_conflicts,
 }
 
 
