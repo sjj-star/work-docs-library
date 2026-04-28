@@ -18,6 +18,7 @@ TEST_FILES = {
     "DVI0045": Path("/mnt/c/Users/SJJ22/Downloads/Doc/AMBA/AHB/DVI0045.pdf"),
 }
 
+
 def run() -> None:
     """执行本地 PDF 解析器测试."""
     base_tmp = Path(tempfile.gettempdir()) / "pdf_parser_test"
@@ -33,10 +34,10 @@ def run() -> None:
         output_dir = base_tmp / name
         output_dir.mkdir(parents=True, exist_ok=True)
 
-        print(f"\n{'='*60}")
+        print(f"\n{'=' * 60}")
         print(f"正在解析: {pdf_path.name}")
         print(f"输出目录: {output_dir}")
-        print(f"{'='*60}")
+        print(f"{'=' * 60}")
 
         parser = PDFParser()
         md_text, image_paths = parser.parse(
@@ -59,9 +60,9 @@ def run() -> None:
         heading_count = md_text.count("\n#") + md_text.count("\n##")
         print(f"📊 章节标题数: ~{heading_count}")
 
-    print(f"\n{'='*60}")
+    print(f"\n{'=' * 60}")
     print(f"全部完成，输出根目录: {base_tmp}")
-    print(f"{'='*60}")
+    print(f"{'=' * 60}")
 
 
 if __name__ == "__main__":

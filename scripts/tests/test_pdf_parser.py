@@ -713,9 +713,7 @@ def test_toc_identify_headings_exact_match(tmp_path):
     doc = fitz.open(str(pdf_path))
     page = doc.load_page(0)
     text_blocks = parser._get_page_text_blocks(page, [])
-    text_blocks = parser._identify_headings_by_toc(
-        text_blocks, [(2, "1.1 Introduction")]
-    )
+    text_blocks = parser._identify_headings_by_toc(text_blocks, [(2, "1.1 Introduction")])
     doc.close()
 
     texts = {b["text"]: b["is_heading"] for b in text_blocks}
@@ -782,21 +780,34 @@ def test_identify_headings_merge_split_number_title():
     # 手动构造编号和标题名分离的文本块（模拟 PDF 渲染结果）
     text_blocks = [
         {
-            "type": "text", "y0": 100.0, "y1": 110.0,
-            "text": "1.1", "avg_size": 14.0, "is_bold": True, "is_heading": False,
+            "type": "text",
+            "y0": 100.0,
+            "y1": 110.0,
+            "text": "1.1",
+            "avg_size": 14.0,
+            "is_bold": True,
+            "is_heading": False,
         },
         {
-            "type": "text", "y0": 101.0, "y1": 111.0,
-            "text": "Introduction", "avg_size": 14.0, "is_bold": False, "is_heading": False,
+            "type": "text",
+            "y0": 101.0,
+            "y1": 111.0,
+            "text": "Introduction",
+            "avg_size": 14.0,
+            "is_bold": False,
+            "is_heading": False,
         },
         {
-            "type": "text", "y0": 150.0, "y1": 160.0,
-            "text": "Body text.", "avg_size": 10.0, "is_bold": False, "is_heading": False,
+            "type": "text",
+            "y0": 150.0,
+            "y1": 160.0,
+            "text": "Body text.",
+            "avg_size": 10.0,
+            "is_bold": False,
+            "is_heading": False,
         },
     ]
-    result = parser._identify_headings_by_toc(
-        text_blocks, [(2, "1.1 Introduction")]
-    )
+    result = parser._identify_headings_by_toc(text_blocks, [(2, "1.1 Introduction")])
 
     # 合并后应只剩 "1.1 Introduction" 一个 heading
     heading_texts = [b["text"] for b in result if b["is_heading"]]
@@ -814,21 +825,34 @@ def test_identify_headings_no_match_table_noise():
     parser = PDFParser()
     text_blocks = [
         {
-            "type": "text", "y0": 100.0, "y1": 110.0,
-            "text": "10 ns (100 MHz)", "avg_size": 12.0, "is_bold": True, "is_heading": False,
+            "type": "text",
+            "y0": 100.0,
+            "y1": 110.0,
+            "text": "10 ns (100 MHz)",
+            "avg_size": 12.0,
+            "is_bold": True,
+            "is_heading": False,
         },
         {
-            "type": "text", "y0": 120.0, "y1": 130.0,
-            "text": "0 6%", "avg_size": 12.0, "is_bold": True, "is_heading": False,
+            "type": "text",
+            "y0": 120.0,
+            "y1": 130.0,
+            "text": "0 6%",
+            "avg_size": 12.0,
+            "is_bold": True,
+            "is_heading": False,
         },
         {
-            "type": "text", "y0": 140.0, "y1": 150.0,
-            "text": "Body paragraph.", "avg_size": 10.0, "is_bold": False, "is_heading": False,
+            "type": "text",
+            "y0": 140.0,
+            "y1": 150.0,
+            "text": "Body paragraph.",
+            "avg_size": 10.0,
+            "is_bold": False,
+            "is_heading": False,
         },
     ]
-    result = parser._identify_headings_by_toc(
-        text_blocks, [(2, "1.1 Introduction")]
-    )
+    result = parser._identify_headings_by_toc(text_blocks, [(2, "1.1 Introduction")])
     # 表格数据不在 TOC 中，不应被标记
     for b in result:
         assert b["is_heading"] is False
