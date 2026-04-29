@@ -11,15 +11,15 @@ class TestChapterParserIsHeading:
         result = ChapterParser._is_heading("# Introduction")
         assert result == (1, "Introduction")
 
-    def test_numbered_heading(self):
-        """数字编号标题."""
-        result = ChapterParser._is_heading("1.1 Overview")
-        assert result == (2, "1.1 Overview")
+    def test_markdown_heading_level2(self):
+        """二级 Markdown 标题识别."""
+        result = ChapterParser._is_heading("## 1 Introduction")
+        assert result == (2, "1 Introduction")
 
-    def test_chinese_heading(self):
-        """中文编号标题."""
-        result = ChapterParser._is_heading("一、概述")
-        assert result == (1, "一、概述")
+    def test_markdown_heading_level3(self):
+        """三级 Markdown 标题识别."""
+        result = ChapterParser._is_heading("### 2.1 Controlling the HRPWM Capabilities")
+        assert result == (3, "2.1 Controlling the HRPWM Capabilities")
 
     def test_rejects_pure_number_heading(self):
         r"""拒绝纯数字 Markdown 标题（页码噪声）."""
@@ -51,24 +51,106 @@ class TestChapterParserIsHeading:
         r"""拒绝小写日期格式."""
         assert ChapterParser._is_heading("# 16 march 2001") is None
 
-    def test_non_markdown_number_still_works(self):
-        """非 Markdown 格式的数字编号标题仍然正常工作."""
-        result = ChapterParser._is_heading("2.3 Register Descriptions")
-        assert result == (2, "2.3 Register Descriptions")
+    def test_rejects_toc_line_without_hash(self):
+        r"""拒绝没有 # 前缀的目录行（如 "1 Introduction 7"）."""
+        assert ChapterParser._is_heading("1 Introduction 7") is None
+        assert ChapterParser._is_heading("2.1 Controlling the HRPWM Capabilities 10") is None
+        assert ChapterParser._is_heading("2 Operational Description of HRPWM 9") is None
 
-    def test_rejects_date_in_numbered_format(self):
-        r"""拒绝数字编号分支中的日期格式（如 \"16 March 2001\"）."""
-        assert ChapterParser._is_heading("16 March 2001") is None
-        assert ChapterParser._is_heading("10 May 2004") is None
+    def test_rejects_code_comment_line(self):
+        r"""代码注释行（如 C 的 #include）不被识别为标题."""
+        # Markdown 标题要求 # 后必须有空格，因此 #include 不会被匹配
+        assert ChapterParser._is_heading('#include "DSP280x_Device.h"') is None
+        assert ChapterParser._is_heading("#define MAX 100") is None
+        assert ChapterParser._is_heading("#ifdef DEBUG") is None
+        # 有效的 Markdown 标题应被匹配（# 后有空格）
+        assert ChapterParser._is_heading("# include") == (1, "include")
 
-    def test_rejects_page_number_in_numbered_format(self):
-        r"""拒绝数字编号分支中的页码格式（如 \"1 1\"）."""
-        assert ChapterParser._is_heading("1 1") is None
-        assert ChapterParser._is_heading("1 2") is None
-        assert ChapterParser._is_heading("2 15") is None
+    def test_rejects_plain_numbered_line(self):
+        r"""拒绝纯数字编号行（不再识别数字编号标题）."""
+        assert ChapterParser._is_heading("1.1 Overview") is None
+        assert ChapterParser._is_heading("2.3 Register Descriptions") is None
+        assert ChapterParser._is_heading("3: Conclusion") is None
 
-    def test_rejects_pure_number_after_separator(self):
-        r"""拒绝数字编号后仅跟数字的标题（如 \"Page 5\" 中的 \"5\"）."""
-        # "5" 本身不会被数字编号分支匹配（没有前缀数字），
-        # 但 "1 5" 会被匹配为 number=1, title="5"
-        assert ChapterParser._is_heading("1 5") is None
+    def test_rejects_chinese_numbered_line(self):
+        r"""拒绝中文编号行（不再识别中文编号标题）."""
+        assert ChapterParser._is_heading("一、概述") is None
+        assert ChapterParser._is_heading("（一）特性") is None
+
+
+class TestChapterParserParseFlat:
+    """测试 ChapterParser.parse_flat 的代码块保护."""
+
+    def test_skips_heading_inside_fenced_code_block(self):
+        r"""Fenced code block 内的 # 行不应被识别为标题."""
+        text = """# Main Title
+
+Some intro.
+
+```c
+#include "header.h"
+#define MAX 100
+```
+
+## Next Section
+
+Content here.
+"""
+        flat = ChapterParser.parse_flat(text)
+        titles = [ch["title"] for ch in flat]
+        assert titles == ["Main Title", "Next Section"]
+        # #include 应该被归入 Main Title 的 content
+        main_content = flat[0]["content"]
+        assert '#include "header.h"' in main_content
+        assert "#define MAX 100" in main_content
+
+    def test_skips_heading_inside_tilde_code_block(self):
+        r"""~~~ 代码块内的 # 行不应被识别为标题."""
+        text = """# Title
+
+~~~python
+# This is a comment
+x = 1
+~~~
+
+## Section
+"""
+        flat = ChapterParser.parse_flat(text)
+        titles = [ch["title"] for ch in flat]
+        assert titles == ["Title", "Section"]
+
+    def test_toc_lines_become_content(self):
+        r"""没有 # 前缀的目录行应成为正文 content，而非独立章节."""
+        text = """# Document
+
+1 Introduction 7
+2 Operational Description 9
+2.1 Capabilities 10
+
+## 1 Introduction
+
+This is the real intro.
+"""
+        flat = ChapterParser.parse_flat(text)
+        titles = [ch["title"] for ch in flat]
+        # 目录行不应被识别为 heading
+        assert "1 Introduction 7" not in titles
+        assert "2 Operational Description 9" not in titles
+        assert "2.1 Capabilities 10" not in titles
+        # 真正的 Markdown 标题应被识别
+        assert "Document" in titles
+        assert "1 Introduction" in titles
+        # 目录行应归入 Document 的 content
+        doc_content = flat[0]["content"]
+        assert "1 Introduction 7" in doc_content
+        assert "2 Operational Description 9" in doc_content
+
+    def test_empty_input(self):
+        """空文本应返回空列表."""
+        flat = ChapterParser.parse_flat("")
+        assert flat == []
+
+    def test_no_headings(self):
+        """没有标题的文本应返回一个包含全部内容的章节."""
+        flat = ChapterParser.parse_flat("Just some text.\n\nMore text.")
+        assert len(flat) == 0
