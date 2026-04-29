@@ -26,11 +26,12 @@ import fitz
 from parsers.pdf_parser import PDFParser
 from PIL import Image
 
-from .batch_clients import BigModelBatchClient, KimiBatchClient
+from .batch_clients import BatchClient
 from .bigmodel_parser_client import BigModelParserClient
 from .config import Config
 from .db import KnowledgeDB
 from .embedding_client import EmbeddingClient
+from .enums import DocumentStatus
 from .graph_store import (
     ALL_NODE_TYPES,
     ALL_REL_TYPES,
@@ -43,6 +44,49 @@ from .models import Chunk, Document
 from .vector_index import VectorIndex
 
 logger = logging.getLogger(__name__)
+
+# 常见芯片产品型号正则（可扩展）
+_PRODUCT_NAME_PATTERNS = [
+    r"TMS320[A-Z0-9]+",
+    r"STM32[A-Z0-9]+",
+    r"MSP430[A-Z0-9]+",
+    r"PIC\d+[A-Z0-9]*",
+    r"ATmega[A-Z0-9]+",
+    r"EFM32[A-Z0-9]+",
+    r"CC\d+[A-Z0-9]*",
+    r"DRV\d+[A-Z0-9]*",
+]
+
+
+def _extract_product_name(markdown_text: str, file_path: str) -> str | None:
+    """从产品文档中提取产品型号.
+
+    策略（按优先级）：
+    1. 用户配置 WORKDOCS_PRODUCT_NAME
+    2. Markdown 标题/正文前 50 行中匹配型号格式
+    3. 文件名中匹配型号格式
+
+    """
+    # 1. 用户配置
+    product_name = getattr(Config, "PRODUCT_NAME", "")
+    if product_name:
+        return product_name
+
+    # 2. 从 Markdown 文本提取
+    for line in markdown_text.split("\n")[:50]:
+        for pattern in _PRODUCT_NAME_PATTERNS:
+            match = re.search(pattern, line)
+            if match:
+                return match.group(0)
+
+    # 3. 从文件名提取
+    file_name = Path(file_path).stem
+    for pattern in _PRODUCT_NAME_PATTERNS:
+        match = re.search(pattern, file_name)
+        if match:
+            return match.group(0)
+
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -84,8 +128,22 @@ class ChapterParser:
         lines = text.splitlines()
         chapters: list[dict[str, Any]] = []
         current: dict[str, Any] | None = None
+        in_code_block = False
 
         for i, line in enumerate(lines):
+            stripped = line.strip()
+            # 检测 fenced code block 围栏（``` 或 ~~~）
+            if stripped.startswith("```") or stripped.startswith("~~~"):
+                in_code_block = not in_code_block
+                if current is not None:
+                    current["_lines"].append(line)
+                continue
+
+            if in_code_block:
+                if current is not None:
+                    current["_lines"].append(line)
+                continue
+
             heading_match = cls._is_heading(line)
             if heading_match:
                 if current:
@@ -163,60 +221,43 @@ class ChapterParser:
 
     @classmethod
     def _is_heading(cls, line: str) -> tuple[int, str] | None:
-        """判断一行是否为标题，返回 (level, title) 或 None."""
-        # Markdown 标题: # ## ###
-        if line.startswith("#"):
-            level = 0
-            for c in line:
-                if c == "#":
-                    level += 1
-                else:
-                    break
-            title = line[level:].strip()
-            if title:
-                # 拒绝纯数字、日期等噪声标题（页码/封面日期误识别）
-                stripped = title.strip()
-                if re.match(r"^\d+$", stripped):
-                    return None
-                if re.match(
-                    r"^\d{1,2}\s+"
-                    r"(January|February|March|April|May|June|July|August|September|October|November|December)"
-                    r"\s+\d{4}$",
-                    stripped,
-                    re.I,
-                ):
-                    return None
-                if re.match(r"^\d{4}-\d{2}-\d{2}$", stripped):
-                    return None
-                return (level, title)
+        """判断一行是否为 Markdown 标题，返回 (level, title) 或 None.
 
-        # 数字编号标题: 1. 概述, 1.1 特性, 2. 寄存器
-        m = re.match(r"^(\d+(?:\.\d+)*)(?:\s+|[\.\)\:])\s*(.+)", line)
-        if m:
-            number = m.group(1)
-            title = m.group(2).strip()
-            level = number.count(".") + 1
-            if title and len(title) < 100:
-                # 拒绝日期格式（如 "16 March 2001" → number=16, title="March 2001"）
-                if re.match(
-                    r"^(January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{4}$",
-                    title,
-                    re.I,
-                ):
-                    return None
-                if re.match(r"^\d{4}-\d{2}-\d{2}$", title):
-                    return None
-                # 拒绝纯数字标题（页码噪声如 "1 1" → title="1"）
-                if re.match(r"^\d+$", title):
-                    return None
-                return (level, f"{number} {title}")
+        仅识别以 # 开头的正规 Markdown 标题，避免将目录条目、代码注释等误识别为标题。
+        """
+        if not line.startswith("#"):
+            return None
 
-        # 中文编号: 一、概述, （一）特性
-        m = re.match(r"^[一二三四五六七八九十]+[、\.\s].{2,50}", line)
-        if m:
-            return (1, line.strip())
+        level = 0
+        for c in line:
+            if c == "#":
+                level += 1
+            else:
+                break
 
-        return None
+        # Markdown 规范要求 # 序列后必须紧跟至少一个空格
+        if level >= len(line) or line[level] != " ":
+            return None
+
+        title = line[level + 1 :].strip()
+        if not title:
+            return None
+
+        # 拒绝纯数字、日期等噪声标题（页码/封面日期误识别）
+        stripped = title.strip()
+        if re.match(r"^\d+$", stripped):
+            return None
+        if re.match(
+            r"^\d{1,2}\s+"
+            r"(January|February|March|April|May|June|July|August|September|October|November|December)"
+            r"\s+\d{4}$",
+            stripped,
+            re.I,
+        ):
+            return None
+        if re.match(r"^\d{4}-\d{2}-\d{2}$", stripped):
+            return None
+        return (level, title)
 
 
 # ---------------------------------------------------------------------------
@@ -293,6 +334,8 @@ class BatchBuilder:
             if not root.children:
                 # 没有子节点，root 本身作为一个 batch
                 content = cls._collect_content(root)
+                if not content:
+                    continue
                 chunks = cls._split_if_needed(root.title, content, max_chars)
                 for chunk_content in chunks:
                     batches.append([{"title": root.title, "content": chunk_content}])
@@ -303,18 +346,23 @@ class BatchBuilder:
                 if not section.children:
                     # section 没有子节点，section 本身作为一个 batch
                     content = cls._collect_content(section)
+                    if not content:
+                        continue
                     chunks = cls._split_if_needed(section.title, content, max_chars)
                     for chunk_content in chunks:
                         batches.append([{"title": section.title, "content": chunk_content}])
                     continue
 
                 # 在 section 内部，找到所有 level=3 作为 chunk 单位
-                chunk_nodes = cls._find_chunk_nodes(section, chunk_level=3)
+                chunk_nodes = cls._find_chunk_nodes(section, chunk_level=Config.DEFAULT_CHUNK_LEVEL)
 
                 i = 0
                 while i < len(chunk_nodes):
                     node = chunk_nodes[i]
                     node_content = cls._collect_content(node)
+                    if not node_content:
+                        i += 1
+                        continue
                     current_chunks: list[dict[str, str]] = []
                     current_len = len(node_content)
                     current_chunks.append({"title": node.title, "content": node_content})
@@ -368,14 +416,44 @@ class BatchBuilder:
 
     @classmethod
     def _split_by_sentences(cls, text: str, max_len: int) -> list[str]:
-        """按句子边界切分文本."""
-        sentences = re.split(r"(?<=[。！？\.\!\?])\s+|\n\n+", text)
+        """按句子/段落边界切分文本，保护结构化块不被截断."""
+        blocks: list[str] = []
+
+        def _protect(pattern: re.Pattern, t: str) -> str:
+            # 过滤空匹配（Python re.finditer 对 *? 可能产生零宽度匹配）
+            matches = [m for m in pattern.finditer(t) if m.group(0)]
+            if not matches:
+                return t
+            result = t
+            for m in reversed(matches):
+                idx = len(blocks)
+                blocks.append(m.group(0))
+                result = result[: m.start()] + f"\x00BLOCK{idx}\x00" + result[m.end() :]
+            return result
+
+        # 1. 保护代码块（最外层，避免内部内容被其他 pattern 匹配）
+        protected = _protect(re.compile(r"```[\s\S]*?```|~~~[\s\S]*?~~~", re.DOTALL), text)
+        # 2. 保护 HTML 表格
+        protected = _protect(
+            re.compile(r"<table\b[^>]*>.*?</table>", re.DOTALL | re.IGNORECASE),
+            protected,
+        )
+        # 3. 保护 Markdown 表格：连续以 | 开头的行
+        protected = _protect(
+            re.compile(r"(?:^[ \t]*\|.*(?:\r?\n|$))+", re.MULTILINE),
+            protected,
+        )
+
+        sentences = re.split(r"(?<=[。！？\.\!\?])\s+|\n\n+", protected)
         chunks: list[str] = []
         current = ""
         for s in sentences:
             s = s.strip()
             if not s:
                 continue
+            # 还原所有占位符
+            for i, block in enumerate(blocks):
+                s = s.replace(f"\x00BLOCK{i}\x00", block)
             if len(current) + len(s) + 2 > max_len:
                 if current:
                     chunks.append(current)
@@ -384,7 +462,11 @@ class BatchBuilder:
                 current = (current + "\n\n" + s).strip() if current else s
         if current:
             chunks.append(current)
-        return chunks if chunks else [text[:max_len]]
+
+        # 安全 fallback：不再硬截断，保留完整文本
+        if not chunks:
+            return [text]
+        return chunks
 
 
 # ---------------------------------------------------------------------------
@@ -488,24 +570,32 @@ class EntityExtractor:
 
         return content, image_meta
 
-    def _build_batch_requests(self, batches, image_base_dir):
+    def _build_batch_requests(self, batches, image_base_dir, doc_context=""):
         requests = []
+        # 将 user template 按 {{chapters}} 拆分为前缀/后缀，避免章节内容重复
+        template = self._user_template
+        if "{{chapters}}" in template:
+            prefix_tpl, suffix_tpl = template.split("{{chapters}}", 1)
+        else:
+            prefix_tpl = template
+            suffix_tpl = ""
         for i, batch in enumerate(batches):
             chapter_text = "\n\n---\n\n".join(
                 f"## {ch['title']}\n\n{ch['content']}" for ch in batch
             )
-            user_prefix = self._user_template.replace("{{chapters}}", chapter_text).replace(
-                "{{images}}", ""
-            )
+            prefix = prefix_tpl.replace("{{doc_context}}", doc_context)
+            suffix = suffix_tpl
 
             # 流式解析 Markdown 图片引用，构建 multimodal content
             mm_content, image_meta = self._build_multimodal_content(
                 chapter_text, image_base_dir, id_prefix=f"batch_{i}"
             )
 
-            # 在 content 数组开头插入 user template 前缀
-            content: list[dict[str, Any]] = [{"type": "text", "text": user_prefix}]
+            # 组装 content 数组：前缀 + 章节内容(含图片) + 后缀
+            content: list[dict[str, Any]] = [{"type": "text", "text": prefix}]
             content.extend(mm_content)
+            if suffix:
+                content.append({"type": "text", "text": suffix})
 
             messages = [
                 {"role": "system", "content": self._system_prompt},
@@ -515,7 +605,7 @@ class EntityExtractor:
                 {
                     "custom_id": f"batch_{i}",
                     "method": "POST",
-                    "url": "/v1/chat/completions",
+                    "url": Config.LLM_BATCH_ENDPOINT,
                     "body": {
                         "model": Config.LLM_MODEL,
                         "messages": messages,
@@ -526,12 +616,12 @@ class EntityExtractor:
             logger.info(f"Batch {i} 构建完成 | images={len(image_meta)}")
         return requests
 
-    def extract_from_batches(self, batches, image_base_dir=None, doc_id=""):
+    def extract_from_batches(self, batches, image_base_dir=None, doc_id="", doc_context=""):
         """extract_from_batches 函数."""
         if not self.batch_client or not batches:
             return [], [], []
         image_base_dir = image_base_dir or Path()
-        requests = self._build_batch_requests(batches, image_base_dir)
+        requests = self._build_batch_requests(batches, image_base_dir, doc_context)
         logger.info(f"提交 Batch 请求 | requests={len(requests)}")
         try:
             results = self.batch_client.submit_parallel_batches(requests)
@@ -629,18 +719,23 @@ class DocGraphPipeline:
             self.parser_client = None
 
         try:
-            self.kimi_batch = KimiBatchClient()
-            logger.info("KimiBatchClient 已初始化")
+            self.llm_batch = BatchClient()
+            logger.info("LLM BatchClient 已初始化")
         except RuntimeError as e:
-            logger.warning(f"KimiBatchClient 初始化失败: {e}")
-            self.kimi_batch = None
+            logger.warning(f"LLM BatchClient 初始化失败: {e}")
+            self.llm_batch = None
 
         try:
-            self.bigmodel_batch = BigModelBatchClient()
-            logger.info("BigModelBatchClient 已初始化")
+            self.embed_batch = BatchClient(
+                api_key=Config.EMBEDDING_API_KEY,
+                base_url=Config.EMBEDDING_BASE_URL,
+                batch_endpoint=Config.EMBEDDING_BATCH_ENDPOINT,
+                auto_delete_input_file=True,
+            )
+            logger.info("Embedding BatchClient 已初始化")
         except RuntimeError as e:
-            logger.warning(f"BigModelBatchClient 初始化失败: {e}")
-            self.bigmodel_batch = None
+            logger.warning(f"Embedding BatchClient 初始化失败: {e}")
+            self.embed_batch = None
 
         # 解析器（仅 PDF，Office 文件暂时不支持）
         self.parsers = {
@@ -649,8 +744,8 @@ class DocGraphPipeline:
 
         # 子组件
         self.chapter_parser = ChapterParser()
-        self.entity_extractor = EntityExtractor(self.kimi_batch)
-        self.embedding_batch_client = self.bigmodel_batch
+        self.entity_extractor = EntityExtractor(self.llm_batch)
+        self.embedding_batch_client = self.embed_batch
 
     def scan(self, path: str) -> list[str]:
         """扫描文件."""
@@ -718,6 +813,7 @@ class DocGraphPipeline:
             return doc_id
 
         logger.info(f"开始处理文档 | file={file_path} | doc_id={doc_id}")
+        self.db.update_document_status(doc_id, DocumentStatus.PROCESSING)
 
         # 获取 PDF 实际页数
         pdf_page_count = 0
@@ -853,12 +949,25 @@ class DocGraphPipeline:
                 )
             all_image_descriptions.extend(cached_imgs)
 
+        # 构建文档上下文（用于 LLM batch 请求的前缀提示）
+        doc_title = tree_chapters[0].title if tree_chapters else ""
+        product_name = _extract_product_name(extracted_text, file_path) or ""
+        doc_context_parts = []
+        if doc_title:
+            doc_context_parts.append(f"文档《{doc_title}》")
+        if product_name:
+            doc_context_parts.append(f"产品型号 {product_name}")
+        doc_context = ""
+        if doc_context_parts:
+            doc_context = "以下章节来自 " + "，".join(doc_context_parts) + "。\n\n---\n"
+
         # 6b: 从变更/新增章节提取（LLM Batch API，multimodal：文本 + 图片流式处理）
-        if self.kimi_batch and batches:
+        if self.llm_batch and batches:
             ents, rels, img_descs = self.entity_extractor.extract_from_batches(
                 batches=batches,
                 image_base_dir=parsed_output_dir,
                 doc_id=doc_id,
+                doc_context=doc_context,
             )
             all_entities.extend(ents)
             all_relations.extend(rels)
@@ -886,6 +995,32 @@ class DocGraphPipeline:
         for r in all_relations:
             self.graph.add_relation(r)
 
+        # --- Step 6c: 提取产品型号并建立 Product-Module 关系 ---
+        product_name = _extract_product_name(extracted_text, file_path)
+        if product_name:
+            product_entity = GraphEntity(
+                entity_type="Product",
+                name=product_name,
+                properties={"description": f"芯片产品型号: {product_name}"},
+                source_doc_ids={doc_id},
+            )
+            self.graph.add_entity(product_entity)
+            for module_name in {e.name for e in all_entities if e.entity_type == "Module"}:
+                self.graph.add_relation(
+                    GraphRelation(
+                        rel_type="HAS_MODULE",
+                        from_name=product_name,
+                        from_type="Product",
+                        to_name=module_name,
+                        to_type="Module",
+                        source_doc_ids={doc_id},
+                    )
+                )
+            logger.info(
+                f"产品型号提取完成 | product={product_name} | "
+                f"modules={len({e.name for e in all_entities if e.entity_type == 'Module'})}"
+            )
+
         # --- Step 7: 保存 chunks 到 SQLite（增量模式，保留向量检索能力）---
         self._save_chunks_to_db(
             doc_id,
@@ -903,14 +1038,16 @@ class DocGraphPipeline:
         )
 
         # --- Step 8: 持久化图谱 ---
-        graph_path = Config.DB_PATH.parent / "graphs" / f"{doc_id}.json"
+        graph_path = Config.DB_PATH.parent / Config.GRAPH_OUTPUT_DIR / f"{doc_id}.json"
         graph_path.parent.mkdir(parents=True, exist_ok=True)
         self.graph.save(graph_path)
         logger.info(f"图谱已保存 | path={graph_path} | {self.graph.stats()}")
 
         # 如果 doc_id 变化（文件内容变了），删除旧图谱文件避免幽灵数据
         if old_doc and old_doc.doc_id != doc_id:
-            old_graph_path = Config.DB_PATH.parent / "graphs" / f"{old_doc.doc_id}.json"
+            old_graph_path = (
+                Config.DB_PATH.parent / Config.GRAPH_OUTPUT_DIR / f"{old_doc.doc_id}.json"
+            )
             if old_graph_path.exists():
                 old_graph_path.unlink()
                 logger.info(f"已删除旧图谱文件 | {old_graph_path}")
@@ -932,7 +1069,11 @@ class DocGraphPipeline:
         chunks = self.db.query_by_doc(doc_id)
         for ck in chunks:
             if not ck.summary:
-                default_summary = ck.content[:200] + "..." if len(ck.content) > 200 else ck.content
+                default_summary = (
+                    ck.content[: Config.DEFAULT_SUMMARY_LENGTH] + "..."
+                    if len(ck.content) > Config.DEFAULT_SUMMARY_LENGTH
+                    else ck.content
+                )
                 self.db.update_chunk_summary(ck.id, default_summary)
 
         logger.info(f"文档处理完成 | doc_id={doc_id} | mode=DOC_GRAPH_FLOW")
@@ -977,11 +1118,20 @@ class DocGraphPipeline:
         def _build_metadata(ch_title: str, ch_hash: str, old_ck: Chunk | None) -> dict[str, Any]:
             """构建 chunk metadata，包含缓存的实体/关系/embedding."""
             ch_ents = [e for e in entity_dicts if e.get("source_chapter") == ch_title]
+            ch_ent_names = {e.get("name", "") for e in ch_ents}
+            # 按章节过滤关系：保留 from 或 to 在当前章节实体列表中的关系
+            ch_rels = [
+                r
+                for r in relation_dicts
+                if r.get("from", "") in ch_ent_names or r.get("to", "") in ch_ent_names
+            ]
+            # 按章节过滤图片描述
+            ch_images = [img for img in image_descriptions if img.get("chapter_title") == ch_title]
             meta: dict[str, Any] = {
                 "content_hash": ch_hash,
                 "extracted_entities": ch_ents,
-                "extracted_relations": relation_dicts,
-                "image_descriptions": image_descriptions,
+                "extracted_relations": ch_rels,
+                "image_descriptions": ch_images,
             }
             if old_ck and old_ck.metadata.get("embedding"):
                 meta["embedding"] = old_ck.metadata["embedding"]
