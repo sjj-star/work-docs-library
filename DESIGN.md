@@ -6,7 +6,7 @@
 
 ## 1. 为什么 Batch API 优先？
 
-**选择**：所有 LLM 调用（实体提取 + 向量化）默认走 Batch API（Kimi Batch API + BigModel Batch API）。
+**选择**：所有 LLM 调用（实体提取 + 向量化）默认走 Batch API。使用通用 `BatchClient`（继承 `BaseBatchClient`），通过配置参数（`api_key`/`base_url`/`batch_endpoint`/`download_url_template`）适配不同服务商的 OpenAI-compatible Batch API，无需为每个厂商单独实现客户端。
 
 **原因**：
 - **成本**：Batch API 价格为同步 API 的 50%，对于文档处理这类非实时场景，成本优势显著
@@ -17,6 +17,7 @@
 - 延迟从秒级变为分钟级，不适合实时交互场景
 - 需要实现轮询和超时逻辑（`LLM_BATCH_TIMEOUT` 默认 3600 秒）
 - 单个 JSONL 不能超过 100MB，超大文档需自动拆分
+- 向量化在 `BatchClient` 初始化失败时会**降级到同步 `EmbeddingClient`**，确保 pipeline 不因 batch 配置缺失而中断
 
 ---
 
@@ -27,7 +28,7 @@
 **原因**：
 - **轻量**：无需引入外部数据库服务，零部署成本
 - **JSON 序列化**：`nx.node_link_data()` / `nx.node_link_graph()` 支持完整的图结构导出/导入，便于版本控制和调试
-- **当前需求足够**：支持邻居查询、子图提取、BFS 路径搜索（`find_path`，深度上限 6），NetworkX 的内存遍历性能完全满足
+- **当前需求足够**：支持邻居查询、子图提取、BFS 路径搜索（`find_path`，默认深度 3，硬上限 6 可通过 `Config.GRAPH_MAX_PATH_DEPTH` 调整），NetworkX 的内存遍历性能完全满足
 - **预留接口**：`GraphStore` 抽象基类已预留 Neo4j 迁移接口，未来需求变化时可无缝替换
 
 **增强功能**：
@@ -35,7 +36,7 @@
 - **动态 CRUD**：支持运行时 `update_entity`/`delete_entity`/`update_relation`/`delete_relation`/`verify_entity`，Agent 可直接修正图谱
 - **冲突检测**：同名实体属性差异时自动记录 `conflict_logs`，保留旧值到列表形式而非静默覆盖
 - **属性索引**：内部维护 `property_index: dict[(entity_type, key, value), set[nid]]`，`find_by_property()` 从 O(N) 降至 O(1)
-- **关系过滤**：`find_path()` 和 `get_neighbors()` 支持按 `rel_types` 过滤
+- **关系过滤**：`find_path()` 支持按 `rel_types` 集合过滤；`get_neighbors()` 支持按 `rel_type` 单种关系类型过滤
 
 **权衡**：
 - 内存存储，单图规模受限于可用内存（当前目标文档为几十到几百页，远未触及瓶颈）
@@ -110,7 +111,7 @@
 - **单用户场景**：本项目为本地部署的 Kimi CLI Plugin，无多用户并发需求
 - **零运维**：无需安装、配置、维护数据库服务，一个 `.db` 文件即完整数据库
 - **事务简单**：`KnowledgeDB._connect()` 使用上下文管理器，自动 commit/close
-- **足够当前需求**：当前 Schema 仅包含 `documents`、`chunks` 两张表，无复杂查询
+- **足够当前需求**：当前 Schema 包含 `_schema_meta`（版本管理）、`documents`（文档元数据）、`chunks`（内容块）、`conflict_logs`（同名实体属性冲突日志）、`feedback`（实体/关系用户反馈）五张表，无复杂查询
 
 **权衡**：
 - 不支持高并发写入（当前为单进程顺序处理，不成为问题）
@@ -131,7 +132,7 @@
 - `#` → 文档标题（书名），永不跨 `#` 合并
 - `##` → 章节，硬边界（不跨 `##` 合并）
 - `###` → 子章节/小节，基本 chunk 单位，内容较短时与同层级兄弟合并
-- `#` 和第一个 `##` 之间的文字 → 归入第一个 `##` 的 preface
+- `#` 和第一个 `##` 之间的文字 → **移动**到第一个 `##` 的 preface（父节点 content 清空，子节点 content 前置）
 
 > 注：BatchBuilder 的硬边界与合并规则详见第15节。
 
@@ -151,7 +152,7 @@
 - **环境变量**：Kimi CLI 运行时动态注入，优先级最高，支持用户在不修改文件的情况下临时覆盖配置
 
 **实现**：
-- `_resolve_config(env_name, json_path, default)` 统一解析，优先级逻辑集中在一处
+- `_resolve_config(env_name, json_path, default)` 统一解析，优先级逻辑集中在一处（`BigModelParserClient` 的 `_resolve_api_key` 为历史遗留独立实现，未复用 `_resolve_config`，后续建议统一）
 - 数值类型配置（dimension、batch_max_chars 等）在类定义后通过 `_initialize_numeric_configs()` 初始化
 
 ---
@@ -175,7 +176,7 @@
 
 ## 10. 为什么章节级增量更新？
 
-**选择**：文档更新时，按章节计算 `content_hash`（MD5）指纹比较。未变章节复用 `Chunk.metadata` 中缓存的 `extracted_entities` / `extracted_relations` / `embedding`，仅对变更/新增章节进行 LLM 提取和向量化。
+**选择**：文档更新时，按章节计算 `content_hash`（取 MD5 前 16 位作为指纹）比较。未变章节复用 `Chunk.metadata` 中缓存的 `extracted_entities` / `extracted_relations` / `embedding`，仅对变更/新增章节进行 LLM 提取和向量化。
 
 **原因**：
 - **万页级文档的更新成本**：全量重新处理一个万页文档的成本约 600元 + 1小时。若只变更 1 页，增量更新可将成本降至 ~10元 + 5分钟
@@ -183,7 +184,7 @@
 - **Batch API 的延迟**：避免对未变章节重复提交 Batch API，显著降低排队等待时间
 
 **实现细节**：
-- `Chunk.metadata` 存储 `content_hash`、`extracted_entities`、`extracted_relations`、`image_descriptions`、`embedding`
+- `Chunk.metadata` 存储 `content_hash`、`extracted_entities`、`extracted_relations`（⚠️ 当前未按章节过滤，缓存全文档关系）、`image_descriptions`（⚠️ 当前未按章节过滤）、`embedding`
 - `_save_chunks_to_db()` 向量化阶段分离 `reuse_pairs`（未变章节复用 embedding）和 `reembed_pairs`（变更/新增章节重新调用 Embedding API）
 - 全局图重建策略：`DocGraphPipeline._process_one()` 保存独立子图 `{doc_id}.json`；`KnowledgeBaseService.ingest_document()` 完成后清空内存全局图，从所有现有 `{doc_id}.json` 子图重新加载合并，确保无幽灵残留
 
@@ -267,7 +268,7 @@
 
 **实现**：
 - 遍历 flat heading 列表，使用栈确定父子关系（弹出 `level >= 当前 level` 的节点）
-- 递归传播 preface：`_propagate_preface(node)` — 有子节点时，`node.content` 移入 `node.children[0]`
+- 递归传播 preface：`_propagate_preface(node)` — 有子节点时，`node.content` **移动**到 `node.children[0]`（子节点 content 前置，父节点 content 清空）
 
 **权衡**：
 - `_collect_content` 需要递归收集，略微增加计算量（对当前文档规模可忽略）
@@ -277,13 +278,13 @@
 ## 15. 为什么 BatchBuilder 以 `##` 为硬边界、`###` 为 chunk 单位？
 
 **选择**：
-- `#`（level=1）是文档标题（书名），**不作为硬边界**
+- `#`（level=1）是文档标题（书名），**作为文档级硬边界**（不跨 `#` 合并）
 - `##`（level=2）是章节，**作为硬边界**（不跨 `##` 合并）
 - `###`（level=3）是基本 **chunk 单位**
 - `####+` 的内容通过 `_collect_content` 递归归并到父 `###`
 
 **原因**：
-- **`#` 是书名而非章节**：技术文档中 `#` 通常是书名（如 "# TMS320x280x HRPWM Reference Guide"），跨书名合并无意义
+- **`#` 是书名/文档级边界**：技术文档中 `#` 通常是书名（如 "# TMS320x280x HRPWM Reference Guide"），跨书名合并无意义
 - **`##` 是语义边界**：不同章节（如 "2.1 Overview" 和 "2.2 Implementation"）内容差异大，跨章节合并会割裂逻辑
 - **`###` 粒度适中**：小节级别（如 "2.1.1 Features"）内容通常在几千字符，适合作为 LLM batch 的基本单位。若内容过短，相邻 `###` 可合并
 
@@ -347,6 +348,30 @@
 
 ---
 
+## 16. 为什么 PDF 解析使用 BigModel 专用 API？
+
+**选择**：PDF 解析主路径使用 `BigModelParserClient`，调用 BigModel (智谱) 专有的 Expert 文件解析 API（`/files/parser/create` + `/files/parser/result`）。
+
+**原因**：
+- **解析质量**：BigModel Expert API 在中文技术文档（如 TI Reference Guide、ARM Technical Overview）的解析上表现优异，能准确识别标题层级、保留图片、输出结构化的 Markdown
+- **图片提取**：自动提取 PDF 中的矢量图/位图区域，输出 `images/` 目录 + Markdown 引用，与 pipeline 下游的 multimodal 处理无缝衔接
+- **成本可控**：0.012 元/页，对于几百页的技术文档成本可接受
+
+**限制**：
+- **厂商锁定**：该 API 非 OpenAI-compatible，端点为 BigModel 专有，无法通过修改 `base_url` 切换至其他厂商（如 Kimi、OpenAI、Azure 等）
+- **依赖外部服务**：需要有效的 BigModel API Key，且受限于 BigModel 服务的可用性
+
+**缓解措施**：
+- **本地 fallback**：`DocGraphPipeline` 在 `BigModelParserClient` 初始化失败或解析异常时，自动降级到本地 `PDFParser`（PyMuPDF + TOC 驱动章节识别）
+- **输出格式对齐**：本地解析器的输出格式（Markdown + `images/` 目录）与 BigModel 完全一致，确保 downstream pipeline（`ChapterParser` → `BatchBuilder` → `EntityExtractor`）无需感知解析来源差异
+- **零数据丢失**：无论使用哪种解析器，均遵循相同的零截断原则
+
+**未来扩展**：
+- 如需支持其他厂商的 PDF 解析服务（如 Kimi 文件解析、Azure Document Intelligence 等），需新增对应的 `ParserClient` 实现，并在 `DocGraphPipeline` 中注册为新的解析路径
+- 长期可考虑抽象 `BaseParserClient` 接口，将不同厂商的解析服务统一接入，由配置决定使用哪个解析后端
+
+---
+
 ## 已知限制与权衡汇总
 
 | 限制 | 原因 | 缓解措施 |
@@ -360,8 +385,38 @@
 | **图片需先文字化** | embedding-3 不支持图片输入 | LLM 先生成 `image_descriptions`，再合并到 chunk 文本 |
 | **本地 PDF 解析目录页换行** | 目录页多行条目保留为多行 | 目录页对知识提取影响小，接受此行为 |
 | **本地 PDF 解析依赖 TOC** | 无 TOC 的 PDF 回退到启发式规则 | `_fallback_heading_detection` 提供降级方案 |
+| **_is_heading 仅识别 Markdown #** | 已删除数字编号/中文编号匹配，目录条目（如 "1 Introduction 7"）不再被识别为 heading | 目录文本被收集为 heading 之间的 content，可能混入正文 batch；当前接受此行为，后续可通过机制层策略处理 |
+| **_propagate_preface 移动语义** | 父节点 content 被移动到第一个子节点，父节点自身 content 清空 | 父节点内容物理存在（在子节点 batch 中），但语义归属上可能让用户感知为"丢失"；这是设计意图（preface 传播），非 bug |
 | **冲突日志无关系级记录** | `add_relation` 冲突只记录 property_key，不记录完整关系上下文 | 冲突日志包含 from/to/type 信息，可定位 |
 | **反馈不反向更新 chunk metadata** | 全局图更新后，chunk metadata 中的 extracted_entities 仍是处理时快照 | `get_content_with_entities` 查全局图获取最新状态 |
+
+---
+
+## 17. 为什么引入 `doc_properties` 和 `Product` 实体？
+
+**选择**：`GraphEntity`/`GraphRelation` 新增 `doc_properties: dict[str, dict[str, Any]]` 字段，同时引入 `Product` 实体类型。
+
+**原因**：
+- **跨产品外设变体问题**：IC 技术文档中，同一个外设模块（如 `DMA_Controller`）会出现在多个产品手册中，有时仅 MMIO 地址不同，有时功能有更新
+- **属性覆盖丢失信息**：全局图合并时，同名实体采用"新值覆盖旧值"规则，导致不同产品的原始属性丢失。例如 `DMA_CTRL` 在 `TMS320F28379D` 中地址为 `0x1000`，在 `TMS320F280049C` 中为 `0x2000`，后处理的文档会覆盖前者
+- **Agent 需要精确查询**：当 Agent 生成指定芯片产品的外设代码时，必须获取该产品文档中描述的原始属性，而非被覆盖后的合并值
+
+**实现**：
+- **`doc_properties[doc_id]`**：每个实体/关系在加入全局图时，同时保存一份该文档的原始 `properties` 快照。合并时 `properties` 继续按原规则覆盖，但 `doc_properties` 追加不丢失
+- **`Product` 实体**：文档解析时自动从产品型号格式（如 `TMS320F28379D`）提取，建立 `Product --[HAS_MODULE]--> Module` 关系，作为产品级查询入口
+- **查询接口增强**：`graph_query`、`graph_neighbors`、`get_content_with_entities` 均支持 `doc_id` 参数，返回时自动将 `properties` 替换为 `doc_properties[doc_id]` 中的快照
+
+**Agent 推理流程**：
+```
+graph_query(entity_type="Product", name="TMS320F28379D")
+→ graph_neighbors(Product, rel_type="HAS_MODULE", doc_id="doc_hash")
+→ graph_query(Module("DMA_Controller"), doc_id="doc_hash")
+→ 获取 doc_properties["doc_hash"]["address_base"] = "0x4000"
+```
+
+**权衡**：
+- 存储量增加：每个文档的每个实体多保存一份属性（通常 < 10K 实体，可接受）
+- 产品型号提取依赖启发式正则，可能误识别或漏识别，支持 `WORKDOCS_PRODUCT_NAME` 手动覆盖
 
 ---
 
