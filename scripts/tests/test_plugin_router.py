@@ -314,6 +314,19 @@ def test_plugin_json_valid_schema():
         "graph_neighbors",
         "graph_path",
         "graph_subgraph",
+        "graph_add_entity",
+        "graph_update_entity",
+        "graph_delete_entity",
+        "graph_add_relation",
+        "graph_delete_relation",
+        "graph_verify_entity",
+        "graph_search_with_graph",
+        "graph_get_content_with_entities",
+        "graph_feedback",
+        "graph_conflicts",
+        "doc_parse",
+        "doc_build_batches",
+        "doc_submit_batches",
     ]
     for name in expected:
         assert name in names, f"Missing tool: {name}"
@@ -762,3 +775,136 @@ def test_extract_product_name_not_found():
     md = "# Generic Manual\n\n## Introduction"
     result = _extract_product_name(md, "/path/to/generic.pdf")
     assert result is None
+
+
+# ---------------------------------------------------------------------------
+# 三阶段 Plugin 工具测试
+# ---------------------------------------------------------------------------
+
+
+def test_tool_doc_parse_success(patched_config, monkeypatch):
+    """tool_doc_parse 应解析 PDF 并返回 doc_id 和 output_dir."""
+    monkeypatch.setattr(Config, "LLM_API_KEY", "fake-llm-key")
+    monkeypatch.setattr(Config, "LLM_MODEL", "gpt-4o-mini")
+    monkeypatch.setattr(Config, "EMBEDDING_API_KEY", "fake-emb-key")
+    monkeypatch.setattr(Config, "EMBEDDING_MODEL", "text-embedding-3-small")
+
+    _mock_llm_and_embedder(monkeypatch)
+
+    pdf = patched_config / "doc.pdf"
+    _make_pdf(pdf, ["## Chapter 1\n\nChapter one content."])
+
+    result = plugin_router.tool_doc_parse({"path": str(pdf)})
+    assert result["success"] is True
+    assert "doc_id" in result
+    assert "output_dir" in result
+    assert result["images"] == 0  # 纯文本 PDF 无图片
+    assert "result.md" in result["message"]
+
+    # 验证 result.md 已生成
+    from pathlib import Path
+
+    output_dir = Path(result["output_dir"])
+    assert (output_dir / "result.md").exists()
+
+
+def test_tool_doc_parse_missing_path():
+    """tool_doc_parse 缺少 path 时应返回错误."""
+    result = plugin_router.tool_doc_parse({})
+    assert result["success"] is False
+    assert "path" in result["error"]
+
+
+def test_tool_doc_build_batches_success(patched_config, monkeypatch):
+    """tool_doc_build_batches 应从已解析文档生成 JSONL."""
+    monkeypatch.setattr(Config, "LLM_API_KEY", "fake-llm-key")
+    monkeypatch.setattr(Config, "LLM_MODEL", "gpt-4o-mini")
+    monkeypatch.setattr(Config, "EMBEDDING_API_KEY", "fake-emb-key")
+    monkeypatch.setattr(Config, "EMBEDDING_MODEL", "text-embedding-3-small")
+
+    _mock_llm_and_embedder(monkeypatch)
+
+    pdf = patched_config / "doc.pdf"
+    _make_pdf(pdf, ["## Section A\n\nContent A.\n\n## Section B\n\nContent B."])
+
+    # 先执行 stage1
+    parse_result = plugin_router.tool_doc_parse({"path": str(pdf)})
+    assert parse_result["success"] is True
+    doc_id = parse_result["doc_id"]
+
+    # 执行 stage2
+    result = plugin_router.tool_doc_build_batches({"doc_id": doc_id})
+    assert result["success"] is True
+    assert result["doc_id"] == doc_id
+    assert "jsonl_path" in result
+    assert result["batch_count"] > 0
+    assert result["request_count"] > 0
+
+    from pathlib import Path
+
+    assert Path(result["jsonl_path"]).exists()
+
+
+def test_tool_doc_build_batches_missing_doc_id():
+    """tool_doc_build_batches 缺少 doc_id 时应返回错误."""
+    result = plugin_router.tool_doc_build_batches({})
+    assert result["success"] is False
+    assert "doc_id" in result["error"]
+
+
+def test_tool_doc_submit_batches_success(patched_config, monkeypatch):
+    """tool_doc_submit_batches 应完成入库."""
+    monkeypatch.setattr(Config, "LLM_API_KEY", "fake-llm-key")
+    monkeypatch.setattr(Config, "LLM_MODEL", "gpt-4o-mini")
+    monkeypatch.setattr(Config, "EMBEDDING_API_KEY", "fake-emb-key")
+    monkeypatch.setattr(Config, "EMBEDDING_MODEL", "text-embedding-3-small")
+
+    _mock_llm_and_embedder(monkeypatch)
+
+    pdf = patched_config / "doc.pdf"
+    _make_pdf(pdf, ["## Section A\n\nContent A.\n\n## Section B\n\nContent B."])
+
+    # stage1 + stage2
+    parse_result = plugin_router.tool_doc_parse({"path": str(pdf)})
+    assert parse_result["success"] is True
+    doc_id = parse_result["doc_id"]
+
+    build_result = plugin_router.tool_doc_build_batches({"doc_id": doc_id})
+    assert build_result["success"] is True
+
+    # stage3
+    result = plugin_router.tool_doc_submit_batches({"doc_id": doc_id, "file_path": str(pdf)})
+    assert result["success"] is True
+    assert result["doc_id"] == doc_id
+
+    # 验证数据库状态
+    db = KnowledgeDB()
+    doc = db.get_document_by_path(str(pdf))
+    assert doc is not None
+    assert doc.status == "done"
+
+    chunks = db.query_by_doc(doc_id)
+    assert len(chunks) > 0
+    for ck in chunks:
+        assert ck.status == "done"
+
+
+def test_tool_doc_submit_batches_missing_doc_id():
+    """tool_doc_submit_batches 缺少 doc_id 时应返回错误."""
+    result = plugin_router.tool_doc_submit_batches({})
+    assert result["success"] is False
+    assert "doc_id" in result["error"]
+
+
+def test_tool_doc_submit_batches_missing_file_path(patched_config, monkeypatch):
+    """tool_doc_submit_batches 无 file_path 且无数据库记录时应返回错误."""
+    monkeypatch.setattr(Config, "LLM_API_KEY", "fake-llm-key")
+    monkeypatch.setattr(Config, "LLM_MODEL", "gpt-4o-mini")
+    monkeypatch.setattr(Config, "EMBEDDING_API_KEY", "fake-emb-key")
+    monkeypatch.setattr(Config, "EMBEDDING_MODEL", "text-embedding-3-small")
+
+    _mock_llm_and_embedder(monkeypatch)
+
+    result = plugin_router.tool_doc_submit_batches({"doc_id": "nonexistent_doc_id"})
+    assert result["success"] is False
+    assert "源文件路径" in result["error"] or "file_path" in result["error"]

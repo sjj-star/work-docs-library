@@ -91,7 +91,7 @@
 - ✅ **跨产品外设变体建模**：`GraphEntity`/`GraphRelation` 新增 `doc_properties` 字段，保存每个文档的原始属性快照；引入 `Product` 实体类型，文档解析时自动提取产品型号并建立 `Product --[HAS_MODULE]--> Module` 关系；查询接口支持 `doc_id` 参数以获取指定文档的原始属性
 - ✅ **属性索引优化**：`NetworkXGraphStore` 内部维护 `property_index`，`find_by_property()` 从 O(N) 降至 O(1)
 - ✅ **Pipeline 三阶段拆分**：`_process_one` 拆分为 `stage1_parse` / `stage2_build_jsonl` / `stage3_ingest`，支持独立执行和人工干预
-- ✅ 247 个测试全部通过
+- ✅ 265 个测试全部通过
 
 ### 下一阶段（精确到下一步）
 1. **可视化**：图谱可视化导出（Graphviz / D3.js）
@@ -141,7 +141,7 @@
 ### 核心原则
 - **Mock 优先**：所有涉及外部 API 的测试使用 Fake 客户端，**禁止调用真实 API**
 - **回归即修复**：任何导致测试失败的变更必须当场修复
-- **247 个测试用例必须全部通过**
+- **265 个测试用例必须全部通过**
 
 ### 机制与策略分离原则
 
