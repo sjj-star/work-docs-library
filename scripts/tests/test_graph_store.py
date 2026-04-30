@@ -1119,3 +1119,273 @@ def test_product_in_all_node_types():
     from core.graph_store import ALL_NODE_TYPES
 
     assert "Product" in ALL_NODE_TYPES
+
+
+# ---------------------------------------------------------------------------
+# 16. CPU/DSP 处理器架构实体类型（C28x+CLA）
+# ---------------------------------------------------------------------------
+
+
+def test_arch_entity_types_in_all_node_types():
+    """新增处理器架构实体类型应存在于 ALL_NODE_TYPES."""
+    from core.graph_store import ALL_NODE_TYPES
+
+    arch_types = {
+        "Instruction",
+        "InstructionGroup",
+        "AddressingMode",
+        "Operand",
+        "ArchitectureState",
+        "PipelineStage",
+        "FunctionalUnit",
+        "Interrupt",
+        "Exception",
+        "MemoryRegion",
+        "ShadowRegister",
+        "CPU_Mode",
+        "CLA_Task",
+        "Peripheral",
+    }
+    for t in arch_types:
+        assert t in ALL_NODE_TYPES, f"{t} should be in ALL_NODE_TYPES"
+
+
+def test_arch_rel_types_in_all_rel_types():
+    """新增处理器架构关系类型应存在于 ALL_REL_TYPES."""
+    from core.graph_store import ALL_REL_TYPES
+
+    arch_rels = {
+        "ISA_HAS_INSTRUCTION",
+        "INSTRUCTION_BELONGS_TO_GROUP",
+        "INSTRUCTION_USES_MODE",
+        "OPERAND_HAS_MODE",
+        "INSTRUCTION_READS_REGISTER",
+        "INSTRUCTION_WRITES_REGISTER",
+        "INSTRUCTION_MODIFIES_STATE",
+        "INSTRUCTION_EXECUTED_IN",
+        "INTERRUPT_TRIGGERS",
+        "EXCEPTION_RAISES",
+        "STATE_HAS_REGISTER",
+        "MODULE_IMPLEMENTS_INSTRUCTION",
+        "HAS_PERIPHERAL",
+        "PERIPHERAL_HAS_REGISTER",
+        "CLA_HAS_TASK",
+        "TASK_USES_INSTRUCTION",
+        "MEMORY_MAPS_TO",
+        "UNIT_EXECUTES",
+        "STAGE_PRODUCES",
+    }
+    for r in arch_rels:
+        assert r in ALL_REL_TYPES, f"{r} should be in ALL_REL_TYPES"
+
+
+def test_new_arch_entity_crud(graph_store):
+    """处理器架构实体的 add_entity / get_entity / to_dict 往返一致."""
+    e = GraphEntity(
+        entity_type="Instruction",
+        name="MAC",
+        properties={
+            "opcode": "0011 0110 ...",
+            "cycle_count": 1,
+            "description": "Multiply and Accumulate",
+            "affected_flags": "Z, N, C, V",
+        },
+        source_doc_ids={"doc_c28x"},
+        source_chapter="Instruction Set",
+    )
+    graph_store.add_entity(e)
+    fetched = graph_store.get_entity("Instruction", "MAC")
+    assert fetched is not None
+    assert fetched.name == "MAC"
+    assert fetched.properties["opcode"] == "0011 0110 ..."
+    assert fetched.properties["cycle_count"] == 1
+
+    # Interrupt 实体
+    intr = GraphEntity(
+        entity_type="Interrupt",
+        name="ADC_INT",
+        properties={"vector_address": "0x000D40", "priority": 10, "source": "ADC"},
+        source_doc_ids={"doc_c28x"},
+    )
+    graph_store.add_entity(intr)
+    assert graph_store.get_entity("Interrupt", "ADC_INT") is not None
+
+    # CLA_Task 实体
+    task = GraphEntity(
+        entity_type="CLA_Task",
+        name="Task1",
+        properties={"trigger_source": "ePWM1SOCA", "priority": 1},
+        source_doc_ids={"doc_c28x"},
+    )
+    graph_store.add_entity(task)
+    assert graph_store.get_entity("CLA_Task", "Task1") is not None
+
+    # to_dict / from_dict 往返
+    d = e.to_dict()
+    restored = GraphEntity.from_dict(d)
+    assert restored == e
+
+
+def test_new_arch_rel_types(graph_store):
+    """跨层级关系的添加与邻居查询."""
+    # 建立 ISA 层级 ↔ RTL 层级的混合图谱
+    entities = [
+        GraphEntity(entity_type="Module", name="ALU", properties={"description": "算术逻辑单元"}),
+        GraphEntity(
+            entity_type="Instruction", name="ADD", properties={"cycle_count": 1}
+        ),
+        GraphEntity(entity_type="Register", name="ACC", properties={"width": 32}),
+        GraphEntity(
+            entity_type="PipelineStage", name="Execute", properties={"description": "执行阶段"}
+        ),
+        GraphEntity(
+            entity_type="Peripheral", name="ePWM1", properties={"description": "增强型 PWM"}
+        ),
+        GraphEntity(
+            entity_type="CLA_Task", name="Task2", properties={"trigger_source": "ADC_INT"}
+        ),
+    ]
+    for ent in entities:
+        graph_store.add_entity(ent)
+
+    relations = [
+        GraphRelation(
+            rel_type="MODULE_IMPLEMENTS_INSTRUCTION",
+            from_name="ALU",
+            to_name="ADD",
+            from_type="Module",
+            to_type="Instruction",
+        ),
+        GraphRelation(
+            rel_type="INSTRUCTION_READS_REGISTER",
+            from_name="ADD",
+            to_name="ACC",
+            from_type="Instruction",
+            to_type="Register",
+        ),
+        GraphRelation(
+            rel_type="INSTRUCTION_WRITES_REGISTER",
+            from_name="ADD",
+            to_name="ACC",
+            from_type="Instruction",
+            to_type="Register",
+        ),
+        GraphRelation(
+            rel_type="INSTRUCTION_EXECUTED_IN",
+            from_name="ADD",
+            to_name="Execute",
+            from_type="Instruction",
+            to_type="PipelineStage",
+        ),
+        GraphRelation(
+            rel_type="HAS_PERIPHERAL",
+            from_name="ePWM1",
+            to_name="Task2",
+            from_type="Peripheral",
+            to_type="CLA_Task",
+        ),
+    ]
+    for rel in relations:
+        graph_store.add_relation(rel)
+
+    # 验证 ADD 的出边邻居：ALU(被实现), ACC(读写), Execute(执行阶段)
+    neighbors = graph_store.get_neighbors("Instruction", "ADD", direction="out")
+    names = {n.name for n, _, _ in neighbors}
+    assert names == {"ACC", "Execute"}
+
+    # 验证 ADD 的入边邻居：ALU
+    neighbors_in = graph_store.get_neighbors("Instruction", "ADD", direction="in")
+    names_in = {n.name for n, _, _ in neighbors_in}
+    assert names_in == {"ALU"}
+
+    # 验证关系类型过滤
+    reg_neighbors = graph_store.get_neighbors(
+        "Instruction", "ADD", rel_type="INSTRUCTION_READS_REGISTER", direction="out"
+    )
+    assert len(reg_neighbors) == 1
+    assert reg_neighbors[0][0].name == "ACC"
+
+
+def test_arch_property_index(graph_store):
+    """新增实体类型的属性索引应正确命中."""
+    entities = [
+        GraphEntity(entity_type="Instruction", name="MAC", properties={"cycle_count": 1}),
+        GraphEntity(entity_type="Instruction", name="MPY", properties={"cycle_count": 1}),
+        GraphEntity(entity_type="Instruction", name="DIV", properties={"cycle_count": 5}),
+    ]
+    for ent in entities:
+        graph_store.add_entity(ent)
+
+    results = graph_store.find_by_property("Instruction", "cycle_count", 1)
+    names = {e.name for e in results}
+    assert names == {"MAC", "MPY"}
+
+    results = graph_store.find_by_property("Instruction", "cycle_count", 5)
+    assert len(results) == 1
+    assert results[0].name == "DIV"
+
+
+def test_arch_cross_level_subgraph(graph_store):
+    """以 Instruction 为中心的跨层级子图查询."""
+    entities = [
+        GraphEntity(entity_type="Module", name="CPU", properties={}),
+        GraphEntity(entity_type="Instruction", name="MOV", properties={}),
+        GraphEntity(entity_type="Register", name="XT", properties={"width": 32}),
+        GraphEntity(entity_type="ArchitectureState", name="ST0", properties={"width": 16}),
+        GraphEntity(entity_type="PipelineStage", name="Write", properties={}),
+    ]
+    for ent in entities:
+        graph_store.add_entity(ent)
+
+    relations = [
+        GraphRelation(
+            rel_type="MODULE_IMPLEMENTS_INSTRUCTION",
+            from_name="CPU",
+            to_name="MOV",
+            from_type="Module",
+            to_type="Instruction",
+        ),
+        GraphRelation(
+            rel_type="INSTRUCTION_READS_REGISTER",
+            from_name="MOV",
+            to_name="XT",
+            from_type="Instruction",
+            to_type="Register",
+        ),
+        GraphRelation(
+            rel_type="INSTRUCTION_MODIFIES_STATE",
+            from_name="MOV",
+            to_name="ST0",
+            from_type="Instruction",
+            to_type="ArchitectureState",
+        ),
+        GraphRelation(
+            rel_type="INSTRUCTION_EXECUTED_IN",
+            from_name="MOV",
+            to_name="Write",
+            from_type="Instruction",
+            to_type="PipelineStage",
+        ),
+    ]
+    for rel in relations:
+        graph_store.add_relation(rel)
+
+    sg = graph_store.get_subgraph("Instruction", "MOV", depth=1)
+    names = {e.name for e in sg.entities()}
+    assert names == {"MOV", "XT", "ST0", "Write", "CPU"}
+    assert sg.edge_count == 4
+
+    # 关系类型过滤：只沿 INSTRUCTION_* 边展开，不应走到 CPU
+    sg_filtered = graph_store.get_subgraph(
+        "Instruction",
+        "MOV",
+        depth=1,
+        rel_types={
+            "INSTRUCTION_READS_REGISTER",
+            "INSTRUCTION_MODIFIES_STATE",
+            "INSTRUCTION_EXECUTED_IN",
+        },
+    )
+    filtered_names = {e.name for e in sg_filtered.entities()}
+    assert filtered_names == {"MOV", "XT", "ST0", "Write"}
+    assert sg_filtered.edge_count == 3

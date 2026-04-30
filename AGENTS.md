@@ -60,6 +60,12 @@
 - **专用 API**（PDF 解析）：`BigModelParserClient` 使用 BigModel 专有的 Expert 文件解析接口（`/files/parser/create`、`/files/parser/result`），非 OpenAI-compatible，无法直接切换至其他厂商。失败时自动 fallback 到本地 `PDFParser`
 - 构造项目内部API时要尽可能使用函数式编程
 
+### 机制与策略分离原则
+
+> 不要擅自设计任何硬编码的策略，应当优先设计一个框架和机制，后面根据实际需求使用机制来实现策略。
+
+- **零数据丢失是底线**：任何原始解析的文本都不得删除或丢弃
+
 ---
 
 ## 开发计划
@@ -88,10 +94,11 @@
 - ✅ **chunk+实体联合返回**：`get_content_with_entities()` 返回 chunk 及其关联的图谱实体/关系
 - ✅ **用户反馈机制**：`graph_feedback` 工具支持对实体/关系打分（+1/-1），`feedback_score` 实时汇总
 - ✅ **IC 关系扩展**：新增 `DRIVES`/`DRIVEN_BY`/`TIMING_PATH`/`CLOCK_GATED_BY`/`RESET_BY`/`PARAMETERIZED_BY`/`INSTANCE_OF`
+- ✅ **处理器架构图谱扩展（C28x+CLA）**：新增 `Instruction`/`InstructionGroup`/`AddressingMode`/`Operand`/`ArchitectureState`/`PipelineStage`/`FunctionalUnit`/`Interrupt`/`Exception`/`MemoryRegion`/`ShadowRegister`/`CPU_Mode`/`CLA_Task`/`Peripheral` 等实体类型，以及 `ISA_HAS_INSTRUCTION`/`INSTRUCTION_READS_REGISTER`/`INSTRUCTION_WRITES_REGISTER`/`INSTRUCTION_MODIFIES_STATE`/`MODULE_IMPLEMENTS_INSTRUCTION`/`INTERRUPT_TRIGGERS`/`HAS_PERIPHERAL`/`CLA_HAS_TASK` 等跨层级关系类型，支持 ISA 层级与 RTL 层级的知识互通
 - ✅ **跨产品外设变体建模**：`GraphEntity`/`GraphRelation` 新增 `doc_properties` 字段，保存每个文档的原始属性快照；引入 `Product` 实体类型，文档解析时自动提取产品型号并建立 `Product --[HAS_MODULE]--> Module` 关系；查询接口支持 `doc_id` 参数以获取指定文档的原始属性
 - ✅ **属性索引优化**：`NetworkXGraphStore` 内部维护 `property_index`，`find_by_property()` 从 O(N) 降至 O(1)
 - ✅ **Pipeline 三阶段拆分**：`_process_one` 拆分为 `stage1_parse` / `stage2_build_jsonl` / `stage3_ingest`，支持独立执行和人工干预
-- ✅ 265 个测试全部通过
+- ✅ 274 个测试全部通过
 
 ### 下一阶段（精确到下一步）
 1. **可视化**：图谱可视化导出（Graphviz / D3.js）
@@ -142,14 +149,6 @@
 - **Mock 优先**：所有涉及外部 API 的测试使用 Fake 客户端，**禁止调用真实 API**
 - **回归即修复**：任何导致测试失败的变更必须当场修复
 - **265 个测试用例必须全部通过**
-
-### 机制与策略分离原则
-
-> 先不要设计任何过滤源数据信息的策略，应当先设计一个框架和机制，后面根据实际需求使用机制来实现策略。
-
-- **零数据丢失是底线**：任何原始解析的文本都不得删除或丢弃
-- `ChapterNode` 后续考虑增加 `raw_content` + `metadata` 字段，保留原始数据与处理标记
-- `_propagate_preface` 当前为**移动**语义（父节点 content 清空并移入第一个子节点），非复制。若后续需要保留父节点内容，需通过机制层（如 `raw_content`）实现，而非在策略层硬编码过滤
 
 ### 测试文件清单
 | 测试文件 | 说明 |

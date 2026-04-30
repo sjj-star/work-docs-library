@@ -332,6 +332,7 @@ def test_stage3_ingest_force_reprocess(patched_config, monkeypatch):
 
     db = KnowledgeDB()
     doc = db.get_document_by_path(str(pdf))
+    assert doc is not None
     assert doc.status == "done"
 
 
@@ -465,3 +466,135 @@ def test_stage3_incremental_update(patched_config, monkeypatch):
     assert len(chunks_after) == 2
     for ck in chunks_after:
         assert ck.status == "done"
+
+
+# ---------------------------------------------------------------------------
+# 架构实体过滤兼容性测试
+# ---------------------------------------------------------------------------
+
+
+class ArchFakeBatchClient:
+    """返回包含处理器架构实体的 Mock BatchClient."""
+
+    def __init__(self, *args, **kwargs):
+        pass
+
+    def submit_parallel_batches(self, requests, **kwargs):
+        """返回含新实体/关系的提取结果."""
+        results = []
+        for i, req in enumerate(requests):
+            results.append(
+                {
+                    "custom_id": req.get("custom_id", f"batch_{i}"),
+                    "response": {
+                        "body": {
+                            "choices": [
+                                {
+                                    "message": {
+                                        "content": json.dumps(
+                                            {
+                                                "entities": [
+                                                    {
+                                                        "type": "Instruction",
+                                                        "name": "MAC",
+                                                        "properties": {
+                                                            "opcode": "0011 0110",
+                                                            "cycle_count": 1,
+                                                        },
+                                                    },
+                                                    {
+                                                        "type": "Register",
+                                                        "name": "ACC",
+                                                        "properties": {"width": 32},
+                                                    },
+                                                    {
+                                                        "type": "Interrupt",
+                                                        "name": "ADC_INT",
+                                                        "properties": {
+                                                            "vector_address": "0x000D40"
+                                                        },
+                                                    },
+                                                ],
+                                                "relationships": [
+                                                    {
+                                                        "type": "INSTRUCTION_READS_REGISTER",
+                                                        "from": "MAC",
+                                                        "to": "ACC",
+                                                        "from_type": "Instruction",
+                                                        "to_type": "Register",
+                                                    },
+                                                    {
+                                                        "type": "INTERRUPT_TRIGGERS",
+                                                        "from": "ADC_INT",
+                                                        "to": "MAC",
+                                                        "from_type": "Interrupt",
+                                                        "to_type": "Instruction",
+                                                    },
+                                                ],
+                                                "image_descriptions": [],
+                                            }
+                                        )
+                                    }
+                                }
+                            ]
+                        }
+                    },
+                }
+            )
+        return results
+
+    def submit_embedding_batch(self, texts, **kwargs):
+        return [[1.0, 0.0, 0.0, 0.0] for _ in texts]
+
+    def close(self):
+        pass
+
+
+def test_stage3_ingest_arch_entities(patched_config, monkeypatch):
+    """Pipeline 应正确过滤并入库新增的处理器架构实体."""
+    _mock_external_clients(monkeypatch)
+    # 覆盖 BatchClient 为返回架构实体的版本
+    monkeypatch.setattr(
+        "core.doc_graph_pipeline.BatchClient",
+        ArchFakeBatchClient,
+    )
+
+    pdf = patched_config / "test.pdf"
+    _make_pdf(pdf, ["## Instruction Set\n\nMAC and ADC_INT description."])
+
+    pipe = DocGraphPipeline()
+    doc_id, parsed_dir, text, images = pipe.stage1_parse(str(pdf))
+    jsonl_path, _batches, _requests = pipe.stage2_build_jsonl(doc_id)
+
+    result_doc_id = pipe.stage3_ingest(
+        file_path=str(pdf),
+        doc_id=doc_id,
+        parsed_output_dir=parsed_dir,
+        extracted_text=text,
+        bigmodel_images=images,
+        jsonl_path=jsonl_path,
+    )
+    assert result_doc_id == doc_id
+
+    # 验证图谱中包含新实体
+    assert pipe.graph.get_entity("Instruction", "MAC") is not None
+    assert pipe.graph.get_entity("Register", "ACC") is not None
+    assert pipe.graph.get_entity("Interrupt", "ADC_INT") is not None
+
+    # 验证跨层级关系已建立
+    mac_neighbors = pipe.graph.get_neighbors("Instruction", "MAC", direction="out")
+    names = {n.name for n, _, _ in mac_neighbors}
+    assert "ACC" in names
+
+    adc_neighbors = pipe.graph.get_neighbors("Interrupt", "ADC_INT", direction="out")
+    names = {n.name for n, _, _ in adc_neighbors}
+    assert "MAC" in names
+
+    # 验证 chunk metadata 中缓存了提取的实体
+    db = KnowledgeDB()
+    chunks = db.query_by_doc(doc_id)
+    assert len(chunks) > 0
+    cached_entities = chunks[0].metadata.get("extracted_entities", [])
+    cached_types = {e.get("type") for e in cached_entities}
+    assert "Instruction" in cached_types
+    assert "Interrupt" in cached_types

@@ -38,6 +38,16 @@
 - **属性索引**：内部维护 `property_index: dict[(entity_type, key, value), set[nid]]`，`find_by_property()` 从 O(N) 降至 O(1)
 - **关系过滤**：`find_path()` 支持按 `rel_types` 集合过滤；`get_neighbors()` 支持按 `rel_type` 单种关系类型过滤
 
+**Schema 扩展策略**：
+- 实体类型和关系类型以 Python 常量定义（`ALL_NODE_TYPES`/`ALL_REL_TYPES`），新增类型只需在 `graph_store.py` 中追加常量并加入集合，无需修改数据库 schema 或 pipeline 核心逻辑
+- pipeline 通过 `e.get("type") in ALL_NODE_TYPES` 和 `r.get("type") in ALL_REL_TYPES` 过滤 LLM 输出，schema 扩展对 pipeline 完全透明
+- 提示词文件 `entity_extraction_system.txt` 独立维护实体/关系定义，修改后无需重启即可生效
+
+**跨层级查询设计（ISA ↔ RTL）**：
+- 处理器架构实体（Instruction、PipelineStage、Interrupt 等）与 RTL 实体（Module、Register、Signal 等）共存于同一图谱中
+- 通过跨层级关系（如 `MODULE_IMPLEMENTS_INSTRUCTION`、`INSTRUCTION_READS_REGISTER`）桥接 ISA 描述与 RTL 实现，支持从指令追踪到模块、从寄存器追踪到流水线阶段的联合查询
+- NetworkX 的子图查询（`get_subgraph`）和路径搜索（`find_path`）天然支持跨层级遍历，无需额外索引
+
 **权衡**：
 - 内存存储，单图规模受限于可用内存（当前目标文档为几十到几百页，远未触及瓶颈）
 - 不支持并发写入（当前为单用户本地部署，不成为问题）
