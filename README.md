@@ -46,21 +46,21 @@ flowchart TB
     G --> H[entities + relationships + image_descriptions]
     H --> I[GraphStore 图谱]
     H --> J[_save_chunks_to_db]
-    J --> K[BigModelBatchClient 向量化]
+    J --> K[BatchClient 向量化]
     K --> L[SQLite + FAISS]
     I --> M[图谱 JSON 持久化]
 ```
 
 **数据流说明：**
 
-1. `BigModelParserClient` 调用 BigModel Expert API 解析 PDF，输出 Markdown 文本（含 `![alt](images/xxx.jpg)` 图片引用）+ `images/` 目录
+1. `BigModelParserClient` 调用 **BigModel 专用** Expert API 解析 PDF，输出 Markdown 文本（含 `![alt](images/xxx.jpg)` 图片引用）+ `images/` 目录（⚠️ 该 API 非 OpenAI-compatible，仅支持 BigModel 厂商；失败时自动 fallback 到本地 `PDFParser`）
 2. `ChapterParser.parse_tree()` 将 Markdown 文本解析为树形章节结构（`#` 为文档标题/书名，`##` 为章节，`###` 为子章节）
 3. `BatchBuilder.build_batches()` 以 `##` 为硬边界（不跨章节合并）、`###` 为基本 chunk 单位（内容较短时可合并）构建 batch 列表
 4. `EntityExtractor` 对每个 batch 的文本流式解析 Markdown 图片引用，按原文出现顺序构建 multimodal content（文本 → `[image_id: alt]` → base64 图片），提交到 Kimi Batch API
 5. LLM 返回 JSON，包含 `entities`、`relationships`、`image_descriptions`
-6. `GraphStore`（NetworkX）构建实体关系图谱，**同名同类型实体自动去重合并**。每个文档保存独立子图 `graphs/{doc_id}.json`，同时增量合并到全局图 `graphs/global.json`，实现**跨文档知识互通**
+6. `GraphStore`（NetworkX）构建实体关系图谱，**同名同类型实体自动去重合并**。每个文档保存独立子图 `graphs/{doc_id}.json`；`KnowledgeBaseService.ingest_document()` 完成后**全量重建**全局图 `graphs/global.json`（`clear()` + 遍历所有子图重新加载），确保无幽灵残留，实现**跨文档知识互通**。合并时同时保存每个文档的原始属性快照到 `doc_properties[doc_id]`，支持按文档精确查询
 7. 增量更新：以 `chapter_title` 为键比对 `content_hash`，未变章节直接复用缓存的 `extracted_entities`/`extracted_relations`/`embedding`，仅对变更/新增章节重新提取和向量化
-8. `_save_chunks_to_db()` 清理旧 chunks/向量、插入新 chunks、合并 `image_descriptions` 到 content，通过 `BigModelBatchClient` 批量向量化（未配置时降级到同步 `EmbeddingClient`），写入 SQLite + FAISS
+8. `_save_chunks_to_db()` 清理旧 chunks/向量、插入新 chunks、合并 `image_descriptions` 到 content，通过 `BatchClient` 批量向量化（未配置时降级到同步 `EmbeddingClient`），写入 SQLite + FAISS
 
 ### 输入文档约束
 
@@ -91,7 +91,7 @@ work-docs-library/
 │   ├── core/                     # 业务逻辑层
 │   │   ├── config.py             # 配置中心
 │   │   ├── doc_graph_pipeline.py # ⭐ DocGraphPipeline 主管道
-│   │   ├── batch_clients.py      # KimiBatchClient + BigModelBatchClient
+│   │   ├── batch_clients.py      # BaseBatchClient + BatchClient（通用，服务商无感）
 │   │   ├── llm_chat_client.py    # LLM 对话客户端（辅助用途）
 │   │   ├── embedding_client.py   # Embedding 客户端（辅助用途）
 │   │   ├── bigmodel_parser_client.py  # BigModel Expert 文件解析
@@ -105,13 +105,12 @@ work-docs-library/
 │   │   ├── pdf_parser.py         # PDF 本地解析器（fallback，输出与 BigModel 一致）
 │   │   ├── office_parser.py      # DOCX / XLSX 解析器（代码存在，尚未接入 pipeline）
 │   │   └── image_utils.py        # 图片压缩工具
-│   └── tests/                    # pytest 测试集（193 个用例）
+│   └── tests/                    # pytest 测试集（216 个用例）
 ├── knowledge_base/               # 运行时自动生成：数据库、FAISS 索引、解析输出
 │   ├── workdocs.db
 │   ├── faiss.index
 │   ├── id_map.json
 │   └── parsed/<doc_id>/          # BigModel Expert 解析输出
-├── auto_batches/                 # 运行时输出目录（保留）
 ├── venv/                         # Python 虚拟环境
 └── .gitignore
 ```
@@ -263,7 +262,7 @@ Kimi CLI 通过 `plugin.json` 注册以下工具：
 | `WORKDOCS_EMBEDDING_BASE_URL` | `https://open.bigmodel.cn/api/paas/v4` | BigModel Base URL |
 | `WORKDOCS_EMBEDDING_MODEL` | `embedding-3` | 向量化模型 |
 | `WORKDOCS_EMBEDDING_DIMENSION` | `1024` | 向量维度 |
-| `WORKDOCS_BIGMODEL_API_KEY` | 空 | BigModel Expert 解析 API Key |
+| `WORKDOCS_PARSER_API_KEY` | 空 | BigModel Expert 解析 API Key（⚠️ 仅用于 PDF 解析，为 BigModel 专有接口，非 OpenAI-compatible） |
 | `WORKDOCS_LLM_BATCH_MAX_CHARS` | `10000` | 每个 batch 最大文本字符数 |
 | `WORKDOCS_LLM_BATCH_TIMEOUT` | `3600` | Batch API 轮询超时（秒） |
 | `WORKDOCS_EMBED_BATCH_MAX_CHARS` | `4000` | 向量化 chunk 最大字符数 |
@@ -278,8 +277,8 @@ Kimi CLI 通过 `plugin.json` 注册以下工具：
 | 模块 | 职责 |
 |------|------|
 | `core/doc_graph_pipeline.py` | ⭐ **DocGraphPipeline**：主管道，涵盖解析 → 章节树 → batch 构建 → multimodal 实体提取 → 图谱 → 向量化 |
-| `core/bigmodel_parser_client.py` | BigModel Expert 文件解析客户端 |
-| `core/batch_clients.py` | KimiBatchClient + BigModelBatchClient + BaseBatchClient（含并行批处理） |
+| `core/bigmodel_parser_client.py` | BigModel Expert 文件解析客户端（⚠️ BigModel 专用 API） |
+| `core/batch_clients.py` | BaseBatchClient + BatchClient（通用 OpenAI-compatible Batch API，含并行批处理） |
 
 ### 数据模型与存储
 | 模块 | 职责 |
@@ -356,7 +355,7 @@ cd /path/to/work-docs-library
 PYTHONPATH=scripts ./venv/bin/python -m pytest scripts/tests/ -v
 ```
 
-**当前状态：193 个测试全部通过。**
+**当前状态：216 个测试全部通过。**
 
 ### 常用测试文档
 
@@ -369,7 +368,7 @@ PYTHONPATH=scripts ./venv/bin/python -m pytest scripts/tests/ -v
 
 ```bash
 # .env 中配置
-WORKDOCS_BIGMODEL_API_KEY=your-api-key
+WORKDOCS_PARSER_API_KEY=your-api-key
 ```
 
 **API 说明**：
@@ -416,6 +415,8 @@ WORKDOCS_BIGMODEL_API_KEY=your-api-key
 6. **图片压缩**：`LLM_VISION_MAX_EDGE`（默认 1024）和 `LLM_VISION_QUALITY`（默认 85）控制 base64 图片大小
 7. **NetworkX 内存上限**：全局图为内存存储，数百个文档 × 万页级时可能达到 GB 级。当前单机目标规模可接受，预留 Neo4j 迁移接口
 8. **输入文档约束**：Markdown 图片引用 `![name](images/path.jpg)` 中的 `name` 将作为 `image_id`，建议填写有意义的名称
+9. **PDF 解析依赖 BigModel 专用 API**：文档提取主路径使用 BigModel 专有 Expert API（`/files/parser/create`），非 OpenAI-compatible，无法直接切换至其他厂商。若 BigModel 不可用，可依赖本地 `PDFParser`（PyMuPDF）作为 fallback，输出格式与 BigModel 完全一致，但解析质量可能略有差异
+10. **跨产品外设变体**：同一个外设/寄存器出现在多个产品手册中时，`doc_properties` 保存每个文档的原始属性快照，全局图的 `properties` 仍为合并后值。查询时通过 `doc_id` 参数获取指定产品的精确属性。产品型号通过启发式正则从文档标题/文件名自动提取，支持 `WORKDOCS_PRODUCT_NAME` 手动覆盖
 
 ---
 
