@@ -150,7 +150,7 @@ cp scripts/.env.example scripts/.env
 
 本项目以 **Kimi Code CLI Plugin** 形式运行，通过 Kimi CLI 的命令行界面调用工具。
 
-### 1. 导入文档
+### 1. 导入文档（完整流程）
 
 ```bash
 # 在 Kimi CLI 中执行
@@ -164,25 +164,45 @@ cp scripts/.env.example scripts/.env
 4. 构建知识图谱并持久化
 5. 向量化后写入 SQLite + FAISS
 
-### 2. 语义搜索
+### 2. 分阶段导入（支持人工干预）
+
+当 PDF 解析后的 Markdown 需要手动调整时，可使用三阶段流程：
+
+```bash
+# 阶段1: PDF → Markdown
+/doc_parse path/to/document.pdf
+# 输出: doc_id=xxx, parsed_dir=knowledge_base/parsed/xxx/
+# 用户可手动编辑 knowledge_base/parsed/xxx/result.md
+
+# 阶段2: Markdown → Batch JSONL
+/doc_build_batches xxx
+# 输出: jsonl=knowledge_base/batch/xxx.jsonl, batch_count=23
+# 可审查 JSONL 内容
+
+# 阶段3: JSONL → API → 入库
+/doc_submit_batches xxx
+# 输出: 文档已入库完成
+```
+
+### 3. 语义搜索
 
 ```bash
 /search AH bus arbitration
 ```
 
-### 3. 按章节查询
+### 4. 按章节查询
 
 ```bash
 /query --doc-id <DOC_HASH> --chapter "System Architecture"
 ```
 
-### 4. 查看已导入文档
+### 5. 查看已导入文档
 
 ```bash
 /status
 ```
 
-### 5. 图谱查询
+### 6. 图谱查询
 
 图谱数据以 JSON 格式持久化，可直接读取：
 
@@ -207,7 +227,10 @@ Kimi CLI 通过 `plugin.json` 注册以下工具：
 
 | 工具名 | 作用 |
 |--------|------|
-| `ingest` | 提取并存储文档（PDF） |
+| `ingest` | 提取并存储文档（PDF），完整流程一次性执行 |
+| `doc_parse` | 阶段1：PDF → Markdown + 图片（可手动调整） |
+| `doc_build_batches` | 阶段2：Markdown → Batch JSONL（本地生成，不调用 API） |
+| `doc_submit_batches` | 阶段3：JSONL → API → 实体提取 → 向量化 → 入库 |
 | `search` | 基于 FAISS 的语义向量搜索 |
 | `query` | 按章节、关键词、概念查询 chunk |
 | `status` | 列出所有已导入文档 |
