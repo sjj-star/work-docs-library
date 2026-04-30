@@ -16,21 +16,18 @@ logger = logging.getLogger(__name__)
 class BaseLLMClient:
     """LLM 对话客户端基类."""
 
-    # 类常量 - Magic Number 提取
-    MAX_RETRY_ATTEMPTS = 3
-    RETRY_BACKOFF_BASE = 2
-    DEFAULT_TIMEOUT = 120
-    THINKING_BUDGET = 1024
+    # 类常量 - 从 Config 读取，保留属性供测试覆盖
+    MAX_RETRY_ATTEMPTS = Config.LLM_MAX_RETRIES
+    RETRY_BACKOFF_BASE = Config.LLM_RETRY_BACKOFF
+    DEFAULT_TIMEOUT = Config.LLM_TIMEOUT
 
     def __init__(
         self,
-        provider: str | None = None,
         api_key: str | None = None,
         base_url: str | None = None,
         model: str | None = None,
     ) -> None:
         """初始化 BaseLLMClient."""
-        self.provider = (provider or Config.LLM_PROVIDER).lower()
         self.api_key = api_key or Config.LLM_API_KEY
         self.base_url = base_url or Config.LLM_BASE_URL
         self.model = model or Config.LLM_MODEL
@@ -39,16 +36,10 @@ class BaseLLMClient:
         if not self.api_key:
             raise RuntimeError("LLM API key not configured. Set WORKDOCS_LLM_API_KEY in .env")
 
-        if self.provider == "openai":
-            base = self.base_url or "https://api.openai.com/v1"
-        elif self.provider == "kimi":
-            base = self.base_url or "https://api.moonshot.cn/v1"
-        else:
-            base = self.base_url
-
-        self.chat_url = f"{base}/chat/completions"
+        # 完全由 base_url 决定，不做服务商推断
+        self.chat_url = f"{self.base_url}/chat/completions"
         # embed_url 保留以兼容 LLMClient 多重继承
-        self.embed_url = f"{base}/embeddings"
+        self.embed_url = f"{self.base_url}/embeddings"
 
         # 使用线程本地存储，确保多线程并发时每个线程有独立的 Session
         self._local = threading.local()
@@ -87,22 +78,11 @@ class BaseLLMClient:
 
     def chat(self, messages: list[dict], temperature: float = 0.3, **kwargs) -> str:
         """基础对话功能."""
-        data = {"model": self.model, "messages": messages}
+        data = {"model": self.model, "messages": messages, "temperature": temperature}
 
-        # 特殊处理 Kimi 模型限制
-        if self.provider == "kimi" and self.model.startswith("kimi"):
-            data["temperature"] = 1.0
-        else:
-            data["temperature"] = temperature
-
-        # 添加思考模式支持
+        # 添加思考模式支持（OpenAI 兼容格式）
         if self.thinking_enabled and "extra_body" not in kwargs:
-            if self.provider == "kimi":
-                kwargs["extra_body"] = {"thinking": {"type": "enabled"}}
-            else:
-                kwargs["extra_body"] = {
-                    "thinking": {"type": "enabled", "budget": self.THINKING_BUDGET}
-                }
+            kwargs["extra_body"] = {"thinking": {"type": "enabled"}}
 
         # 合并额外参数
         data.update(kwargs)

@@ -55,7 +55,9 @@ def _resolve_config(env_name: str, json_path: str = "", default: str = "") -> st
                 data = data.get(key, {})
             else:
                 break
-        if isinstance(data, (str, int, float, bool)):
+        if data is None:
+            pass  # null 视为未配置，继续回退
+        elif isinstance(data, (str, int, float, bool)):
             val = str(data)
             if val:  # 空字符串视为未配置，继续回退
                 return val
@@ -101,8 +103,6 @@ class Config:
             return default
 
     # LLM 对话模型配置（总结用）
-    # LLM 对话模型配置（总结用）
-    LLM_PROVIDER: str = _resolve_config("WORKDOCS_LLM_PROVIDER", "llm.provider", "kimi")
     LLM_API_KEY: str = _resolve_config("WORKDOCS_LLM_API_KEY", "llm.api_key", "")
     LLM_BASE_URL: str = _resolve_config(
         "WORKDOCS_LLM_BASE_URL", "llm.endpoint", "https://api.moonshot.cn/v1"
@@ -113,19 +113,18 @@ class Config:
     )
 
     # Embedding 模型配置（向量化用）- 完全独立
-    EMBEDDING_PROVIDER: str = _resolve_config(
-        "WORKDOCS_EMBEDDING_PROVIDER", "embedding.provider", "bigmodel"
-    )
     EMBEDDING_API_KEY: str = _resolve_config("WORKDOCS_EMBEDDING_API_KEY", "embedding.api_key", "")
     EMBEDDING_BASE_URL: str = _resolve_config(
-        "WORKDOCS_EMBEDDING_BASE_URL", "embedding.endpoint", "https://open.bigmodel.cn/api/paas/v4"
+        "WORKDOCS_EMBEDDING_BASE_URL",
+        "embedding.endpoint",
+        "https://open.bigmodel.cn/api/paas/v4",
     )
     EMBEDDING_MODEL: str = _resolve_config(
         "WORKDOCS_EMBEDDING_MODEL", "embedding.model", "embedding-3"
     )
 
-    # BigModel (智谱) 文件解析配置
-    BIGMODEL_API_KEY: str = _resolve_config("WORKDOCS_BIGMODEL_API_KEY", "bigmodel.api_key", "")
+    # 文件解析配置
+    PARSER_API_KEY: str = _resolve_config("WORKDOCS_PARSER_API_KEY", "parser.api_key", "")
 
     # 嵌入向量维度配置
     EMBEDDING_DIMENSION: int = 0  # 将在下方初始化
@@ -136,21 +135,169 @@ class Config:
     # 向量化 chunk 最大字符数（独立配置，embedding 模型上下文通常较短）
     EMBED_BATCH_MAX_CHARS: int = 0  # 将在下方初始化
 
+    # --- API Endpoint 配置（服务商无感化） ---
+    LLM_BATCH_ENDPOINT: str = _resolve_config(
+        "WORKDOCS_LLM_BATCH_ENDPOINT", "llm.batch_endpoint", "/v1/chat/completions"
+    )
+    EMBEDDING_BATCH_ENDPOINT: str = _resolve_config(
+        "WORKDOCS_EMBEDDING_BATCH_ENDPOINT",
+        "embedding.batch_endpoint",
+        "/v4/embeddings",
+    )
+    LLM_BATCH_COMPLETION_WINDOW: str = _resolve_config(
+        "WORKDOCS_LLM_BATCH_COMPLETION_WINDOW",
+        "llm.completion_window",
+        "24h",
+    )
+    BATCH_FILE_DOWNLOAD_TEMPLATE: str = _resolve_config(
+        "WORKDOCS_BATCH_FILE_DOWNLOAD_TEMPLATE",
+        "batch.download_template",
+        "{base_url}/files/{file_id}/content",
+    )
+
+    # --- Batch 轮询/超时参数 ---
+    BATCH_POLL_INTERVAL: int = 0  # 将在下方初始化
+    BATCH_MAX_POLL_RETRIES: int = 0  # 将在下方初始化
+    BATCH_MAX_FILE_SIZE_MB: int = 0  # 将在下方初始化
+    BATCH_PARALLEL_WORKERS: int = 0  # 将在下方初始化
+
+    # --- Embedding 客户端参数 ---
+    EMBED_MAX_RETRIES: int = 0  # 将在下方初始化
+    EMBED_RETRY_BACKOFF: int = 0  # 将在下方初始化
+    EMBED_TIMEOUT: int = 0  # 将在下方初始化
+    EMBED_MAX_BATCH_SIZE: int = 0  # 将在下方初始化
+
+    # --- LLM 客户端参数 ---
+    LLM_MAX_RETRIES: int = 0  # 将在下方初始化
+    LLM_RETRY_BACKOFF: int = 0  # 将在下方初始化
+    LLM_TIMEOUT: int = 0  # 将在下方初始化
+    # --- 文件解析参数 ---
+    PARSER_TIMEOUT: int = 0  # 将在下方初始化
+    PARSER_MAX_RETRIES: int = 0  # 将在下方初始化
+    PARSER_POLL_INTERVAL: int = 0  # 将在下方初始化
+
+    # --- Plugin 默认值 ---
+    PLUGIN_SEARCH_TOP_K: int = 0  # 将在下方初始化
+    PLUGIN_QUERY_TOP_K: int = 0  # 将在下方初始化
+    PLUGIN_GRAPH_MAX_DEPTH: int = 0  # 将在下方初始化
+    PLUGIN_SUBGRAPH_DEPTH: int = 0  # 将在下方初始化
+    PLUGIN_DEFAULT_LIMIT: int = 0  # 将在下方初始化
+
+    # --- Pipeline 业务常量 ---
+    DEFAULT_CHUNK_LEVEL: int = 0  # 将在下方初始化
+    DEFAULT_SUMMARY_LENGTH: int = 0  # 将在下方初始化
+    CHAPTER_TITLE_MAX_LEN: int = 0  # 将在下方初始化
+    CHAPTER_TITLE_MIN_LEN: int = 0  # 将在下方初始化
+    GRAPH_MAX_PATH_DEPTH: int = 0  # 将在下方初始化
+
+    # --- 目录配置 ---
+    BATCH_TEMP_DIR: str = _resolve_config("WORKDOCS_BATCH_TEMP_DIR", "batch.temp_dir", "batch_temp")
+    GRAPH_OUTPUT_DIR: str = _resolve_config(
+        "WORKDOCS_GRAPH_OUTPUT_DIR", "graph.output_dir", "graphs"
+    )
+
     @classmethod
     def _initialize_numeric_configs(cls):
         """初始化数值类型的配置（在类定义后调用）."""
         cls.EMBEDDING_DIMENSION = int(
             _resolve_config("WORKDOCS_EMBEDDING_DIMENSION", "embedding.dimension", "1024")
         )
-        cls.LLM_BATCH_MAX_CHARS = int(_resolve_config("WORKDOCS_LLM_BATCH_MAX_CHARS", "", "10000"))
-        cls.LLM_BATCH_TIMEOUT = int(_resolve_config("WORKDOCS_LLM_BATCH_TIMEOUT", "", "3600"))
+        cls.LLM_BATCH_MAX_CHARS = int(
+            _resolve_config("WORKDOCS_LLM_BATCH_MAX_CHARS", "llm.batch_max_chars", "10000")
+        )
+        cls.LLM_BATCH_TIMEOUT = int(
+            _resolve_config("WORKDOCS_LLM_BATCH_TIMEOUT", "llm.batch_timeout", "3600")
+        )
         cls.EMBED_BATCH_MAX_CHARS = int(
-            _resolve_config("WORKDOCS_EMBED_BATCH_MAX_CHARS", "", "4000")
+            _resolve_config("WORKDOCS_EMBED_BATCH_MAX_CHARS", "embedding.batch_max_chars", "4000")
         )
         cls.BATCH_SIZE = int(_resolve_config("WORKDOCS_BATCH_SIZE", "batch_size", "4"))
         # Vision 图片配置（LLM multimodal batch）
-        cls.LLM_VISION_MAX_EDGE = int(_resolve_config("WORKDOCS_LLM_VISION_MAX_EDGE", "", "1024"))
-        cls.LLM_VISION_QUALITY = int(_resolve_config("WORKDOCS_LLM_VISION_QUALITY", "", "85"))
+        cls.LLM_VISION_MAX_EDGE = int(
+            _resolve_config("WORKDOCS_LLM_VISION_MAX_EDGE", "llm.vision_max_edge", "1024")
+        )
+        cls.LLM_VISION_QUALITY = int(
+            _resolve_config("WORKDOCS_LLM_VISION_QUALITY", "llm.vision_quality", "85")
+        )
+
+        # Batch 轮询/超时
+        cls.BATCH_POLL_INTERVAL = int(
+            _resolve_config("WORKDOCS_BATCH_POLL_INTERVAL", "batch.poll_interval", "10")
+        )
+        cls.BATCH_MAX_POLL_RETRIES = int(
+            _resolve_config("WORKDOCS_BATCH_MAX_POLL_RETRIES", "batch.max_poll_retries", "360")
+        )
+        cls.BATCH_MAX_FILE_SIZE_MB = int(
+            _resolve_config("WORKDOCS_BATCH_MAX_FILE_SIZE_MB", "batch.max_file_size_mb", "100")
+        )
+        cls.BATCH_PARALLEL_WORKERS = int(
+            _resolve_config("WORKDOCS_BATCH_PARALLEL_WORKERS", "batch.parallel_workers", "4")
+        )
+
+        # Embedding 客户端
+        cls.EMBED_MAX_RETRIES = int(
+            _resolve_config("WORKDOCS_EMBED_MAX_RETRIES", "embedding.max_retries", "3")
+        )
+        cls.EMBED_RETRY_BACKOFF = int(
+            _resolve_config("WORKDOCS_EMBED_RETRY_BACKOFF", "embedding.retry_backoff", "2")
+        )
+        cls.EMBED_TIMEOUT = int(
+            _resolve_config("WORKDOCS_EMBED_TIMEOUT", "embedding.timeout", "120")
+        )
+        cls.EMBED_MAX_BATCH_SIZE = int(
+            _resolve_config("WORKDOCS_EMBED_MAX_BATCH_SIZE", "embedding.max_batch_size", "100")
+        )
+
+        # LLM 客户端
+        cls.LLM_MAX_RETRIES = int(
+            _resolve_config("WORKDOCS_LLM_MAX_RETRIES", "llm.max_retries", "3")
+        )
+        cls.LLM_RETRY_BACKOFF = int(
+            _resolve_config("WORKDOCS_LLM_RETRY_BACKOFF", "llm.retry_backoff", "2")
+        )
+        cls.LLM_TIMEOUT = int(_resolve_config("WORKDOCS_LLM_TIMEOUT", "llm.timeout", "120"))
+        # 文件解析
+        cls.PARSER_TIMEOUT = int(_resolve_config("WORKDOCS_PARSER_TIMEOUT", "parser.timeout", "60"))
+        cls.PARSER_MAX_RETRIES = int(
+            _resolve_config("WORKDOCS_PARSER_MAX_RETRIES", "parser.max_retries", "60")
+        )
+        cls.PARSER_POLL_INTERVAL = int(
+            _resolve_config("WORKDOCS_PARSER_POLL_INTERVAL", "parser.poll_interval", "3")
+        )
+
+        # Plugin 默认值
+        cls.PLUGIN_SEARCH_TOP_K = int(
+            _resolve_config("WORKDOCS_PLUGIN_SEARCH_TOP_K", "plugin.search_top_k", "5")
+        )
+        cls.PLUGIN_QUERY_TOP_K = int(
+            _resolve_config("WORKDOCS_PLUGIN_QUERY_TOP_K", "plugin.query_top_k", "10")
+        )
+        cls.PLUGIN_GRAPH_MAX_DEPTH = int(
+            _resolve_config("WORKDOCS_PLUGIN_GRAPH_MAX_DEPTH", "plugin.graph_max_depth", "3")
+        )
+        cls.PLUGIN_SUBGRAPH_DEPTH = int(
+            _resolve_config("WORKDOCS_PLUGIN_SUBGRAPH_DEPTH", "plugin.subgraph_depth", "1")
+        )
+        cls.PLUGIN_DEFAULT_LIMIT = int(
+            _resolve_config("WORKDOCS_PLUGIN_DEFAULT_LIMIT", "plugin.default_limit", "100")
+        )
+
+        # Pipeline 业务常量
+        cls.DEFAULT_CHUNK_LEVEL = int(
+            _resolve_config("WORKDOCS_DEFAULT_CHUNK_LEVEL", "pipeline.chunk_level", "3")
+        )
+        cls.DEFAULT_SUMMARY_LENGTH = int(
+            _resolve_config("WORKDOCS_DEFAULT_SUMMARY_LENGTH", "pipeline.summary_length", "200")
+        )
+        cls.CHAPTER_TITLE_MAX_LEN = int(
+            _resolve_config("WORKDOCS_CHAPTER_TITLE_MAX_LEN", "pipeline.title_max_len", "100")
+        )
+        cls.CHAPTER_TITLE_MIN_LEN = int(
+            _resolve_config("WORKDOCS_CHAPTER_TITLE_MIN_LEN", "pipeline.title_min_len", "2")
+        )
+        cls.GRAPH_MAX_PATH_DEPTH = int(
+            _resolve_config("WORKDOCS_GRAPH_MAX_PATH_DEPTH", "graph.max_path_depth", "6")
+        )
 
     @classmethod
     def llm_configured(cls) -> bool:
