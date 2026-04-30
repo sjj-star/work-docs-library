@@ -617,11 +617,18 @@ class EntityExtractor:
         return requests
 
     def extract_from_batches(self, batches, image_base_dir=None, doc_id="", doc_context=""):
-        """extract_from_batches 函数."""
+        """从 batches 构建 requests 并提交 Batch API 提取实体."""
         if not self.batch_client or not batches:
             return [], [], []
         image_base_dir = image_base_dir or Path()
         requests = self._build_batch_requests(batches, image_base_dir, doc_context)
+        return self.extract_from_requests(requests, batches, doc_id)
+
+    def extract_from_requests(self, requests, batches, doc_id=""):
+        """从已构建的 requests 列表提交 Batch API 提取实体（不重新构建 requests）."""
+        if not self.batch_client or not requests:
+            return [], [], []
+
         logger.info(f"提交 Batch 请求 | requests={len(requests)}")
         try:
             results = self.batch_client.submit_parallel_batches(requests)
@@ -780,55 +787,30 @@ class DocGraphPipeline:
 
         return ingested
 
-    def _process_one(
-        self,
-        file_path: str,
-        dry_run: bool = False,
-        force: bool = False,
-    ) -> str | None:
-        """处理单个文档."""
-        # 确保每个文档使用干净的局部图谱
-        if hasattr(self.graph, "clear"):
-            self.graph.clear()
+    # ------------------------------------------------------------------
+    # 三阶段拆分方法
+    # ------------------------------------------------------------------
+
+    def stage1_parse(self, file_path: str) -> tuple[str, Path, str, list[Path]]:
+        """阶段1: PDF → Markdown + images.
+
+        Returns:
+            (doc_id, parsed_output_dir, extracted_text, image_paths)
+        """
         suffix = Path(file_path).suffix.lower()
         parser = self.parsers.get(suffix)
         if not parser:
-            logger.warning(f"不支持的文件格式 | file={file_path}")
-            return None
+            raise ValueError(f"不支持的文件格式 | file={file_path}")
 
-        # 计算文档 ID
         file_hash = hashlib.md5(Path(file_path).read_bytes()).hexdigest()
         doc_id = file_hash[:16]
+        parsed_output_dir = Config.DB_PATH.parent / "parsed" / doc_id
+        parsed_output_dir.mkdir(parents=True, exist_ok=True)
 
-        # 检查是否需要重新处理
-        if not force:
-            existing = self.db.get_document_by_path(file_path)
-            if existing and existing.file_hash == file_hash and existing.status == "done":
-                logger.info(f"跳过未变更文档 | file={file_path} | doc_id={doc_id}")
-                return existing.doc_id
-
-        # dry-run：只返回文档信息
-        if dry_run:
-            logger.info(f"Dry-run | file={file_path}")
-            return doc_id
-
-        logger.info(f"开始处理文档 | file={file_path} | doc_id={doc_id}")
-        self.db.update_document_status(doc_id, DocumentStatus.PROCESSING)
-
-        # 获取 PDF 实际页数
-        pdf_page_count = 0
-        if suffix == ".pdf":
-            try:
-                with fitz.open(str(file_path)) as doc:
-                    pdf_page_count = len(doc)
-            except Exception as e:
-                logger.warning(f"获取 PDF 页数失败 | error={e}")
-
-        # --- Step 1: BigModel Expert 解析（主路径）---
         extracted_text = ""
         bigmodel_images: list[Path] = []
-        parsed_output_dir = Config.DB_PATH.parent / "parsed" / doc_id
 
+        # BigModel Expert 解析（主路径）
         if self.parser_client and suffix == ".pdf":
             try:
                 extracted_text, bigmodel_images = self.parser_client.parse_pdf(
@@ -843,7 +825,7 @@ class DocGraphPipeline:
             except Exception as e:
                 logger.error(f"BigModel 解析失败 | error={e}，回退到本地解析")
 
-        # BigModel 失败时回退到本地解析
+        # 回退到本地解析
         if not extracted_text:
             extracted_text, local_images = parser.parse(file_path, output_dir=parsed_output_dir)
             bigmodel_images = local_images
@@ -851,14 +833,36 @@ class DocGraphPipeline:
                 f"本地解析回退 | length={len(extracted_text)} chars | images={len(local_images)}"
             )
 
-        # --- Step 2: 章节解析（树形结构）---
+        # 保存 result.md（与 BigModel 输出格式一致）
+        result_md_path = parsed_output_dir / "result.md"
+        result_md_path.write_text(extracted_text, encoding="utf-8")
+        logger.info(f"result.md 已保存 | path={result_md_path} | chars={len(extracted_text)}")
+
+        return doc_id, parsed_output_dir, extracted_text, bigmodel_images
+
+    def stage2_build_jsonl(
+        self,
+        doc_id: str,
+        max_chars: int | None = None,
+    ) -> tuple[Path, list[list[dict[str, str]]], list[dict[str, Any]]]:
+        """阶段2: Markdown → Batch JSONL.
+
+        从 knowledge_base/parsed/{doc_id}/result.md 读取，
+        生成 JSONL 到 knowledge_base/batch/{doc_id}.jsonl。
+
+        Returns:
+            (jsonl_path, batches, requests)
+        """
+        parsed_output_dir = Config.DB_PATH.parent / "parsed" / doc_id
+        result_md_path = parsed_output_dir / "result.md"
+        if not result_md_path.exists():
+            raise FileNotFoundError(f"result.md 不存在 | path={result_md_path}")
+
+        extracted_text = result_md_path.read_text(encoding="utf-8")
         tree_chapters = self.chapter_parser.parse_tree(extracted_text)
         logger.info(f"章节解析完成 | roots={len(tree_chapters)}")
 
-        # --- Step 3: 图片整理（仅统计数量，不记录坐标）---
-        logger.info(f"图片整理完成 | images={len(bigmodel_images)}")
-
-        # 扁平化章节列表（用于 chunk 存储和向量化）
+        # 扁平化章节列表
         new_chapters_flat: list[dict[str, Any]] = []
         for root in tree_chapters:
             if root.children:
@@ -867,14 +871,108 @@ class DocGraphPipeline:
             else:
                 new_chapters_flat.append({"title": root.title, "content": root.content})
 
-        # --- Step 5: Batch 构建与增量分析 ---
-        # 读取旧 chunks（用于增量更新）
+        # 构建 batch（全部章节，不做增量过滤）
+        process_nodes = [
+            ChapterNode(level=1, title=ch["title"], content=ch["content"])
+            for ch in new_chapters_flat
+        ]
+        max_chars = max_chars or Config.LLM_BATCH_MAX_CHARS
+        batches = (
+            BatchBuilder.build_batches(process_nodes, max_chars)
+            if process_nodes
+            else []
+        )
+        logger.info(f"Batch 构建完成 | batches={len(batches)}")
+
+        # 构建 doc_context
+        doc_title = tree_chapters[0].title if tree_chapters else ""
+        product_name = _extract_product_name(extracted_text, "") or ""
+        doc_context_parts = []
+        if doc_title:
+            doc_context_parts.append(f"文档《{doc_title}》")
+        if product_name:
+            doc_context_parts.append(f"产品型号 {product_name}")
+        doc_context = ""
+        if doc_context_parts:
+            doc_context = "以下章节来自 " + "，".join(doc_context_parts) + "。\n\n---\n"
+
+        # 构建 requests
+        requests = self.entity_extractor._build_batch_requests(
+            batches=batches,
+            image_base_dir=parsed_output_dir,
+            doc_context=doc_context,
+        )
+        logger.info(f"Requests 构建完成 | requests={len(requests)}")
+
+        # 保存 JSONL
+        batch_dir = Config.DB_PATH.parent / "batch"
+        batch_dir.mkdir(parents=True, exist_ok=True)
+        jsonl_path = batch_dir / f"{doc_id}.jsonl"
+        from core.batch_clients import _build_jsonl
+
+        _build_jsonl(requests, jsonl_path)
+        logger.info(f"JSONL 已生成 | path={jsonl_path} | requests={len(requests)}")
+
+        return jsonl_path, batches, requests
+
+    def stage3_ingest(
+        self,
+        file_path: str,
+        doc_id: str,
+        parsed_output_dir: Path,
+        extracted_text: str,
+        bigmodel_images: list[Path],
+        jsonl_path: Path | None = None,
+        force: bool = False,
+    ) -> str:
+        """阶段3: JSONL → API → 实体提取 → 向量化 → 入库.
+
+        若 jsonl_path 为 None，默认读取 knowledge_base/batch/{doc_id}.jsonl。
+        """
+        # 确保每个文档使用干净的局部图谱
+        if hasattr(self.graph, "clear"):
+            self.graph.clear()
+
+        file_hash = hashlib.md5(Path(file_path).read_bytes()).hexdigest()
+        suffix = Path(file_path).suffix.lower()
+
+        # 检查是否需要重新处理
+        if not force:
+            existing = self.db.get_document_by_path(file_path)
+            if existing and existing.file_hash == file_hash and existing.status == "done":
+                logger.info(f"跳过未变更文档 | file={file_path} | doc_id={doc_id}")
+                return existing.doc_id
+
+        logger.info(f"开始阶段3入库 | file={file_path} | doc_id={doc_id}")
+        self.db.update_document_status(doc_id, DocumentStatus.PROCESSING)
+
+        # 获取 PDF 实际页数
+        pdf_page_count = 0
+        if suffix == ".pdf":
+            try:
+                with fitz.open(str(file_path)) as doc:
+                    pdf_page_count = len(doc)
+            except Exception as e:
+                logger.warning(f"获取 PDF 页数失败 | error={e}")
+
+        # 章节解析
+        tree_chapters = self.chapter_parser.parse_tree(extracted_text)
+
+        # 扁平化章节列表
+        new_chapters_flat: list[dict[str, Any]] = []
+        for root in tree_chapters:
+            if root.children:
+                for child in root.children:
+                    new_chapters_flat.append({"title": child.title, "content": child.content})
+            else:
+                new_chapters_flat.append({"title": root.title, "content": root.content})
+
+        # --- 增量分析 ---
         old_doc = self.db.get_document_by_path(file_path)
         old_chunks: list[Chunk] = []
         if old_doc:
             old_chunks = self.db.query_by_doc(old_doc.doc_id)
 
-        # 按 content_hash 分类章节
         old_chunk_map = {ck.chapter_title: ck for ck in old_chunks}
         unchanged_chapters: list[tuple[dict[str, Any], Chunk]] = []
         changed_chapters: list[dict[str, Any]] = []
@@ -913,14 +1011,13 @@ class DocGraphPipeline:
             if process_nodes
             else []
         )
-        logger.info(f"Batch 构建完成 | batches={len(batches)} | 增量模式")
 
-        # --- Step 6: 实体提取（LLM Batch API）---
+        # --- 实体提取 ---
         all_entities: list[GraphEntity] = []
         all_relations: list[GraphRelation] = []
         all_image_descriptions: list[dict[str, Any]] = []
 
-        # 6a: 复用未变章节的实体缓存
+        # 复用未变章节的实体缓存
         for ch, old_ck in unchanged_chapters:
             cached_ents = old_ck.metadata.get("extracted_entities", [])
             cached_rels = old_ck.metadata.get("extracted_relations", [])
@@ -949,26 +1046,38 @@ class DocGraphPipeline:
                 )
             all_image_descriptions.extend(cached_imgs)
 
-        # 构建文档上下文（用于 LLM batch 请求的前缀提示）
-        doc_title = tree_chapters[0].title if tree_chapters else ""
-        product_name = _extract_product_name(extracted_text, file_path) or ""
-        doc_context_parts = []
-        if doc_title:
-            doc_context_parts.append(f"文档《{doc_title}》")
-        if product_name:
-            doc_context_parts.append(f"产品型号 {product_name}")
-        doc_context = ""
-        if doc_context_parts:
-            doc_context = "以下章节来自 " + "，".join(doc_context_parts) + "。\n\n---\n"
-
-        # 6b: 从变更/新增章节提取（LLM Batch API，multimodal：文本 + 图片流式处理）
+        # 从 JSONL 或重新构建 requests，提交 API
         if self.llm_batch and batches:
-            ents, rels, img_descs = self.entity_extractor.extract_from_batches(
-                batches=batches,
-                image_base_dir=parsed_output_dir,
-                doc_id=doc_id,
-                doc_context=doc_context,
-            )
+            if jsonl_path and jsonl_path.exists():
+                # 从 JSONL 读取 requests
+                from core.batch_clients import _parse_jsonl
+
+                requests = _parse_jsonl(jsonl_path.read_text(encoding="utf-8"))
+                logger.info(f"从 JSONL 读取 requests | path={jsonl_path} | count={len(requests)}")
+                ents, rels, img_descs = self.entity_extractor.extract_from_requests(
+                    requests=requests,
+                    batches=batches,
+                    doc_id=doc_id,
+                )
+            else:
+                # 重新构建 requests 并提交
+                doc_title = tree_chapters[0].title if tree_chapters else ""
+                product_name = _extract_product_name(extracted_text, file_path) or ""
+                doc_context_parts = []
+                if doc_title:
+                    doc_context_parts.append(f"文档《{doc_title}》")
+                if product_name:
+                    doc_context_parts.append(f"产品型号 {product_name}")
+                doc_context = ""
+                if doc_context_parts:
+                    doc_context = "以下章节来自 " + "，".join(doc_context_parts) + "。\n\n---\n"
+
+                ents, rels, img_descs = self.entity_extractor.extract_from_batches(
+                    batches=batches,
+                    image_base_dir=parsed_output_dir,
+                    doc_id=doc_id,
+                    doc_context=doc_context,
+                )
             all_entities.extend(ents)
             all_relations.extend(rels)
             all_image_descriptions.extend(img_descs)
@@ -978,13 +1087,11 @@ class DocGraphPipeline:
             f"relations={len(all_relations)} | image_descs={len(all_image_descriptions)}"
         )
 
-        # --- Step 6: 构建图谱 ---
-        # 去重：同名同类型的实体只保留一个（合并 properties）
+        # --- 构建图谱 ---
         entity_map: dict[str, GraphEntity] = {}
         for e in all_entities:
             key = f"{e.entity_type}::{e.name}"
             if key in entity_map:
-                # 合并 properties
                 entity_map[key].properties.update(e.properties)
             else:
                 entity_map[key] = e
@@ -995,7 +1102,7 @@ class DocGraphPipeline:
         for r in all_relations:
             self.graph.add_relation(r)
 
-        # --- Step 6c: 提取产品型号并建立 Product-Module 关系 ---
+        # 提取产品型号并建立 Product-Module 关系
         product_name = _extract_product_name(extracted_text, file_path)
         if product_name:
             product_entity = GraphEntity(
@@ -1021,7 +1128,7 @@ class DocGraphPipeline:
                 f"modules={len({e.name for e in all_entities if e.entity_type == 'Module'})}"
             )
 
-        # --- Step 7: 保存 chunks 到 SQLite（增量模式，保留向量检索能力）---
+        # --- 保存 chunks → SQLite → 向量化 ---
         self._save_chunks_to_db(
             doc_id,
             file_path,
@@ -1037,13 +1144,13 @@ class DocGraphPipeline:
             all_relations,
         )
 
-        # --- Step 8: 持久化图谱 ---
+        # --- 持久化图谱 ---
         graph_path = Config.DB_PATH.parent / Config.GRAPH_OUTPUT_DIR / f"{doc_id}.json"
         graph_path.parent.mkdir(parents=True, exist_ok=True)
         self.graph.save(graph_path)
         logger.info(f"图谱已保存 | path={graph_path} | {self.graph.stats()}")
 
-        # 如果 doc_id 变化（文件内容变了），删除旧图谱文件避免幽灵数据
+        # 删除旧图谱文件
         if old_doc and old_doc.doc_id != doc_id:
             old_graph_path = (
                 Config.DB_PATH.parent / Config.GRAPH_OUTPUT_DIR / f"{old_doc.doc_id}.json"
@@ -1052,7 +1159,7 @@ class DocGraphPipeline:
                 old_graph_path.unlink()
                 logger.info(f"已删除旧图谱文件 | {old_graph_path}")
 
-        # --- Step 9: 更新文档状态 ---
+        # --- 更新文档状态 ---
         self.db.upsert_document(
             Document(
                 doc_id=doc_id,
@@ -1065,7 +1172,7 @@ class DocGraphPipeline:
             )
         )
 
-        # 为没有 summary 的 chunk 生成默认 summary
+        # 生成默认 summary
         chunks = self.db.query_by_doc(doc_id)
         for ck in chunks:
             if not ck.summary:
@@ -1076,8 +1183,36 @@ class DocGraphPipeline:
                 )
                 self.db.update_chunk_summary(ck.id, default_summary)
 
-        logger.info(f"文档处理完成 | doc_id={doc_id} | mode=DOC_GRAPH_FLOW")
+        logger.info(f"文档入库完成 | doc_id={doc_id}")
         return doc_id
+
+    def _process_one(
+        self,
+        file_path: str,
+        dry_run: bool = False,
+        force: bool = False,
+    ) -> str | None:
+        """处理单个文档（完整流程，兼容入口）."""
+        if dry_run:
+            file_hash = hashlib.md5(Path(file_path).read_bytes()).hexdigest()
+            return file_hash[:16]
+
+        # 阶段1: PDF → Markdown
+        doc_id, parsed_output_dir, extracted_text, bigmodel_images = self.stage1_parse(file_path)
+
+        # 阶段2: Markdown → JSONL
+        jsonl_path, batches, requests = self.stage2_build_jsonl(doc_id)
+
+        # 阶段3: JSONL → API → 入库
+        return self.stage3_ingest(
+            file_path=file_path,
+            doc_id=doc_id,
+            parsed_output_dir=parsed_output_dir,
+            extracted_text=extracted_text,
+            bigmodel_images=bigmodel_images,
+            jsonl_path=jsonl_path,
+            force=force,
+        )
 
     def _save_chunks_to_db(
         self,
