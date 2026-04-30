@@ -13,6 +13,8 @@
 - ResetDomain: 复位域
 - MemoryMap: 内存映射区域或地址空间
 - TestCase: 测试用例
+- Parameter: 参数化配置项（如模块的可配置参数、宏定义、常量等）
+- Product: 芯片产品型号（如 TMS320F28379D、TMS320F280049C）
 
 ## 关系类型（必须严格使用以下类型之一）
 

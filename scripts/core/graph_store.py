@@ -6,6 +6,7 @@
 
 import json
 import logging
+import threading
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -13,6 +14,8 @@ from pathlib import Path
 from typing import Any
 
 import networkx as nx
+
+from .config import Config
 
 logger = logging.getLogger(__name__)
 
@@ -44,6 +47,8 @@ NODE_CLOCK_DOMAIN = "ClockDomain"
 NODE_RESET_DOMAIN = "ResetDomain"
 NODE_MEMORY_MAP = "MemoryMap"
 NODE_TEST_CASE = "TestCase"
+NODE_PARAMETER = "Parameter"
+NODE_PRODUCT = "Product"
 
 ALL_NODE_TYPES = {
     NODE_FEATURE,
@@ -57,6 +62,8 @@ ALL_NODE_TYPES = {
     NODE_RESET_DOMAIN,
     NODE_MEMORY_MAP,
     NODE_TEST_CASE,
+    NODE_PARAMETER,
+    NODE_PRODUCT,
 }
 
 # 关系类型
@@ -121,6 +128,7 @@ class GraphEntity:
     entity_type: str
     name: str
     properties: dict[str, Any] = field(default_factory=dict)
+    doc_properties: dict[str, dict[str, Any]] = field(default_factory=dict)
     source_doc_ids: set[str] = field(default_factory=set)
     source_chapter: str = ""
     confidence: float = 1.0
@@ -135,6 +143,7 @@ class GraphEntity:
             "type": self.entity_type,
             "name": self.name,
             "properties": self.properties,
+            "doc_properties": self.doc_properties,
             "source_doc_ids": sorted(list(self.source_doc_ids)),
             "source_chapter": self.source_chapter,
             "confidence": self.confidence,
@@ -151,6 +160,7 @@ class GraphEntity:
             entity_type=d.get("type", ""),
             name=d.get("name", ""),
             properties=d.get("properties", {}),
+            doc_properties=d.get("doc_properties", {}),
             source_doc_ids=_normalize_sids(d.get("source_doc_ids", [])),
             source_chapter=d.get("source_chapter", ""),
             confidence=d.get("confidence", 1.0),
@@ -171,7 +181,9 @@ class GraphRelation:
     from_type: str = ""
     to_type: str = ""
     properties: dict[str, Any] = field(default_factory=dict)
+    doc_properties: dict[str, dict[str, Any]] = field(default_factory=dict)
     source_doc_ids: set[str] = field(default_factory=set)
+    source_chapter: str = ""
     confidence: float = 1.0
     verified: bool = False
     created_at: str = ""
@@ -187,7 +199,9 @@ class GraphRelation:
             "from_type": self.from_type,
             "to_type": self.to_type,
             "properties": self.properties,
+            "doc_properties": self.doc_properties,
             "source_doc_ids": sorted(list(self.source_doc_ids)),
+            "source_chapter": self.source_chapter,
             "confidence": self.confidence,
             "verified": self.verified,
             "created_at": self.created_at,
@@ -205,7 +219,9 @@ class GraphRelation:
             from_type=d.get("from_type", ""),
             to_type=d.get("to_type", ""),
             properties=d.get("properties", {}),
+            doc_properties=d.get("doc_properties", {}),
             source_doc_ids=_normalize_sids(d.get("source_doc_ids", [])),
+            source_chapter=d.get("source_chapter", ""),
             confidence=d.get("confidence", 1.0),
             verified=d.get("verified", False),
             created_at=d.get("created_at", ""),
@@ -389,6 +405,7 @@ class GraphStore(ABC):
         properties: dict[str, Any] | None = None,
         confidence: float | None = None,
         verified: bool | None = None,
+        feedback_score: int | None = None,
     ) -> bool:
         """更新关系属性.
 
@@ -436,6 +453,7 @@ class NetworkXGraphStore(GraphStore):
         self._g = nx.DiGraph()
         # 属性索引: {(entity_type, key, value): {nid, ...}}
         self._property_index: dict[tuple[str, str, Any], set[str]] = {}
+        self._lock = threading.Lock()
         logger.info("NetworkX 图谱存储已初始化")
 
     # -- 内部辅助 --
@@ -453,6 +471,7 @@ class NetworkXGraphStore(GraphStore):
             entity_type=data.get("entity_type", ""),
             name=data.get("name", nid),
             properties=data.get("properties", {}),
+            doc_properties=data.get("doc_properties", {}),
             source_doc_ids=_normalize_sids(data.get("source_doc_ids", set())),
             source_chapter=data.get("source_chapter", ""),
             confidence=data.get("confidence", 1.0),
@@ -473,6 +492,7 @@ class NetworkXGraphStore(GraphStore):
             from_type=u_type,
             to_type=v_type,
             properties=data.get("properties", {}),
+            doc_properties=data.get("doc_properties", {}),
             source_doc_ids=_normalize_sids(data.get("source_doc_ids", set())),
             confidence=data.get("confidence", 1.0),
             verified=data.get("verified", False),
@@ -502,9 +522,15 @@ class NetworkXGraphStore(GraphStore):
 
     def add_entity(self, entity: GraphEntity) -> list[dict]:
         """add_entity 函数. 返回冲突日志列表."""
+        with self._lock:
+            return self._add_entity_unsafe(entity)
+
+    def _add_entity_unsafe(self, entity: GraphEntity) -> list[dict]:
+        """无锁的 add_entity 实现（调用方必须持有 _lock）."""
         nid = self._node_id(entity.entity_type, entity.name)
         conflicts: list[dict] = []
         now = _now_iso()
+        doc_id = next(iter(entity.source_doc_ids), "") if entity.source_doc_ids else ""
         if nid in self._g:
             existing = self._g.nodes[nid]
             # 先移除旧属性索引
@@ -522,6 +548,7 @@ class NetworkXGraphStore(GraphStore):
                             "old_value": merged_props[k],
                             "new_value": v,
                             "timestamp": now,
+                            "doc_id": doc_id,
                         }
                     )
                 merged_props[k] = v
@@ -533,16 +560,23 @@ class NetworkXGraphStore(GraphStore):
             existing_sids.update(entity.source_doc_ids)
             existing["source_doc_ids"] = existing_sids
             existing["source_chapter"] = entity.source_chapter or existing.get("source_chapter", "")
+            # 保存文档级属性快照
+            existing_doc_props = existing.get("doc_properties", {})
+            if doc_id:
+                existing_doc_props[doc_id] = dict(entity.properties)
+            existing["doc_properties"] = existing_doc_props
             # 更新元数据（取最小 confidence，保持 verified 为 True）
             existing["confidence"] = min(existing.get("confidence", 1.0), entity.confidence)
             existing["verified"] = existing.get("verified", False) or entity.verified
             existing["updated_at"] = now
         else:
+            doc_props = {doc_id: dict(entity.properties)} if doc_id else {}
             self._g.add_node(
                 nid,
                 entity_type=entity.entity_type,
                 name=entity.name,
                 properties=entity.properties,
+                doc_properties=doc_props,
                 source_doc_ids=set(entity.source_doc_ids),
                 source_chapter=entity.source_chapter,
                 confidence=entity.confidence,
@@ -588,10 +622,16 @@ class NetworkXGraphStore(GraphStore):
 
     def add_relation(self, relation: GraphRelation) -> list[dict]:
         """add_relation 函数. 返回冲突日志列表."""
+        with self._lock:
+            return self._add_relation_unsafe(relation)
+
+    def _add_relation_unsafe(self, relation: GraphRelation) -> list[dict]:
+        """无锁的 add_relation 实现（调用方必须持有 _lock）."""
         from_nid = self._node_id(relation.from_type or "", relation.from_name)
         to_nid = self._node_id(relation.to_type or "", relation.to_name)
         conflicts: list[dict] = []
         now = _now_iso()
+        doc_id = next(iter(relation.source_doc_ids), "") if relation.source_doc_ids else ""
 
         # 确保节点存在（自动创建空节点）
         if from_nid not in self._g:
@@ -637,6 +677,7 @@ class NetworkXGraphStore(GraphStore):
                             "old_value": merged_props[k],
                             "new_value": v,
                             "timestamp": now,
+                            "doc_id": doc_id,
                         }
                     )
                 merged_props[k] = v
@@ -644,15 +685,22 @@ class NetworkXGraphStore(GraphStore):
             existing_sids = _normalize_sids(existing.get("source_doc_ids", set()))
             existing_sids.update(relation.source_doc_ids)
             existing["source_doc_ids"] = existing_sids
+            # 保存文档级属性快照
+            existing_doc_props = existing.get("doc_properties", {})
+            if doc_id:
+                existing_doc_props[doc_id] = dict(relation.properties)
+            existing["doc_properties"] = existing_doc_props
             existing["confidence"] = min(existing.get("confidence", 1.0), relation.confidence)
             existing["verified"] = existing.get("verified", False) or relation.verified
             existing["updated_at"] = now
         else:
+            doc_props = {doc_id: dict(relation.properties)} if doc_id else {}
             self._g.add_edge(
                 from_nid,
                 to_nid,
                 rel_type=relation.rel_type,
                 properties=relation.properties,
+                doc_properties=doc_props,
                 source_doc_ids=set(relation.source_doc_ids),
                 confidence=relation.confidence,
                 verified=relation.verified,
@@ -749,6 +797,11 @@ class NetworkXGraphStore(GraphStore):
 
     def save(self, path: Path) -> None:
         """使用 node-link 格式导出为 JSON."""
+        with self._lock:
+            self._save_unsafe(path)
+
+    def _save_unsafe(self, path: Path) -> None:
+        """无锁的 save 实现（调用方必须持有 _lock）."""
         path = Path(path)
         path.parent.mkdir(parents=True, exist_ok=True)
         data = nx.node_link_data(self._g, edges="edges")
@@ -763,41 +816,43 @@ class NetworkXGraphStore(GraphStore):
                 edge["source_doc_ids"] = sorted(list(sids))
         with open(path, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
-        logger.info(
-            f"图谱已保存 | nodes={self._g.number_of_nodes()} | "
-            f"edges={self._g.number_of_edges()} | path={path}"
-        )
+            logger.info(
+                f"图谱已保存 | nodes={self._g.number_of_nodes()} | "
+                f"edges={self._g.number_of_edges()} | path={path}"
+            )
 
     def load(self, path: Path) -> None:
         """从 node-link JSON 加载."""
-        with open(path, encoding="utf-8") as f:
-            data = json.load(f)
-        self._g = nx.node_link_graph(data, edges="edges")
-        # 反序列化后将 list 转回 set
-        for nid in self._g.nodes():
-            sids = self._g.nodes[nid].get("source_doc_ids", [])
-            if isinstance(sids, list):
-                self._g.nodes[nid]["source_doc_ids"] = set(sids)
-        for u, v in self._g.edges():
-            sids = self._g.edges[u, v].get("source_doc_ids", [])
-            if isinstance(sids, list):
-                self._g.edges[u, v]["source_doc_ids"] = set(sids)
-        # 重建属性索引
-        self._property_index.clear()
-        for nid, data in self._g.nodes(data=True):
-            et = data.get("entity_type", "")
-            props = data.get("properties", {})
-            self._add_to_property_index(nid, et, props)
-        logger.info(
-            f"图谱已加载 | nodes={self._g.number_of_nodes()} | "
-            f"edges={self._g.number_of_edges()} | path={path}"
-        )
+        with self._lock:
+            with open(path, encoding="utf-8") as f:
+                data = json.load(f)
+            self._g = nx.node_link_graph(data, edges="edges")
+            # 反序列化后将 list 转回 set
+            for nid in self._g.nodes():
+                sids = self._g.nodes[nid].get("source_doc_ids", [])
+                if isinstance(sids, list):
+                    self._g.nodes[nid]["source_doc_ids"] = set(sids)
+            for u, v in self._g.edges():
+                sids = self._g.edges[u, v].get("source_doc_ids", [])
+                if isinstance(sids, list):
+                    self._g.edges[u, v]["source_doc_ids"] = set(sids)
+            # 重建属性索引
+            self._property_index.clear()
+            for nid, data in self._g.nodes(data=True):
+                et = data.get("entity_type", "")
+                props = data.get("properties", {})
+                self._add_to_property_index(nid, et, props)
+            logger.info(
+                f"图谱已加载 | nodes={self._g.number_of_nodes()} | "
+                f"edges={self._g.number_of_edges()} | path={path}"
+            )
 
     def clear(self) -> None:
         """Clear 函数."""
-        self._g.clear()
-        self._property_index.clear()
-        logger.info("图谱已清空")
+        with self._lock:
+            self._g.clear()
+            self._property_index.clear()
+            logger.info("图谱已清空")
 
     def stats(self) -> dict[str, int]:
         """Stats 函数."""
@@ -808,6 +863,11 @@ class NetworkXGraphStore(GraphStore):
 
     def remove_document_contributions(self, doc_id: str) -> None:
         """从全局图中移除指定文档贡献的节点和边."""
+        with self._lock:
+            self._remove_document_contributions_unsafe(doc_id)
+
+    def _remove_document_contributions_unsafe(self, doc_id: str) -> None:
+        """无锁的 remove_document_contributions 实现（调用方必须持有 _lock）."""
         if not doc_id:
             return
 
@@ -844,6 +904,11 @@ class NetworkXGraphStore(GraphStore):
 
     def remove_chapter_contributions(self, doc_id: str, chapter_title: str) -> None:
         """从全局图中移除指定文档指定章节的实体贡献（关联边一并移除）."""
+        with self._lock:
+            self._remove_chapter_contributions_unsafe(doc_id, chapter_title)
+
+    def _remove_chapter_contributions_unsafe(self, doc_id: str, chapter_title: str) -> None:
+        """无锁的 remove_chapter_contributions 实现（调用方必须持有 _lock）."""
         if not doc_id or not chapter_title:
             return
 
@@ -880,8 +945,8 @@ class NetworkXGraphStore(GraphStore):
         if from_nid not in self._g or to_nid not in self._g:
             return []
 
-        # 限制 max_depth 防止爆炸（默认 3，最大 6）
-        max_depth = min(max(max_depth, 1), 6)
+        # 限制 max_depth 防止爆炸
+        max_depth = min(max(max_depth, 1), Config.GRAPH_MAX_PATH_DEPTH)
 
         # BFS 收集所有简单路径（不重复节点），限制深度，支持关系过滤
         def _bfs_paths(start: str, target: str, max_d: int) -> list[list[str]]:
@@ -929,6 +994,21 @@ class NetworkXGraphStore(GraphStore):
         feedback_score: int | None = None,
     ) -> bool:
         """更新实体属性."""
+        with self._lock:
+            return self._update_entity_unsafe(
+                entity_type, name, properties, confidence, verified, feedback_score
+            )
+
+    def _update_entity_unsafe(
+        self,
+        entity_type: str,
+        name: str,
+        properties: dict[str, Any] | None = None,
+        confidence: float | None = None,
+        verified: bool | None = None,
+        feedback_score: int | None = None,
+    ) -> bool:
+        """无锁的 update_entity 实现（调用方必须持有 _lock）."""
         nid = self._node_id(entity_type, name)
         if nid not in self._g:
             return False
@@ -949,6 +1029,11 @@ class NetworkXGraphStore(GraphStore):
 
     def delete_entity(self, entity_type: str, name: str) -> bool:
         """删除实体（级联删除关联边）."""
+        with self._lock:
+            return self._delete_entity_unsafe(entity_type, name)
+
+    def _delete_entity_unsafe(self, entity_type: str, name: str) -> bool:
+        """无锁的 delete_entity 实现（调用方必须持有 _lock）."""
         nid = self._node_id(entity_type, name)
         if nid not in self._g:
             return False
@@ -968,8 +1053,35 @@ class NetworkXGraphStore(GraphStore):
         properties: dict[str, Any] | None = None,
         confidence: float | None = None,
         verified: bool | None = None,
+        feedback_score: int | None = None,
     ) -> bool:
         """更新关系属性."""
+        with self._lock:
+            return self._update_relation_unsafe(
+                from_type,
+                from_name,
+                to_type,
+                to_name,
+                rel_type,
+                properties,
+                confidence,
+                verified,
+                feedback_score,
+            )
+
+    def _update_relation_unsafe(
+        self,
+        from_type: str,
+        from_name: str,
+        to_type: str,
+        to_name: str,
+        rel_type: str,
+        properties: dict[str, Any] | None = None,
+        confidence: float | None = None,
+        verified: bool | None = None,
+        feedback_score: int | None = None,
+    ) -> bool:
+        """无锁的 update_relation 实现（调用方必须持有 _lock）."""
         from_nid = self._node_id(from_type, from_name)
         to_nid = self._node_id(to_type, to_name)
         if not self._g.has_edge(from_nid, to_nid):
@@ -984,6 +1096,8 @@ class NetworkXGraphStore(GraphStore):
             data["confidence"] = confidence
         if verified is not None:
             data["verified"] = verified
+        if feedback_score is not None:
+            data["feedback_score"] = feedback_score
         data["updated_at"] = now
         return True
 
@@ -996,6 +1110,18 @@ class NetworkXGraphStore(GraphStore):
         rel_type: str,
     ) -> bool:
         """删除关系."""
+        with self._lock:
+            return self._delete_relation_unsafe(from_type, from_name, to_type, to_name, rel_type)
+
+    def _delete_relation_unsafe(
+        self,
+        from_type: str,
+        from_name: str,
+        to_type: str,
+        to_name: str,
+        rel_type: str,
+    ) -> bool:
+        """无锁的 delete_relation 实现（调用方必须持有 _lock）."""
         from_nid = self._node_id(from_type, from_name)
         to_nid = self._node_id(to_type, to_name)
         if not self._g.has_edge(from_nid, to_nid):
@@ -1008,12 +1134,13 @@ class NetworkXGraphStore(GraphStore):
 
     def verify_entity(self, entity_type: str, name: str, verified: bool = True) -> bool:
         """标记实体验证状态."""
-        nid = self._node_id(entity_type, name)
-        if nid not in self._g:
-            return False
-        self._g.nodes[nid]["verified"] = verified
-        self._g.nodes[nid]["updated_at"] = _now_iso()
-        return True
+        with self._lock:
+            nid = self._node_id(entity_type, name)
+            if nid not in self._g:
+                return False
+            self._g.nodes[nid]["verified"] = verified
+            self._g.nodes[nid]["updated_at"] = _now_iso()
+            return True
 
 
 # ---------------------------------------------------------------------------
@@ -1034,6 +1161,7 @@ class SubGraphView:
             entity_type=data.get("entity_type", ""),
             name=data.get("name", nid),
             properties=data.get("properties", {}),
+            doc_properties=data.get("doc_properties", {}),
             source_doc_ids=_normalize_sids(data.get("source_doc_ids", set())),
             source_chapter=data.get("source_chapter", ""),
             confidence=data.get("confidence", 1.0),
@@ -1056,6 +1184,7 @@ class SubGraphView:
             from_type=u_type,
             to_type=v_type,
             properties=data.get("properties", {}),
+            doc_properties=data.get("doc_properties", {}),
             source_doc_ids=_normalize_sids(data.get("source_doc_ids", set())),
             confidence=data.get("confidence", 1.0),
             verified=data.get("verified", False),

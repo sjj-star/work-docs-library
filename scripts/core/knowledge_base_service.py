@@ -46,7 +46,7 @@ class KnowledgeBaseService:
 
     def _load_all_graphs(self) -> None:
         """加载所有已保存的文档图谱到全局内存图，实现跨文档实体互通."""
-        global_path = Config.DB_PATH.parent / "graphs" / "global.json"
+        global_path = Config.DB_PATH.parent / Config.GRAPH_OUTPUT_DIR / "global.json"
         if global_path.exists():
             try:
                 self.graph.load(global_path)
@@ -56,7 +56,7 @@ class KnowledgeBaseService:
                 logger.warning(f"加载全局图谱失败 | error={e}")
 
         # 兼容：如果没有 global.json，逐个加载文档子图
-        graphs_dir = Config.DB_PATH.parent / "graphs"
+        graphs_dir = Config.DB_PATH.parent / Config.GRAPH_OUTPUT_DIR
         if not graphs_dir.exists():
             return
         for path in sorted(graphs_dir.glob("*.json")):
@@ -173,7 +173,7 @@ class KnowledgeBaseService:
             if not result:
                 raise RuntimeError(f"Reprocess failed for {doc_id}")
             # 将重新处理后的图谱合并到全局图
-            graph_path = Config.DB_PATH.parent / "graphs" / f"{doc_id}.json"
+            graph_path = Config.DB_PATH.parent / Config.GRAPH_OUTPUT_DIR / f"{doc_id}.json"
             if graph_path.exists():
                 temp = NetworkXGraphStore()
                 temp.load(graph_path)
@@ -187,7 +187,7 @@ class KnowledgeBaseService:
     # Chunk 查询
     # ------------------------------------------------------------------
 
-    def search_semantic(self, text: str, top_k: int = 5) -> list[dict]:
+    def search_semantic(self, text: str, top_k: int = Config.PLUGIN_SEARCH_TOP_K) -> list[dict]:
         """语义向量搜索.
 
         Returns:
@@ -214,7 +214,7 @@ class KnowledgeBaseService:
         chapter_regex: str | None = None,
         keyword: str | None = None,
         concept: str | None = None,
-        top_k: int = 10,
+        top_k: int = Config.PLUGIN_QUERY_TOP_K,
     ) -> list[Chunk]:
         """统一 chunk 结构化查询.
 
@@ -309,26 +309,50 @@ class KnowledgeBaseService:
         """按类型和名称获取实体."""
         return self.graph.get_entity(entity_type, name)
 
+    @staticmethod
+    def _apply_doc_properties(entity: GraphEntity, doc_id: str | None) -> GraphEntity:
+        """如果指定了 doc_id，用 doc_properties 中的快照替换 properties."""
+        if doc_id and entity.doc_properties and doc_id in entity.doc_properties:
+            entity.properties = entity.doc_properties[doc_id]
+        return entity
+
+    @staticmethod
+    def _apply_doc_properties_to_relation(
+        relation: GraphRelation, doc_id: str | None
+    ) -> GraphRelation:
+        """如果指定了 doc_id，用 doc_properties 中的快照替换 properties."""
+        if doc_id and relation.doc_properties and doc_id in relation.doc_properties:
+            relation.properties = relation.doc_properties[doc_id]
+        return relation
+
     def find_entities(
         self,
         entity_type: str | None = None,
         name_pattern: str | None = None,
+        doc_id: str | None = None,
     ) -> list[GraphEntity]:
         """搜索实体.
 
         Args:
             entity_type: 精确匹配实体类型
             name_pattern: 名称子串匹配（大小写不敏感）
+            doc_id: 可选，指定文档 ID 以获取该文档中的原始属性快照
 
         Returns:
             匹配的实体列表
         """
+        results: list[GraphEntity]
         if entity_type and not name_pattern:
-            return self.graph.find_by_type(entity_type)
-        if name_pattern:
+            results = self.graph.find_by_type(entity_type)
+        elif name_pattern:
             types = {entity_type} if entity_type else None
-            return self.graph.search_entities(name_pattern, entity_types=types)
-        return self.graph.all_entities()
+            results = self.graph.search_entities(name_pattern, entity_types=types)
+        else:
+            results = self.graph.all_entities()
+        if doc_id:
+            for e in results:
+                self._apply_doc_properties(e, doc_id)
+        return results
 
     def get_neighbors(
         self,
@@ -336,9 +360,14 @@ class KnowledgeBaseService:
         name: str,
         rel_type: str | None = None,
         direction: str = "out",
+        doc_id: str | None = None,
     ) -> list[tuple[GraphEntity, str, dict]]:
         """获取实体的邻居节点."""
-        return self.graph.get_neighbors(entity_type, name, rel_type, direction)
+        results = self.graph.get_neighbors(entity_type, name, rel_type, direction)
+        if doc_id:
+            for i, (entity, rt, props) in enumerate(results):
+                self._apply_doc_properties(entity, doc_id)
+        return results
 
     def find_path(
         self,
@@ -346,7 +375,7 @@ class KnowledgeBaseService:
         from_name: str,
         to_type: str,
         to_name: str,
-        max_depth: int = 3,
+        max_depth: int = Config.PLUGIN_GRAPH_MAX_DEPTH,
     ) -> list[list[str]]:
         """查找两实体间的路径.
 
@@ -359,7 +388,7 @@ class KnowledgeBaseService:
         self,
         center_type: str,
         center_name: str,
-        depth: int = 1,
+        depth: int = Config.PLUGIN_SUBGRAPH_DEPTH,
         rel_types: set[str] | None = None,
     ) -> SubGraphView:
         """获取以某实体为中心的子图."""
@@ -457,7 +486,7 @@ class KnowledgeBaseService:
         self,
         entity_type: str | None = None,
         name: str | None = None,
-        limit: int = 100,
+        limit: int = Config.PLUGIN_DEFAULT_LIMIT,
     ) -> list[dict]:
         """查询冲突日志."""
         return self.db.query_conflict_logs(entity_type, name, limit)
@@ -467,8 +496,8 @@ class KnowledgeBaseService:
     def search_with_graph(
         self,
         text: str,
-        top_k: int = 5,
-        graph_depth: int = 1,
+        top_k: int = Config.PLUGIN_SEARCH_TOP_K,
+        graph_depth: int = Config.PLUGIN_SUBGRAPH_DEPTH,
     ) -> dict:
         """语义搜索 + 图谱联合查询.
 
@@ -534,8 +563,13 @@ class KnowledgeBaseService:
     def get_content_with_entities(
         self,
         chunk_db_id: int,
+        doc_id: str | None = None,
     ) -> dict:
         """获取 chunk 内容及其关联的图谱实体.
+
+        Args:
+            chunk_db_id: Chunk 数据库 ID
+            doc_id: 可选，指定文档 ID 以获取该文档中的原始属性快照
 
         Returns:
             {"chunk": Chunk, "entities": [GraphEntity,...], "relations": [GraphRelation,...]}
@@ -559,26 +593,21 @@ class KnowledgeBaseService:
                     # 查全局图获取最新状态
                     global_e = self.graph.get_entity(et, en)
                     if global_e:
+                        self._apply_doc_properties(global_e, doc_id)
                         entities.append(global_e)
 
-        for mr in chunk.metadata.get("extracted_relations", []):
-            rt = mr.get("type", "")
-            fn = mr.get("from", "")
-            tn = mr.get("to", "")
-            if rt and fn and tn:
-                # 尝试解析类型
-                ft = mr.get("from_type", "")
-                tt = mr.get("to_type", "")
-                relations.append(
-                    GraphRelation(
-                        rel_type=rt,
-                        from_name=fn,
-                        to_name=tn,
-                        from_type=ft,
-                        to_type=tt,
-                        properties=mr.get("properties", {}),
-                    )
-                )
+        # 从全局图查询关联关系的最新状态
+        entity_keys = {f"{e.entity_type}::{e.name}" for e in entities}
+        seen_rel: set[str] = set()
+        for rel in self.graph.all_relations():
+            from_key = f"{rel.from_type}::{rel.from_name}"
+            to_key = f"{rel.to_type}::{rel.to_name}"
+            if from_key in entity_keys or to_key in entity_keys:
+                rel_key = f"{from_key}--{rel.rel_type}--{to_key}"
+                if rel_key not in seen_rel:
+                    seen_rel.add(rel_key)
+                    self._apply_doc_properties_to_relation(rel, doc_id)
+                    relations.append(rel)
 
         return {"chunk": chunk, "entities": entities, "relations": relations}
 
@@ -619,7 +648,7 @@ class KnowledgeBaseService:
         self,
         entity_type: str | None = None,
         entity_name: str | None = None,
-        limit: int = 100,
+        limit: int = Config.PLUGIN_DEFAULT_LIMIT,
     ) -> list[dict]:
         """查询反馈."""
         return self.db.query_feedback(entity_type, entity_name, limit)

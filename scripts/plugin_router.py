@@ -60,6 +60,7 @@ def _entity_to_dict(e) -> dict:
         "type": e.entity_type,
         "name": e.name,
         "properties": e.properties,
+        "doc_properties": e.doc_properties,
         "source_doc_ids": sorted(list(e.source_doc_ids)),
         "source_chapter": e.source_chapter,
         "confidence": e.confidence,
@@ -122,7 +123,7 @@ def tool_search(params: dict) -> dict:
     text = params.get("text")
     if not text:
         return {"success": False, "error": "Missing required parameter: text"}
-    top_k = params.get("top_k", 5)
+    top_k = params.get("top_k", Config.PLUGIN_SEARCH_TOP_K)
 
     svc = _get_service()
     try:
@@ -143,7 +144,7 @@ def tool_query(params: dict) -> dict:
     chapter_regex = params.get("chapter_regex")
     keyword = params.get("keyword")
     concept = params.get("concept")
-    top_k = params.get("top_k", 10)
+    top_k = params.get("top_k", Config.PLUGIN_QUERY_TOP_K)
 
     svc = _get_service()
     try:
@@ -302,10 +303,12 @@ def tool_graph_query(params: dict) -> dict:
         entity_type: 实体类型（如 Module, Signal, Register）
         name: 精确名称匹配
         name_pattern: 名称模糊匹配（子串，大小写不敏感）
+        doc_id: 可选，指定文档 ID 以获取该文档中的原始属性快照
     """
     entity_type = params.get("entity_type")
     name = params.get("name")
     name_pattern = params.get("name_pattern")
+    doc_id = params.get("doc_id")
 
     svc = _get_service()
 
@@ -314,10 +317,12 @@ def tool_graph_query(params: dict) -> dict:
         entity = svc.get_entity(entity_type, name)
         if not entity:
             return {"success": True, "count": 0, "entities": []}
+        if doc_id:
+            svc._apply_doc_properties(entity, doc_id)
         return {"success": True, "count": 1, "entities": [_entity_to_dict(entity)]}
 
     # 搜索查询
-    entities = svc.find_entities(entity_type=entity_type, name_pattern=name_pattern)
+    entities = svc.find_entities(entity_type=entity_type, name_pattern=name_pattern, doc_id=doc_id)
     return {
         "success": True,
         "count": len(entities),
@@ -333,6 +338,7 @@ def tool_graph_neighbors(params: dict) -> dict:
         name: 实体名称
         rel_type: 关系类型过滤（可选）
         direction: 方向 out/in/both（默认 out）
+        doc_id: 可选，指定文档 ID 以获取该文档中的原始属性快照
     """
     entity_type = params.get("entity_type")
     name = params.get("name")
@@ -341,9 +347,10 @@ def tool_graph_neighbors(params: dict) -> dict:
 
     rel_type = params.get("rel_type")
     direction = params.get("direction", "out")
+    doc_id = params.get("doc_id")
 
     svc = _get_service()
-    neighbors = svc.get_neighbors(entity_type, name, rel_type, direction)
+    neighbors = svc.get_neighbors(entity_type, name, rel_type, direction, doc_id)
     return {
         "success": True,
         "center": {"type": entity_type, "name": name},
@@ -375,7 +382,7 @@ def tool_graph_path(params: dict) -> dict:
     if not all([from_type, from_name, to_type, to_name]):
         return {"success": False, "error": "Missing from/to entity parameters"}
 
-    max_depth = params.get("max_depth", 3)
+    max_depth = params.get("max_depth", Config.PLUGIN_GRAPH_MAX_DEPTH)
     svc = _get_service()
     paths = svc.find_path(str(from_type), str(from_name), str(to_type), str(to_name), max_depth)
 
@@ -407,7 +414,7 @@ def tool_graph_subgraph(params: dict) -> dict:
     if not center_type or not center_name:
         return {"success": False, "error": "Missing center_type or center_name"}
 
-    depth = params.get("depth", 1)
+    depth = params.get("depth", Config.PLUGIN_SUBGRAPH_DEPTH)
     rel_types = set(params.get("rel_types", [])) if params.get("rel_types") else None
 
     svc = _get_service()
@@ -618,8 +625,8 @@ def tool_graph_search_with_graph(params: dict) -> dict:
     text = params.get("text")
     if not text:
         return {"success": False, "error": "Missing required parameter: text"}
-    top_k = params.get("top_k", 5)
-    graph_depth = params.get("graph_depth", 1)
+    top_k = params.get("top_k", Config.PLUGIN_SEARCH_TOP_K)
+    graph_depth = params.get("graph_depth", Config.PLUGIN_SUBGRAPH_DEPTH)
 
     svc = _get_service()
     try:
@@ -641,14 +648,16 @@ def tool_graph_get_content_with_entities(params: dict) -> dict:
 
     参数:
         chunk_db_id: Chunk 数据库 ID
+        doc_id: 可选，指定文档 ID 以获取该文档中的原始属性快照
     """
     chunk_db_id = params.get("chunk_db_id")
     if chunk_db_id is None:
         return {"success": False, "error": "Missing required parameter: chunk_db_id"}
 
+    doc_id = params.get("doc_id")
     svc = _get_service()
     try:
-        result = svc.get_content_with_entities(int(chunk_db_id))
+        result = svc.get_content_with_entities(int(chunk_db_id), doc_id)
     except ValueError as e:
         return {"success": False, "error": str(e)}
 
@@ -704,7 +713,7 @@ def tool_graph_conflicts(params: dict) -> dict:
     logs = svc.get_conflict_logs(
         entity_type=params.get("entity_type"),
         name=params.get("name"),
-        limit=params.get("limit", 100),
+        limit=params.get("limit", Config.PLUGIN_DEFAULT_LIMIT),
     )
     return {"success": True, "count": len(logs), "logs": logs}
 
