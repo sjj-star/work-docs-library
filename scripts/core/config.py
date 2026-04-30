@@ -184,7 +184,6 @@ class Config:
     PLUGIN_DEFAULT_LIMIT: int = 0  # 将在下方初始化
 
     # --- Pipeline 业务常量 ---
-    DEFAULT_CHUNK_LEVEL: int = 0  # 将在下方初始化
     DEFAULT_SUMMARY_LENGTH: int = 0  # 将在下方初始化
     CHAPTER_TITLE_MAX_LEN: int = 0  # 将在下方初始化
     CHAPTER_TITLE_MIN_LEN: int = 0  # 将在下方初始化
@@ -283,9 +282,6 @@ class Config:
         )
 
         # Pipeline 业务常量
-        cls.DEFAULT_CHUNK_LEVEL = int(
-            _resolve_config("WORKDOCS_DEFAULT_CHUNK_LEVEL", "pipeline.chunk_level", "3")
-        )
         cls.DEFAULT_SUMMARY_LENGTH = int(
             _resolve_config("WORKDOCS_DEFAULT_SUMMARY_LENGTH", "pipeline.summary_length", "200")
         )

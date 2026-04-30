@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 from core.batch_clients import _build_jsonl, _parse_jsonl
 from core.config import Config
-from core.doc_graph_pipeline import BatchBuilder, ChapterParser, EntityExtractor
+from core.doc_graph_pipeline import BatchBuilder, ChapterNode, ChapterParser, EntityExtractor
 
 
 def _get_parsed_doc_dirs() -> list[Path]:
@@ -45,8 +45,13 @@ class TestParsedDocsToJsonl:
         tree = ChapterParser.parse_tree(text)
         assert len(tree) > 0, "parse_tree 应返回至少一个 root"
 
-        # 2. Batch 构建
-        batches = BatchBuilder.build_batches(tree, max_chars=Config.LLM_BATCH_MAX_CHARS)
+        # 2. 扁平化树并构建 Batch
+        flat_nodes = [
+            ChapterNode(level=1, title=ch["title"], content=ch["content"])
+            for root in tree
+            for ch in ChapterParser.collect_all_nodes(root)
+        ]
+        batches = BatchBuilder.build_batches(flat_nodes, max_chars=Config.LLM_BATCH_MAX_CHARS)
         assert len(batches) > 0, "应生成至少一个 batch"
 
         # 3. 验证每个 batch 内容非空（排除误识别的目录条目/代码噪声）

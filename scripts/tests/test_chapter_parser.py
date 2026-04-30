@@ -154,3 +154,109 @@ This is the real intro.
         """没有标题的文本应返回一个包含全部内容的章节."""
         flat = ChapterParser.parse_flat("Just some text.\n\nMore text.")
         assert len(flat) == 0
+
+
+class TestChapterParserParseTree:
+    """测试 ChapterParser.parse_tree 的树形结构和 preface 传播."""
+
+    def test_no_preface_propagation(self):
+        """去掉 preface 传播后，每个节点保留自己的 content."""
+        text = """# Title
+## Section 1
+section intro
+### Sub 1.1
+sub content
+"""
+        tree = ChapterParser.parse_tree(text)
+
+        def _collect_all_nodes(node, ancestors=None):
+            ancestors = ancestors or []
+            result = []
+            if node.content:
+                result.append(node)
+            for child in node.children:
+                result.extend(_collect_all_nodes(child, ancestors + [node.title]))
+            return result
+
+        all_nodes = []
+        for root in tree:
+            all_nodes.extend(_collect_all_nodes(root))
+
+        assert len(all_nodes) == 2
+        titles = [n.title for n in all_nodes]
+        assert "Section 1" in titles
+        assert "Sub 1.1" in titles
+
+        # Sub 1.1 只包含自己的 content
+        sub11 = next(n for n in all_nodes if n.title == "Sub 1.1")
+        assert sub11.content == "sub content"
+
+        # Section 1 保留自己的 content
+        sec1 = next(n for n in all_nodes if n.title == "Section 1")
+        assert sec1.content == "section intro"
+
+    def test_multiple_nodes_preserve_own_content(self):
+        """所有有 content 的节点应各自保留独立内容."""
+        text = """# Title
+## Section 1
+### Sub 1.1
+content 1
+### Sub 1.2
+content 2
+## Section 2
+content 3
+"""
+        tree = ChapterParser.parse_tree(text)
+
+        def _collect_all_nodes(node, ancestors=None):
+            ancestors = ancestors or []
+            result = []
+            if node.content:
+                result.append(node)
+            for child in node.children:
+                result.extend(_collect_all_nodes(child, ancestors + [node.title]))
+            return result
+
+        all_nodes = []
+        for root in tree:
+            all_nodes.extend(_collect_all_nodes(root))
+
+        assert len(all_nodes) == 3
+        titles = {n.title for n in all_nodes}
+        assert titles == {"Sub 1.1", "Sub 1.2", "Section 2"}
+
+        sub11 = next(n for n in all_nodes if n.title == "Sub 1.1")
+        assert sub11.content == "content 1"
+
+        sub12 = next(n for n in all_nodes if n.title == "Sub 1.2")
+        assert sub12.content == "content 2"
+
+        sec2 = next(n for n in all_nodes if n.title == "Section 2")
+        assert sec2.content == "content 3"
+
+    def test_no_children_node_keeps_content(self):
+        """没有子节点的节点应保持自身内容."""
+        text = """# Title
+## Section 1
+content 1
+## Section 2
+content 2
+"""
+        tree = ChapterParser.parse_tree(text)
+
+        def _collect_all_nodes(node, ancestors=None):
+            ancestors = ancestors or []
+            result = []
+            if node.content:
+                result.append(node)
+            for child in node.children:
+                result.extend(_collect_all_nodes(child, ancestors + [node.title]))
+            return result
+
+        all_nodes = []
+        for root in tree:
+            all_nodes.extend(_collect_all_nodes(root))
+
+        assert len(all_nodes) == 2
+        for n in all_nodes:
+            assert n.content != ""

@@ -469,6 +469,30 @@ def test_stage3_incremental_update(patched_config, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# 段落边界切分测试
+# ---------------------------------------------------------------------------
+
+
+def test_batch_builder_paragraph_split_no_period_cut(patched_config, monkeypatch):
+    """段落边界切分不应在编号句号处切开标题行."""
+    from core.doc_graph_pipeline import BatchBuilder, ChapterNode
+
+    text = "Table 6. SFO Library Routines\n\nThis is the description."
+    node = ChapterNode(level=1, title="Test", content=text)
+    batches = BatchBuilder.build_batches([node], max_chars=30)
+
+    all_contents = [b[0]["content"] for b in batches]
+
+    # 验证 "Table 6." 不会单独成为一个 chunk
+    for content in all_contents:
+        assert content != "Table 6."
+        assert not content.startswith("SFO Library Routines")
+
+    # 完整段落应出现在某个 batch 中
+    assert any("Table 6. SFO Library Routines" in c for c in all_contents)
+
+
+# ---------------------------------------------------------------------------
 # 架构实体过滤兼容性测试
 # ---------------------------------------------------------------------------
 
@@ -598,3 +622,53 @@ def test_stage3_ingest_arch_entities(patched_config, monkeypatch):
     cached_types = {e.get("type") for e in cached_entities}
     assert "Instruction" in cached_types
     assert "Interrupt" in cached_types
+
+
+def test_stage3_ingest_all_nodes(patched_config, monkeypatch):
+    """包含 ### 子章节的文档应收集所有有 content 的节点，保留原文结构."""
+    _mock_external_clients(monkeypatch)
+
+    pdf = patched_config / "test.pdf"
+    _make_pdf(
+        pdf,
+        [
+            "# TRM\n\n"
+            "## Section 1\n\nSection intro.\n\n"
+            "### Sub 1.1\n\nSub content 1.\n\n"
+            "### Sub 1.2\n\nSub content 2.\n\n"
+            "## Section 2\n\nSection 2 content."
+        ],
+    )
+
+    pipe = DocGraphPipeline()
+    doc_id = pipe._process_one(str(pdf))
+    assert doc_id is not None
+
+    db = KnowledgeDB()
+    chunks = db.query_by_doc(doc_id)
+    titles = {ck.chapter_title for ck in chunks}
+
+    # 所有有 content 的节点应被收集
+    assert "Sub 1.1" in titles
+    assert "Sub 1.2" in titles
+    assert "Section 2" in titles
+    assert "Section 1" in titles  # Section 1 有独立 content
+
+    # 每个节点保留自己的 content，标题路径前缀包含完整层级
+    sub11 = next(ck for ck in chunks if ck.chapter_title == "Sub 1.1")
+    assert "Sub content 1." in sub11.content
+    assert "# TRM" in sub11.content
+    assert "## Section 1" in sub11.content
+    assert "### Sub 1.1" in sub11.content
+
+    sec1 = next(ck for ck in chunks if ck.chapter_title == "Section 1")
+    assert "Section intro." in sec1.content
+    assert "# TRM" in sec1.content
+    assert "## Section 1" in sec1.content
+    assert "### Sub 1.1" not in sec1.content
+
+    sub12 = next(ck for ck in chunks if ck.chapter_title == "Sub 1.2")
+    assert "Sub content 2." in sub12.content
+
+    sec2 = next(ck for ck in chunks if ck.chapter_title == "Section 2")
+    assert "Section 2 content." in sec2.content

@@ -273,39 +273,36 @@
 
 **原因**：
 - **父子关系准确**：`###` 应该是 `##` 的子节点，而非 `##` 的同级
-- **preface 传播统一化**：任何有子节点的节点，其 content 应归入第一个子节点。递归传播使这一规则适用于所有层级（`#` → `##` → `###` → `####`）
-- **BatchBuilder 基础**：多级树是 BatchBuilder 按层级切分 content 的前提
+- **按原文顺序保留 content**：每个节点保留自己的原始 content，不互相合并，结构清晰
+- **标题路径前缀**：`collect_all_nodes()` 为每个 chunk 附加从根到当前节点的完整标题路径，LLM 获得完整层级上下文
 
 **实现**：
 - 遍历 flat heading 列表，使用栈确定父子关系（弹出 `level >= 当前 level` 的节点）
-- 递归传播 preface：`_propagate_preface(node)` — 有子节点时，`node.content` **移动**到 `node.children[0]`（子节点 content 前置，父节点 content 清空）
+- `collect_all_nodes(node)` 递归收集所有有 content 的节点，为每个节点生成 `\# Title\n\## Section\n\### Sub\n\ncontent` 格式的完整路径前缀
 
 **权衡**：
-- `_collect_content` 需要递归收集，略微增加计算量（对当前文档规模可忽略）
+- chunk 数量可能略有增加（原本为空的中间节点不会产生 chunk），但增量更新更精确
 
 ---
 
 ## 15. 为什么 BatchBuilder 以 `##` 为硬边界、`###` 为 chunk 单位？
 
 **选择**：
-- `#`（level=1）是文档标题（书名），**作为文档级硬边界**（不跨 `#` 合并）
-- `##`（level=2）是章节，**作为硬边界**（不跨 `##` 合并）
-- `###`（level=3）是基本 **chunk 单位**
-- `####+` 的内容通过 `_collect_content` 递归归并到父 `###`
+- `ChapterParser.collect_all_nodes()` 先扁平化树，收集所有有 content 的节点
+- `BatchBuilder.build_batches()` 接收扁平化节点列表，按 `max_chars` 切分，超长内容按 **段落边界**（`\n\n+`）切分为 sub-batch
 
 **原因**：
-- **`#` 是书名/文档级边界**：技术文档中 `#` 通常是书名（如 "# TMS320x280x HRPWM Reference Guide"），跨书名合并无意义
-- **`##` 是语义边界**：不同章节（如 "2.1 Overview" 和 "2.2 Implementation"）内容差异大，跨章节合并会割裂逻辑
-- **`###` 粒度适中**：小节级别（如 "2.1.1 Features"）内容通常在几千字符，适合作为 LLM batch 的基本单位。若内容过短，相邻 `###` 可合并
+- **按原文顺序**：每个节点保留自己的 content，不互相合并，标题路径前缀提供完整层级上下文
+- **段落边界更安全**：Markdown 空行是天然的语义边界，避免带编号的标题行（如 "Table 6. SFO Library Routines"）被句号误切开
+- **粒度适中**：小节级别（如 "2.1.1 Features"）内容通常在几千字符，适合作为 LLM batch 的基本单位
 
 **实现**：
-- `_find_chunk_nodes(node, chunk_level=3)`：从节点开始递归，找到所有 `level >= 3` 的节点作为 chunk 候选
-- `build_batches` 遍历 `root.children`（`##` 节点）作为硬边界，在每个 `##` 内部找到 `###` 作为 chunk 单位
-- 合并规则：相邻同级 `###` 若每个 `< 50% max_chars`，可合并为一个 batch
+- `collect_all_nodes(node, ancestors)` 递归收集所有有 content 的节点，生成带标题路径前缀的 chunk
+- `build_batches` 直接遍历扁平化节点列表，content 超过 `max_chars` 时调用 `_split_by_sentences` 按段落边界切分
 
 **权衡**：
-- `###` 内容可能很短（如只有一段），导致小 batch。但这是保证语义边界的必要代价
-- 如果文档没有 `###`（只有 `#` 和 `##`），`##` 降级作为 chunk 单位
+- 单个超长段落（无空行）可能略超 `max_chars`，但代码有 fallback 不会截断
+- chunk 数量可能略有增加，但增量更新更精确（父章节和子章节独立比对 content_hash）
 
 ---
 
@@ -396,7 +393,6 @@
 | **本地 PDF 解析目录页换行** | 目录页多行条目保留为多行 | 目录页对知识提取影响小，接受此行为 |
 | **本地 PDF 解析依赖 TOC** | 无 TOC 的 PDF 回退到启发式规则 | `_fallback_heading_detection` 提供降级方案 |
 | **_is_heading 仅识别 Markdown #** | 已删除数字编号/中文编号匹配，目录条目（如 "1 Introduction 7"）不再被识别为 heading | 目录文本被收集为 heading 之间的 content，可能混入正文 batch；当前接受此行为，后续可通过机制层策略处理 |
-| **_propagate_preface 移动语义** | 父节点 content 被移动到第一个子节点，父节点自身 content 清空 | 父节点内容物理存在（在子节点 batch 中），但语义归属上可能让用户感知为"丢失"；这是设计意图（preface 传播），非 bug |
 | **冲突日志无关系级记录** | `add_relation` 冲突只记录 property_key，不记录完整关系上下文 | 冲突日志包含 from/to/type 信息，可定位 |
 | **反馈不反向更新 chunk metadata** | 全局图更新后，chunk metadata 中的 extracted_entities 仍是处理时快照 | `get_content_with_entities` 查全局图获取最新状态 |
 

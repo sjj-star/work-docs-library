@@ -387,11 +387,6 @@ class GraphStore(ABC):
         ...
 
     @abstractmethod
-    def remove_chapter_contributions(self, doc_id: str, chapter_title: str) -> None:
-        """从图谱中移除指定文档指定章节贡献的所有节点."""
-        ...
-
-    @abstractmethod
     def stats(self) -> dict[str, int]:
         """返回图谱统计信息."""
         ...
@@ -967,33 +962,6 @@ class NetworkXGraphStore(GraphStore):
         self._g.remove_edges_from(edges_to_remove)
         logger.info(
             f"已移除文档贡献 | doc_id={doc_id} | "
-            f"剩余 nodes={self._g.number_of_nodes()} | edges={self._g.number_of_edges()}"
-        )
-
-    def remove_chapter_contributions(self, doc_id: str, chapter_title: str) -> None:
-        """从全局图中移除指定文档指定章节的实体贡献（关联边一并移除）."""
-        with self._lock:
-            self._remove_chapter_contributions_unsafe(doc_id, chapter_title)
-
-    def _remove_chapter_contributions_unsafe(self, doc_id: str, chapter_title: str) -> None:
-        """无锁的 remove_chapter_contributions 实现（调用方必须持有 _lock）."""
-        if not doc_id or not chapter_title:
-            return
-
-        nodes_to_remove = []
-        for nid, data in list(self._g.nodes(data=True)):
-            sids = _normalize_sids(data.get("source_doc_ids", set()))
-            if doc_id in sids and data.get("source_chapter") == chapter_title:
-                sids.discard(doc_id)
-                if sids:
-                    self._g.nodes[nid]["source_doc_ids"] = sids
-                else:
-                    nodes_to_remove.append(nid)
-
-        # 移除节点会自动移除关联边
-        self._g.remove_nodes_from(nodes_to_remove)
-        logger.info(
-            f"已移除章节贡献 | doc_id={doc_id} | chapter={chapter_title} | "
             f"剩余 nodes={self._g.number_of_nodes()} | edges={self._g.number_of_edges()}"
         )
 
