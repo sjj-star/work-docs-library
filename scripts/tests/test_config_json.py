@@ -171,8 +171,6 @@ class TestConfigIntegration:
         """验证当前 Config 至少有合理的默认值（不假设具体值，避免环境差异）."""
         from core.config import Config
 
-        assert Config.LLM_PROVIDER in ("openai", "kimi")
-        assert Config.EMBEDDING_PROVIDER in ("openai", "kimi", "bigmodel")
         assert Config.EMBEDDING_DIMENSION > 0
         assert Config.BATCH_SIZE > 0
         assert isinstance(Config.LLM_THINKING_ENABLED, bool)

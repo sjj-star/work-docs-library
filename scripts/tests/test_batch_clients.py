@@ -9,8 +9,7 @@ from typing import Any
 import pytest
 from core.batch_clients import (
     BaseBatchClient,
-    BigModelBatchClient,
-    KimiBatchClient,
+    BatchClient,
     _build_jsonl,
     _parse_jsonl,
 )
@@ -283,7 +282,7 @@ def test_submit_parallel_batches_empty():
 
 
 # ---------------------------------------------------------------------------
-# BigModelBatchClient.submit_embedding_batch
+# BatchClient.submit_embedding_batch
 # ---------------------------------------------------------------------------
 
 
@@ -292,7 +291,7 @@ def test_submit_embedding_batch_success(monkeypatch, tmp_path):
     monkeypatch.setattr(Config, "DB_PATH", tmp_path / "workdocs.db")
     monkeypatch.setattr(Config, "EMBEDDING_MODEL", "embedding-3")
 
-    client = BigModelBatchClient(api_key="test-key", base_url="https://test.bigmodel.cn")
+    client = BatchClient(api_key="test-key", base_url="https://test.bigmodel.cn")
 
     captured_requests = []
 
@@ -324,7 +323,7 @@ def test_submit_embedding_batch_success(monkeypatch, tmp_path):
     assert len(captured_requests) == 2
     assert captured_requests[0]["custom_id"] == "embed_0"
     assert captured_requests[0]["method"] == "POST"
-    assert captured_requests[0]["url"] == "/v4/embeddings"
+    assert captured_requests[0]["url"] == Config.EMBEDDING_BATCH_ENDPOINT
     assert captured_requests[0]["body"]["model"] == "embedding-3"
     assert captured_requests[0]["body"]["input"] == "hello"
 
@@ -335,7 +334,7 @@ def test_submit_embedding_batch_success(monkeypatch, tmp_path):
 def test_submit_embedding_batch_empty(monkeypatch, tmp_path):
     """测试 submit_embedding_batch 传入空文本列表时返回空列表."""
     monkeypatch.setattr(Config, "DB_PATH", tmp_path / "workdocs.db")
-    client = BigModelBatchClient(api_key="test-key", base_url="https://test.bigmodel.cn")
+    client = BatchClient(api_key="test-key", base_url="https://test.bigmodel.cn")
 
     called = False
 
@@ -348,39 +347,55 @@ def test_submit_embedding_batch_empty(monkeypatch, tmp_path):
 
     embeddings = client.submit_embedding_batch([])
     assert embeddings == []
-    # 空列表应直接返回，不应走到 submit_and_wait（因为 submit_and_wait 内部也会检查空列表）
-    # 但这里 BigModelBatchClient 没有前置检查，会走到 submit_and_wait
-    # 所以 called 可能为 True，这取决于实现；我们不断言 called 的值
 
 
 # ---------------------------------------------------------------------------
-# KimiBatchClient / BigModelBatchClient 初始化
+# BatchClient 初始化
 # ---------------------------------------------------------------------------
 
 
-def test_kimi_batch_client_init_missing_key(monkeypatch):
-    """测试 KimiBatchClient 缺少 API key 时抛出 RuntimeError."""
+def test_batch_client_init_missing_key(monkeypatch):
+    """测试 BatchClient 缺少 API key 时抛出 RuntimeError."""
     monkeypatch.setattr(Config, "LLM_API_KEY", "")
-    with pytest.raises(RuntimeError, match="Kimi API key not configured"):
-        KimiBatchClient()
+    with pytest.raises(RuntimeError, match="API key not configured"):
+        BatchClient()
 
 
-def test_bigmodel_batch_client_init_missing_key(monkeypatch):
-    """测试 BigModelBatchClient 缺少 API key 时抛出 RuntimeError."""
-    monkeypatch.setattr(Config, "EMBEDDING_API_KEY", "")
-    with pytest.raises(RuntimeError, match="BigModel API key not configured"):
-        BigModelBatchClient()
-
-
-# ---------------------------------------------------------------------------
-# BigModelBatchClient._create_batch endpoint 参数
-# ---------------------------------------------------------------------------
-
-
-def test_bigmodel_create_batch_with_endpoint(monkeypatch, tmp_path):
-    """测试 BigModelBatchClient._create_batch 支持自定义 endpoint."""
+def test_batch_client_init_with_custom_params(monkeypatch, tmp_path):
+    """测试 BatchClient 支持自定义参数."""
     monkeypatch.setattr(Config, "DB_PATH", tmp_path / "workdocs.db")
-    client = BigModelBatchClient(api_key="test-key", base_url="https://test.bigmodel.cn")
+    client = BatchClient(
+        api_key="test-key",
+        base_url="https://test.example.com",
+        batch_endpoint="/v2/chat/completions",
+        completion_window="48h",
+        files_url_path="v2/files",
+        batches_url_path="v2/batches",
+        download_url_template="{base_url}/v2/files/{file_id}",
+        auto_delete_input_file=True,
+        upload_mime_type="application/json",
+    )
+    assert client.api_key == "test-key"
+    assert client.base_url == "https://test.example.com"
+    assert client.batch_endpoint == "/v2/chat/completions"
+    assert client.completion_window == "48h"
+    assert client.files_url == "https://test.example.com/v2/files"
+    assert client.batches_url == "https://test.example.com/v2/batches"
+    assert client.download_url_template == "{base_url}/v2/files/{file_id}"
+    assert client.auto_delete_input_file is True
+    assert client.upload_mime_type == "application/json"
+
+
+def test_batch_client_create_batch_payload(monkeypatch, tmp_path):
+    """测试 BatchClient._create_batch 构造正确的 payload."""
+    monkeypatch.setattr(Config, "DB_PATH", tmp_path / "workdocs.db")
+    client = BatchClient(
+        api_key="test-key",
+        base_url="https://test.example.com",
+        batch_endpoint="/v2/chat/completions",
+        completion_window="48h",
+        auto_delete_input_file=True,
+    )
 
     posted = []
 
@@ -390,7 +405,36 @@ def test_bigmodel_create_batch_with_endpoint(monkeypatch, tmp_path):
 
     monkeypatch.setattr(client, "_post", _fake_post)
 
-    batch_id = client._create_batch("file_789", endpoint="/v4/embeddings")
+    batch_id = client._create_batch("file_789")
     assert batch_id == "batch_456"
-    assert posted[0][1]["endpoint"] == "/v4/embeddings"
+    assert posted[0][1]["endpoint"] == "/v2/chat/completions"
+    assert posted[0][1]["completion_window"] == "48h"
     assert posted[0][1]["auto_delete_input_file"] is True
+
+
+def test_batch_client_download_file(monkeypatch, tmp_path):
+    """测试 BatchClient._download_file 使用配置的 URL 模板."""
+    monkeypatch.setattr(Config, "DB_PATH", tmp_path / "workdocs.db")
+    client = BatchClient(
+        api_key="test-key",
+        base_url="https://test.example.com",
+        download_url_template="{base_url}/custom/files/{file_id}/download",
+    )
+
+    fetched_urls = []
+
+    def _fake_get(url, **kwargs):
+        class FakeResp:
+            text = "downloaded"
+
+            def raise_for_status(self):
+                pass
+
+        fetched_urls.append(url)
+        return FakeResp()
+
+    monkeypatch.setattr(client._session, "get", _fake_get)
+
+    result = client._download_file("file_123")
+    assert result == "downloaded"
+    assert fetched_urls[0] == "https://test.example.com/custom/files/file_123/download"
