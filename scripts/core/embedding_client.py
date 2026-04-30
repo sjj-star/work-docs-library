@@ -15,21 +15,19 @@ logger = logging.getLogger(__name__)
 class EmbeddingClient:
     """Embedding 专用客户端 - 使用独立的 Embedding 配置."""
 
-    # 类常量 - Magic Number 提取
-    MAX_RETRY_ATTEMPTS = 3  # 最大重试次数
-    RETRY_BACKOFF_BASE = 2  # 指数退避基数（秒）
-    DEFAULT_TIMEOUT = 120  # 默认超时时间（秒）
-    MAX_BATCH_SIZE_LIMIT = 100  # API 最大批处理限制
+    # 类常量 - 从 Config 读取，保留属性供测试覆盖
+    MAX_RETRY_ATTEMPTS = Config.EMBED_MAX_RETRIES
+    RETRY_BACKOFF_BASE = Config.EMBED_RETRY_BACKOFF
+    DEFAULT_TIMEOUT = Config.EMBED_TIMEOUT
+    MAX_BATCH_SIZE_LIMIT = Config.EMBED_MAX_BATCH_SIZE
 
     def __init__(
         self,
-        provider: str | None = None,
         api_key: str | None = None,
         base_url: str | None = None,
         model: str | None = None,
     ) -> None:
         """初始化 EmbeddingClient."""
-        self.provider = (provider or Config.EMBEDDING_PROVIDER).lower()
         self.api_key = api_key or Config.EMBEDDING_API_KEY
         self.base_url = base_url or Config.EMBEDDING_BASE_URL
         self.model = model or Config.EMBEDDING_MODEL
@@ -43,13 +41,8 @@ class EmbeddingClient:
                 "Embedding API key not configured. Set WORKDOCS_EMBEDDING_API_KEY in .env"
             )
 
-        # 设置 API endpoint
-        if self.provider == "openai":
-            self.embed_url = f"{self.base_url or 'https://api.openai.com/v1'}/embeddings"
-        elif self.provider == "kimi":
-            self.embed_url = f"{self.base_url or 'https://api.moonshot.cn/v1'}/embeddings"
-        else:
-            self.embed_url = f"{self.base_url}/embeddings"
+        # 设置 API endpoint（完全由 base_url 决定，不做服务商推断）
+        self.embed_url = f"{self.base_url}/embeddings"
 
         self._session = requests.Session()
 

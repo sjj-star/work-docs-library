@@ -2,11 +2,15 @@
 
 from pathlib import Path
 
+from core.config import Config
 from PIL import Image
 
 
 def compress_image(
-    src_path: str | Path, dst_path: str | Path, max_edge: int = 1024, quality: int = 85
+    src_path: str | Path,
+    dst_path: str | Path,
+    max_edge: int = Config.LLM_VISION_MAX_EDGE,
+    quality: int = Config.LLM_VISION_QUALITY,
 ) -> Path:
     """compress_image 函数."""
     img = Image.open(src_path)

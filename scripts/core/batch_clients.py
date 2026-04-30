@@ -1,4 +1,4 @@
-"""Batch API 客户端 - Kimi + BigModel.
+"""Batch API 客户端 - 通用实现（服务商无感）.
 
 封装异步 batch 处理流程：JSONL 构造 → 上传 → 创建 batch → 轮询 → 下载结果.
 """
@@ -55,10 +55,6 @@ def _parse_jsonl(text: str) -> list[dict[str, Any]]:
 class BaseBatchClient(ABC):
     """Batch API 客户端抽象基类."""
 
-    DEFAULT_POLL_INTERVAL = 10  # 轮询间隔（秒）
-    MAX_POLL_RETRIES = 360  # 最大轮询次数（默认 3600 秒）
-    MAX_FILE_SIZE_MB = 100  # 单个 JSONL 文件最大 100MB
-
     def __init__(self, api_key: str, base_url: str) -> None:
         """初始化 BaseBatchClient."""
         self.api_key = api_key
@@ -68,6 +64,10 @@ class BaseBatchClient(ABC):
             "Content-Type": "application/json",
         }
         self._session = requests.Session()
+        # 从 Config 读取运行时参数，保留实例属性供测试覆盖
+        self.DEFAULT_POLL_INTERVAL = Config.BATCH_POLL_INTERVAL
+        self.MAX_POLL_RETRIES = Config.BATCH_MAX_POLL_RETRIES
+        self.MAX_FILE_SIZE_MB = Config.BATCH_MAX_FILE_SIZE_MB
 
     def _post(
         self, url: str, payload: dict | None = None, files: dict | None = None, timeout: int = 120
@@ -151,7 +151,9 @@ class BaseBatchClient(ABC):
             return []
 
         # 1. 生成 JSONL 文件
-        jsonl_path = Path(Config.DB_PATH.parent) / "batch_temp" / f"{uuid.uuid4().hex}.jsonl"
+        jsonl_path = (
+            Path(Config.DB_PATH.parent) / Config.BATCH_TEMP_DIR / f"{uuid.uuid4().hex}.jsonl"
+        )
         _build_jsonl(requests, jsonl_path)
 
         # 检查文件大小
@@ -235,7 +237,7 @@ class BaseBatchClient(ABC):
     def submit_parallel_batches(
         self,
         requests: list[dict[str, Any]],
-        max_file_size_mb: int = 100,
+        max_file_size_mb: int | None = None,
         timeout: int | None = None,
         poll_interval: int | None = None,
     ) -> list[dict[str, Any]]:
@@ -249,6 +251,9 @@ class BaseBatchClient(ABC):
 
         timeout = timeout or Config.LLM_BATCH_TIMEOUT
         poll_interval = poll_interval or self.DEFAULT_POLL_INTERVAL
+        max_file_size_mb = (
+            max_file_size_mb if max_file_size_mb is not None else self.MAX_FILE_SIZE_MB
+        )
         max_bytes = max_file_size_mb * 1024 * 1024
 
         # 按预估 JSONL 大小切分 requests
@@ -282,8 +287,9 @@ class BaseBatchClient(ABC):
 
         all_results: list[dict[str, Any]] = []
         errors: list[str] = []
+        max_workers = min(len(chunks), Config.BATCH_PARALLEL_WORKERS)
 
-        with ThreadPoolExecutor(max_workers=min(len(chunks), 4)) as executor:
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
             future_to_idx = {}
             for idx, chunk in enumerate(chunks):
                 future = executor.submit(
@@ -316,44 +322,73 @@ class BaseBatchClient(ABC):
 
 
 # ---------------------------------------------------------------------------
-# Kimi Batch Client
+# 通用 Batch Client
 # ---------------------------------------------------------------------------
 
 
-class KimiBatchClient(BaseBatchClient):
-    """Kimi Batch API 客户端.
+class BatchClient(BaseBatchClient):
+    """通用 Batch API 客户端（服务商无感）.
 
-    支持的模型: kimi-k2.5, kimi-k2.6
-    限制:
-    - temperature, top_p, n, presence_penalty, frequency_penalty 不可修改
-    - JSONL 文件大小不超过 100MB
+    通过配置参数适配不同服务商的 Batch API，无需硬编码服务商名称。
     """
 
-    def __init__(self, api_key: str | None = None, base_url: str | None = None) -> None:
-        """初始化 KimiBatchClient."""
+    def __init__(
+        self,
+        api_key: str | None = None,
+        base_url: str | None = None,
+        batch_endpoint: str | None = None,
+        completion_window: str | None = None,
+        files_url_path: str = "files",
+        batches_url_path: str = "batches",
+        download_url_template: str | None = None,
+        auto_delete_input_file: bool = False,
+        upload_mime_type: str | None = None,
+    ) -> None:
+        """初始化 BatchClient.
+
+        Args:
+            api_key: API 密钥，默认从 Config.LLM_API_KEY 读取
+            base_url: API 基础 URL，默认从 Config.LLM_BASE_URL 读取
+            batch_endpoint: Batch 任务 endpoint，默认从 Config.LLM_BATCH_ENDPOINT 读取
+            completion_window: Batch 完成窗口，默认从 Config.LLM_BATCH_COMPLETION_WINDOW 读取
+            files_url_path: 文件上传 URL 路径，默认 "files"
+            batches_url_path: Batch 任务 URL 路径，默认 "batches"
+            download_url_template: 文件下载 URL 模板，
+                默认从 Config.BATCH_FILE_DOWNLOAD_TEMPLATE 读取
+            auto_delete_input_file: 是否自动删除输入文件，默认 False
+            upload_mime_type: 上传文件的 MIME 类型，None 表示不指定（由 requests 自动推断）
+        """
         api_key = api_key or Config.LLM_API_KEY
         base_url = base_url or Config.LLM_BASE_URL
         if not api_key:
-            raise RuntimeError("Kimi API key not configured")
+            raise RuntimeError("API key not configured")
         super().__init__(api_key, base_url)
-        self.files_url = f"{self.base_url}/files"
-        self.batches_url = f"{self.base_url}/batches"
+        self.batch_endpoint = batch_endpoint or Config.LLM_BATCH_ENDPOINT
+        self.completion_window = completion_window or Config.LLM_BATCH_COMPLETION_WINDOW
+        self.files_url = f"{self.base_url}/{files_url_path.lstrip('/')}"
+        self.batches_url = f"{self.base_url}/{batches_url_path.lstrip('/')}"
+        self.download_url_template = download_url_template or Config.BATCH_FILE_DOWNLOAD_TEMPLATE
+        self.auto_delete_input_file = auto_delete_input_file
+        self.upload_mime_type = upload_mime_type
 
     def _upload_jsonl(self, file_path: Path) -> str:
         with open(file_path, "rb") as f:
-            resp = self._post(
-                self.files_url,
-                files={"file": (file_path.name, f)},
-                timeout=120,
-            )
+            if self.upload_mime_type:
+                files = {"file": (file_path.name, f, self.upload_mime_type)}
+            else:
+                files = {"file": (file_path.name, f)}
+            resp = self._post(self.files_url, files=files)
         return resp["id"]
 
     def _create_batch(self, file_id: str) -> str:
-        payload = {
+        payload: dict[str, Any] = {
             "input_file_id": file_id,
-            "endpoint": "/v1/chat/completions",
-            "completion_window": "24h",
+            "endpoint": self.batch_endpoint,
         }
+        if self.completion_window:
+            payload["completion_window"] = self.completion_window
+        if self.auto_delete_input_file:
+            payload["auto_delete_input_file"] = True
         resp = self._post(self.batches_url, payload=payload, timeout=60)
         return resp["id"]
 
@@ -361,72 +396,10 @@ class KimiBatchClient(BaseBatchClient):
         return self._get(f"{self.batches_url}/{batch_id}", timeout=60)
 
     def _download_file(self, file_id: str) -> str:
+        url = self.download_url_template.format(base_url=self.base_url, file_id=file_id)
         resp = self._session.get(
-            f"{self.files_url}/{file_id}/content",
+            url,
             headers={"Authorization": f"Bearer {self.api_key}"},
-            timeout=120,
-        )
-        resp.raise_for_status()
-        return resp.text
-
-    def _delete_file(self, file_id: str) -> None:
-        self._delete(f"{self.files_url}/{file_id}")
-
-
-# ---------------------------------------------------------------------------
-# BigModel Batch Client
-# ---------------------------------------------------------------------------
-
-
-class BigModelBatchClient(BaseBatchClient):
-    """BigModel (智谱) Batch API 客户端.
-
-    支持 LLM 和 Embedding 两种 endpoint:
-    - LLM: /v4/chat/completions (GLM-4 系列)
-    - Embedding: /v4/embeddings (Embedding-2, Embedding-3)
-
-    价格: 标准 API 的 50%
-    限制:
-    - JSONL 文件大小不超过 100MB
-    - 单个文件最多 50,000 个请求（Embedding 最多 10,000）
-    """
-
-    def __init__(self, api_key: str | None = None, base_url: str | None = None) -> None:
-        """初始化 BigModelBatchClient."""
-        api_key = api_key or Config.EMBEDDING_API_KEY
-        base_url = base_url or Config.EMBEDDING_BASE_URL
-        if not api_key:
-            raise RuntimeError("BigModel API key not configured")
-        super().__init__(api_key, base_url)
-        self.files_url = f"{self.base_url}/files"
-        self.batches_url = f"{self.base_url}/batches"
-
-    def _upload_jsonl(self, file_path: Path) -> str:
-        with open(file_path, "rb") as f:
-            resp = self._post(
-                self.files_url,
-                files={"file": (file_path.name, f, "application/json")},
-                timeout=120,
-            )
-        return resp["id"]
-
-    def _create_batch(self, file_id: str, endpoint: str = "/v4/chat/completions") -> str:
-        payload = {
-            "input_file_id": file_id,
-            "endpoint": endpoint,
-            "auto_delete_input_file": True,
-        }
-        resp = self._post(self.batches_url, payload=payload, timeout=60)
-        return resp["id"]
-
-    def _get_batch_status(self, batch_id: str) -> dict[str, Any]:
-        return self._get(f"{self.batches_url}/{batch_id}", timeout=60)
-
-    def _download_file(self, file_id: str) -> str:
-        resp = self._session.get(
-            f"{self.files_url}/{file_id}",
-            headers={"Authorization": f"Bearer {self.api_key}"},
-            timeout=120,
         )
         resp.raise_for_status()
         return resp.text
@@ -452,13 +425,14 @@ class BigModelBatchClient(BaseBatchClient):
 
         """
         model = model or Config.EMBEDDING_MODEL
+        endpoint = Config.EMBEDDING_BATCH_ENDPOINT
         requests = []
         for i, text in enumerate(texts):
             requests.append(
                 {
                     "custom_id": f"embed_{i}",
                     "method": "POST",
-                    "url": "/v4/embeddings",
+                    "url": endpoint,
                     "body": {
                         "model": model,
                         "input": text,

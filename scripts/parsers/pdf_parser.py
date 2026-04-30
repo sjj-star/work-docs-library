@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any, cast
 
 import fitz  # pymupdf
+from core.config import Config
 from PIL import Image
 
 logger = logging.getLogger(__name__)
@@ -663,12 +664,7 @@ class PDFParser:
         # 2. 确定输出目录
         if output_dir is None:
             file_hash = hashlib.md5(file_path.read_bytes()).hexdigest()
-            output_dir = (
-                Path(__file__).resolve().parent.parent.parent
-                / "knowledge_base"
-                / "parsed"
-                / file_hash[:16]
-            )
+            output_dir = Config.DB_PATH.parent / "parsed" / file_hash[:16]
         else:
             output_dir = Path(output_dir)
         img_dir = output_dir / "images"

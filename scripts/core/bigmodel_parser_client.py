@@ -1,5 +1,9 @@
 """BigModel (智谱) 文件解析客户端 - Expert 模式.
 
+⚠️ 厂商专用：本客户端仅适用于 BigModel (智谱) 的 Expert 文件解析服务，
+    使用专有端点 /files/parser/create 和 /files/parser/result，非 OpenAI-compatible API。
+    如需使用其他厂商的 PDF 解析服务，需另行实现对应客户端。
+
 封装 /files/parser/create + /files/parser/result 异步 API
 输出：Markdown 文本 + 提取的图片文件列表.
 """
@@ -20,38 +24,37 @@ logger = logging.getLogger(__name__)
 class BigModelParserClient:
     """BigModel Expert 文件解析客户端."""
 
-    BASE_URL = "https://open.bigmodel.cn/api/paas/v4"
-    DEFAULT_TIMEOUT = 60
-    MAX_POLL_RETRIES = 60
-    POLL_INTERVAL = 3
+    DEFAULT_TIMEOUT = Config.PARSER_TIMEOUT
+    MAX_POLL_RETRIES = Config.PARSER_MAX_RETRIES
+    POLL_INTERVAL = Config.PARSER_POLL_INTERVAL
 
     def __init__(self, api_key: str | None = None) -> None:
         """初始化 BigModelParserClient."""
         self.api_key = api_key or self._resolve_api_key()
+        self.base_url = "https://open.bigmodel.cn/api/paas/v4"
         if not self.api_key:
             raise RuntimeError(
-                "BigModel API key not configured. "
-                "Set WORKDOCS_BIGMODEL_API_KEY in .env or config.json"
+                "Parser API key not configured. Set WORKDOCS_PARSER_API_KEY in .env or config.json"
             )
         self.headers = {"Authorization": f"Bearer {self.api_key}"}
 
     @staticmethod
     def _resolve_api_key() -> str:
-        """解析 BigModel API Key."""
+        """解析 Parser API Key."""
         # 优先级：环境变量(Kimi注入) > config.json > .env
         import os
 
-        env_val = os.getenv("bigmodel.api_key", "")
+        env_val = os.getenv("parser.api_key", "")
         if env_val:
             return env_val
         # config.json
         from .config import _CONFIG_JSON
 
-        val = _CONFIG_JSON.get("bigmodel", {}).get("api_key", "")
+        val = _CONFIG_JSON.get("parser", {}).get("api_key", "")
         if val:
             return val
         # .env
-        return os.getenv("WORKDOCS_BIGMODEL_API_KEY", "")
+        return os.getenv("WORKDOCS_PARSER_API_KEY", "")
 
     def create_task(self, file_path: str | Path, tool_type: str = "expert") -> str:
         """创建文件解析任务.
@@ -70,7 +73,7 @@ class BigModelParserClient:
 
         with open(file_path, "rb") as f:
             resp = requests.post(
-                f"{self.BASE_URL}/files/parser/create",
+                f"{self.base_url}/files/parser/create",
                 headers=self.headers,
                 files={"file": (file_path.name, f)},
                 data={"tool_type": tool_type, "file_type": "PDF"},
@@ -102,7 +105,7 @@ class BigModelParserClient:
         """
         for i in range(self.MAX_POLL_RETRIES):
             resp = requests.get(
-                f"{self.BASE_URL}/files/parser/result/{task_id}/{format_type}",
+                f"{self.base_url}/files/parser/result/{task_id}/{format_type}",
                 headers=self.headers,
                 timeout=self.DEFAULT_TIMEOUT,
             )
