@@ -82,6 +82,7 @@ def test_graph_entity_to_dict_from_dict():
         "type": "Register",
         "name": "CTRL",
         "properties": {"addr": "0x00", "width": 32},
+        "doc_properties": {},
         "source_doc_ids": ["doc1"],
         "source_chapter": "ch3",
         "confidence": 1.0,
@@ -112,7 +113,9 @@ def test_graph_relation_to_dict_from_dict():
         "from_type": "Module",
         "to_type": "Register",
         "properties": {"access": "RW"},
+        "doc_properties": {},
         "source_doc_ids": [],
+        "source_chapter": "",
         "confidence": 1.0,
         "verified": False,
         "created_at": "",
@@ -955,3 +958,164 @@ def test_subgraph_text_includes_sources_and_verified(graph_store):
     assert "[来源: doc1]" in text
     assert "✓" in text  # verified mark
     assert "width=32" in text
+
+
+# ---------------------------------------------------------------------------
+# 14. doc_properties（文档级属性快照）
+# ---------------------------------------------------------------------------
+
+
+def test_entity_doc_properties_on_create(graph_store):
+    """实体首次创建时 doc_properties 保存原始属性."""
+    e = GraphEntity(
+        entity_type="Register",
+        name="CTRL",
+        properties={"addr": "0x1000"},
+        source_doc_ids={"doc_a"},
+    )
+    graph_store.add_entity(e)
+    result = graph_store.get_entity("Register", "CTRL")
+    assert result is not None
+    assert result.doc_properties == {"doc_a": {"addr": "0x1000"}}
+
+
+def test_entity_doc_properties_on_merge(graph_store):
+    """实体合并时 doc_properties 追加不丢失."""
+    graph_store.add_entity(
+        GraphEntity(
+            entity_type="Register",
+            name="CTRL",
+            properties={"addr": "0x1000"},
+            source_doc_ids={"doc_a"},
+        )
+    )
+    graph_store.add_entity(
+        GraphEntity(
+            entity_type="Register",
+            name="CTRL",
+            properties={"addr": "0x2000"},
+            source_doc_ids={"doc_b"},
+        )
+    )
+    result = graph_store.get_entity("Register", "CTRL")
+    assert result is not None
+    assert result.doc_properties == {
+        "doc_a": {"addr": "0x1000"},
+        "doc_b": {"addr": "0x2000"},
+    }
+    # properties 仍为合并后值（新值覆盖）
+    assert result.properties == {"addr": "0x2000"}
+
+
+def test_relation_doc_properties_on_create(graph_store):
+    """关系首次创建时 doc_properties 保存原始属性."""
+    r = GraphRelation(
+        rel_type="HAS_REGISTER",
+        from_name="TOP",
+        to_name="CTRL",
+        from_type="Module",
+        to_type="Register",
+        properties={"access": "RW"},
+        source_doc_ids={"doc_a"},
+    )
+    graph_store.add_relation(r)
+    rels = graph_store.all_relations()
+    assert len(rels) == 1
+    assert rels[0].doc_properties == {"doc_a": {"access": "RW"}}
+
+
+def test_relation_doc_properties_on_merge(graph_store):
+    """关系合并时 doc_properties 追加不丢失."""
+    graph_store.add_relation(
+        GraphRelation(
+            rel_type="HAS_REGISTER",
+            from_name="TOP",
+            to_name="CTRL",
+            from_type="Module",
+            to_type="Register",
+            properties={"access": "RW"},
+            source_doc_ids={"doc_a"},
+        )
+    )
+    graph_store.add_relation(
+        GraphRelation(
+            rel_type="HAS_REGISTER",
+            from_name="TOP",
+            to_name="CTRL",
+            from_type="Module",
+            to_type="Register",
+            properties={"access": "RO"},
+            source_doc_ids={"doc_b"},
+        )
+    )
+    rels = graph_store.all_relations()
+    assert len(rels) == 1
+    assert rels[0].doc_properties == {
+        "doc_a": {"access": "RW"},
+        "doc_b": {"access": "RO"},
+    }
+
+
+def test_doc_properties_persistence(graph_store, tmp_path):
+    """doc_properties 正确序列化和反序列化."""
+    graph_store.add_entity(
+        GraphEntity(
+            entity_type="Register",
+            name="CTRL",
+            properties={"addr": "0x1000"},
+            source_doc_ids={"doc_a"},
+        )
+    )
+    graph_store.add_entity(
+        GraphEntity(
+            entity_type="Register",
+            name="CTRL",
+            properties={"addr": "0x2000"},
+            source_doc_ids={"doc_b"},
+        )
+    )
+    path = tmp_path / "graph.json"
+    graph_store.save(path)
+
+    g2 = NetworkXGraphStore()
+    g2.load(path)
+    result = g2.get_entity("Register", "CTRL")
+    assert result is not None
+    assert result.doc_properties == {
+        "doc_a": {"addr": "0x1000"},
+        "doc_b": {"addr": "0x2000"},
+    }
+
+
+def test_conflict_log_includes_doc_id(graph_store):
+    """冲突日志包含引发冲突的 doc_id."""
+    graph_store.add_entity(
+        GraphEntity(
+            entity_type="Register",
+            name="CTRL",
+            properties={"addr": "0x1000"},
+            source_doc_ids={"doc_a"},
+        )
+    )
+    conflicts = graph_store.add_entity(
+        GraphEntity(
+            entity_type="Register",
+            name="CTRL",
+            properties={"addr": "0x2000"},
+            source_doc_ids={"doc_b"},
+        )
+    )
+    assert len(conflicts) == 1
+    assert conflicts[0]["doc_id"] == "doc_b"
+
+
+# ---------------------------------------------------------------------------
+# 15. Product 实体类型
+# ---------------------------------------------------------------------------
+
+
+def test_product_in_all_node_types():
+    """Product 实体类型存在于 ALL_NODE_TYPES."""
+    from core.graph_store import ALL_NODE_TYPES
+
+    assert "Product" in ALL_NODE_TYPES

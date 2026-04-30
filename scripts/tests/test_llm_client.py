@@ -47,7 +47,6 @@ def mock_env(monkeypatch, tmp_path):
     from core import config as config_module
 
     monkeypatch.setattr(config_module.Config, "LLM_API_KEY", "test-key")
-    monkeypatch.setattr(config_module.Config, "LLM_PROVIDER", "openai")
     monkeypatch.setattr(config_module.Config, "LLM_BASE_URL", "")
     monkeypatch.setattr(config_module.Config, "LLM_MODEL", "gpt-4")
     monkeypatch.setattr(config_module.Config, "EMBEDDING_API_KEY", "test-emb-key")

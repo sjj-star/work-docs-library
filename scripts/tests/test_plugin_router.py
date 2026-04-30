@@ -82,8 +82,11 @@ class FakeBigModelParserClient:
         return b""
 
 
-class FakeKimiBatchClient:
-    """Mock KimiBatchClient that returns fake results immediately."""
+class FakeBatchClient:
+    """Mock BatchClient that returns fake results immediately."""
+
+    def __init__(self, *args, **kwargs):
+        pass
 
     def submit_and_wait(self, requests, **kwargs):
         """submit_and_wait 函数."""
@@ -114,26 +117,6 @@ class FakeKimiBatchClient:
         """submit_parallel_batches 函数."""
         return self.submit_and_wait(requests, **kwargs)
 
-    def close(self):
-        """Close 函数."""
-        pass
-
-
-class FakeBigModelBatchClient:
-    """Mock BigModelBatchClient for embedding batch."""
-
-    def submit_and_wait(self, requests, **kwargs):
-        """submit_and_wait 函数."""
-        results = []
-        for i, req in enumerate(requests):
-            results.append(
-                {
-                    "custom_id": req.get("custom_id", f"embed_{i}"),
-                    "response": {"body": {"data": [{"embedding": [1.0, 0.0, 0.0, 0.0]}]}},
-                }
-            )
-        return results
-
     def submit_embedding_batch(self, texts, **kwargs):
         """submit_embedding_batch 函数."""
         return [[1.0, 0.0, 0.0, 0.0] for _ in texts]
@@ -147,8 +130,6 @@ def _mock_llm_and_embedder(monkeypatch):
     """Mock EmbeddingClient and BigModelParserClient for DocGraphPipeline."""
     fake_embed = FakeEmbedder()
     fake_file = FakeBigModelParserClient()
-    fake_kimi_batch = FakeKimiBatchClient()
-    fake_bigmodel_batch = FakeBigModelBatchClient()
     monkeypatch.setattr(
         "core.doc_graph_pipeline.EmbeddingClient",
         lambda: fake_embed,
@@ -158,12 +139,8 @@ def _mock_llm_and_embedder(monkeypatch):
         lambda: fake_file,
     )
     monkeypatch.setattr(
-        "core.doc_graph_pipeline.KimiBatchClient",
-        lambda: fake_kimi_batch,
-    )
-    monkeypatch.setattr(
-        "core.doc_graph_pipeline.BigModelBatchClient",
-        lambda: fake_bigmodel_batch,
+        "core.doc_graph_pipeline.BatchClient",
+        FakeBatchClient,
     )
 
 
@@ -175,10 +152,8 @@ def _mock_llm_and_embedder(monkeypatch):
 def test_ingest_with_llm_config_uses_doc_graph_pipeline(patched_config, monkeypatch):
     """When LLM is configured, ingest should use DocGraphPipeline."""
     monkeypatch.setattr(Config, "LLM_API_KEY", "fake-llm-key")
-    monkeypatch.setattr(Config, "LLM_PROVIDER", "openai")
     monkeypatch.setattr(Config, "LLM_MODEL", "gpt-4o-mini")
     monkeypatch.setattr(Config, "EMBEDDING_API_KEY", "fake-emb-key")
-    monkeypatch.setattr(Config, "EMBEDDING_PROVIDER", "openai")
     monkeypatch.setattr(Config, "EMBEDDING_MODEL", "text-embedding-3-small")
 
     _mock_llm_and_embedder(monkeypatch)
@@ -202,10 +177,8 @@ def test_ingest_with_llm_config_uses_doc_graph_pipeline(patched_config, monkeypa
 def test_reprocess_doc_graph_pipeline(patched_config, monkeypatch):
     """tool_reprocess should use DocGraphPipeline."""
     monkeypatch.setattr(Config, "LLM_API_KEY", "fake-llm-key")
-    monkeypatch.setattr(Config, "LLM_PROVIDER", "openai")
     monkeypatch.setattr(Config, "LLM_MODEL", "gpt-4o-mini")
     monkeypatch.setattr(Config, "EMBEDDING_API_KEY", "fake-emb-key")
-    monkeypatch.setattr(Config, "EMBEDDING_PROVIDER", "openai")
     monkeypatch.setattr(Config, "EMBEDDING_MODEL", "text-embedding-3-small")
 
     _mock_llm_and_embedder(monkeypatch)
@@ -357,20 +330,15 @@ def test_ingest_failure_sets_status_failed(patched_config, monkeypatch):
     Document should still succeed with empty entities.
     """
     monkeypatch.setattr(Config, "LLM_API_KEY", "fake-llm-key")
-    monkeypatch.setattr(Config, "LLM_PROVIDER", "openai")
     monkeypatch.setattr(Config, "LLM_MODEL", "gpt-4o-mini")
     monkeypatch.setattr(Config, "EMBEDDING_API_KEY", "fake-emb-key")
-    monkeypatch.setattr(Config, "EMBEDDING_PROVIDER", "openai")
     monkeypatch.setattr(Config, "EMBEDDING_MODEL", "text-embedding-3-small")
 
     fake_embed = FakeEmbedder()
     fake_file = FakeBigModelParserClient()
-    fake_kimi_batch = FakeKimiBatchClient()
-    fake_bigmodel_batch = FakeBigModelBatchClient()
     monkeypatch.setattr("core.doc_graph_pipeline.EmbeddingClient", lambda: fake_embed)
     monkeypatch.setattr("core.doc_graph_pipeline.BigModelParserClient", lambda: fake_file)
-    monkeypatch.setattr("core.doc_graph_pipeline.KimiBatchClient", lambda: fake_kimi_batch)
-    monkeypatch.setattr("core.doc_graph_pipeline.BigModelBatchClient", lambda: fake_bigmodel_batch)
+    monkeypatch.setattr("core.doc_graph_pipeline.BatchClient", FakeBatchClient)
 
     pdf = patched_config / "doc.pdf"
     _make_pdf(pdf, ["Page one content"])
@@ -395,10 +363,8 @@ def test_ingest_resume_skips_phase_a(patched_config, monkeypatch):
     Phase B should resume, marking chunks as 'done'.
     """
     monkeypatch.setattr(Config, "LLM_API_KEY", "fake-llm-key")
-    monkeypatch.setattr(Config, "LLM_PROVIDER", "openai")
     monkeypatch.setattr(Config, "LLM_MODEL", "gpt-4o-mini")
     monkeypatch.setattr(Config, "EMBEDDING_API_KEY", "fake-emb-key")
-    monkeypatch.setattr(Config, "EMBEDDING_PROVIDER", "openai")
     monkeypatch.setattr(Config, "EMBEDDING_MODEL", "text-embedding-3-small")
 
     _mock_llm_and_embedder(monkeypatch)
@@ -445,21 +411,16 @@ def test_image_analysis_persisted_to_chunk_metadata(patched_config, monkeypatch)
     the chunk's metadata JSON under the 'vision_desc' key.
     """
     monkeypatch.setattr(Config, "LLM_API_KEY", "fake-llm-key")
-    monkeypatch.setattr(Config, "LLM_PROVIDER", "openai")
     monkeypatch.setattr(Config, "LLM_MODEL", "gpt-4o-mini")
     monkeypatch.setattr(Config, "EMBEDDING_API_KEY", "fake-emb-key")
-    monkeypatch.setattr(Config, "EMBEDDING_PROVIDER", "openai")
     monkeypatch.setattr(Config, "EMBEDDING_MODEL", "text-embedding-3-small")
 
     fake_embed = FakeEmbedder()
     monkeypatch.setattr("core.doc_graph_pipeline.EmbeddingClient", lambda: fake_embed)
 
     fake_file = FakeBigModelParserClient()
-    fake_kimi_batch = FakeKimiBatchClient()
-    fake_bigmodel_batch = FakeBigModelBatchClient()
     monkeypatch.setattr("core.doc_graph_pipeline.BigModelParserClient", lambda: fake_file)
-    monkeypatch.setattr("core.doc_graph_pipeline.KimiBatchClient", lambda: fake_kimi_batch)
-    monkeypatch.setattr("core.doc_graph_pipeline.BigModelBatchClient", lambda: fake_bigmodel_batch)
+    monkeypatch.setattr("core.doc_graph_pipeline.BatchClient", FakeBatchClient)
 
     pdf = patched_config / "doc.pdf"
     _make_pdf(pdf, ["Page with image placeholder"])
@@ -769,3 +730,35 @@ def test_graph_feedback(monkeypatch):
     )
     assert result["success"] is True
     assert result["feedback_id"] > 0
+
+
+# ---------------------------------------------------------------------------
+# _extract_product_name 测试
+# ---------------------------------------------------------------------------
+
+
+def test_extract_product_name_from_markdown():
+    """从 Markdown 文本中提取产品型号."""
+    from core.doc_graph_pipeline import _extract_product_name
+
+    md = "# TMS320F28379D Technical Reference Manual\n\n## Introduction"
+    result = _extract_product_name(md, "/path/to/doc.pdf")
+    assert result == "TMS320F28379D"
+
+
+def test_extract_product_name_from_filename():
+    """从文件名中提取产品型号（Markdown 中无型号时）."""
+    from core.doc_graph_pipeline import _extract_product_name
+
+    md = "# Technical Reference Manual\n\n## Introduction"
+    result = _extract_product_name(md, "/path/to/STM32F407VG.pdf")
+    assert result == "STM32F407VG"
+
+
+def test_extract_product_name_not_found():
+    """无匹配时返回 None."""
+    from core.doc_graph_pipeline import _extract_product_name
+
+    md = "# Generic Manual\n\n## Introduction"
+    result = _extract_product_name(md, "/path/to/generic.pdf")
+    assert result is None
