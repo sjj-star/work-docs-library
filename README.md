@@ -55,7 +55,7 @@ flowchart TB
 
 1. `BigModelParserClient` 调用 **BigModel 专用** Expert API 解析 PDF，输出 Markdown 文本（含 `![alt](images/xxx.jpg)` 图片引用）+ `images/` 目录（⚠️ 该 API 非 OpenAI-compatible，仅支持 BigModel 厂商；失败时自动 fallback 到本地 `PDFParser`）
 2. `ChapterParser.parse_tree()` 将 Markdown 文本解析为树形章节结构（`#` 为文档标题/书名，`##` 为章节，`###` 为子章节）
-3. `BatchBuilder.build_batches()` 以 `##` 为硬边界（不跨章节合并）、`###` 为基本 chunk 单位（内容较短时可合并）构建 batch 列表
+3. `BatchBuilder.build_batches()` 接收 `ChapterParser.collect_all_nodes()` 扁平化的节点列表，按 `max_chars` 切分，超长内容按段落边界（`\n\n+`）切分为 sub-batch。每个 chunk 包含完整标题路径前缀（如 `# Title\n## Section\n### Sub\n\ncontent`）
 4. `EntityExtractor` 对每个 batch 的文本流式解析 Markdown 图片引用，按原文出现顺序构建 multimodal content（文本 → `[image_id: alt]` → base64 图片），提交到 Kimi Batch API
 5. LLM 返回 JSON，包含 `entities`、`relationships`、`image_descriptions`
 6. `GraphStore`（NetworkX）构建实体关系图谱，**同名同类型实体自动去重合并**。每个文档保存独立子图 `graphs/{doc_id}.json`；`KnowledgeBaseService.ingest_document()` 完成后**全量重建**全局图 `graphs/global.json`（`clear()` + 遍历所有子图重新加载），确保无幽灵残留，实现**跨文档知识互通**。合并时同时保存每个文档的原始属性快照到 `doc_properties[doc_id]`，支持按文档精确查询

@@ -205,19 +205,30 @@ class ChapterParser:
             first = flat[0]
             roots = [ChapterNode(level=1, title=first["title"], content=first.get("content", ""))]
 
-        # 递归传播 preface：任何有子节点的节点，其 content 归入第一个子节点
-        def _propagate_preface(node: ChapterNode) -> None:
-            for child in node.children:
-                _propagate_preface(child)
-            if node.children and node.content:
-                first_child = node.children[0]
-                first_child.content = (node.content + "\n\n" + first_child.content).strip()
-                node.content = ""
-
-        for root in roots:
-            _propagate_preface(root)
-
         return roots
+
+    @classmethod
+    def collect_all_nodes(
+        cls, node: ChapterNode, ancestors: list[str] | None = None
+    ) -> list[dict[str, str]]:
+        """递归收集树中所有有 content 的节点，保留完整标题路径.
+
+        Returns:
+            [{"title": str, "content": str}, ...]
+        """
+        ancestors = ancestors or []
+        path = ancestors + [node.title]
+        result: list[dict[str, str]] = []
+        if node.content:
+            path_lines = [f"{'#' * (i + 1)} {t}" for i, t in enumerate(path) if t]
+            path_prefix = "\n".join(path_lines)
+            full_content = (
+                f"{path_prefix}\n\n{node.content}" if path_prefix else node.content
+            )
+            result.append({"title": node.title, "content": full_content})
+        for child in node.children:
+            result.extend(cls.collect_all_nodes(child, path))
+        return result
 
     @classmethod
     def _is_heading(cls, line: str) -> tuple[int, str] | None:
@@ -269,58 +280,18 @@ class BatchBuilder:
     """按 # / ## 层级构建 LLM batch 请求."""
 
     @classmethod
-    def _collect_content(cls, node: ChapterNode) -> str:
-        """递归收集节点自身 + 所有子孙的 content.
-
-        将子节点的 heading 和 content 一并合并，保持层级结构可读性。
-        """
-        parts = [node.content] if node.content else []
-        for child in node.children:
-            child_content = cls._collect_content(child)
-            if child_content:
-                parts.append(f"{'#' * child.level} {child.title}\n\n{child_content}")
-        return "\n\n".join(parts).strip()
-
-    @classmethod
-    def _find_chunk_nodes(cls, node: ChapterNode, chunk_level: int = 3) -> list[ChapterNode]:
-        """从 node 开始，找到所有作为 chunk 单位的子节点.
-
-        规则：
-        - 如果 node 的 level >= chunk_level，node 本身是一个 chunk
-        - 否则，递归到子节点中找
-        - 如果 node 没有满足条件的子节点，node 本身降级作为 chunk
-        """
-        if node.level >= chunk_level:
-            return [node]
-
-        chunks: list[ChapterNode] = []
-        for child in node.children:
-            chunks.extend(cls._find_chunk_nodes(child, chunk_level))
-
-        # 如果没有子节点满足条件，当前节点降级作为 chunk
-        if not chunks:
-            return [node]
-
-        return chunks
-
-    @classmethod
     def build_batches(
         cls,
-        tree_chapters: list[ChapterNode],
+        chapters: list[ChapterNode],
         max_chars: int,
     ) -> list[list[dict[str, str]]]:
         """构建 batch 请求列表.
 
-        规则：
-        1. 每个 # 章节对应一个独立的 batch 请求列表（硬边界，不跨 # 合并）
-        2. 在 # 内部，以 ### 为基本 chunk 单位（包含其所有子孙 content）
-        3. 任何有子节点的节点，其 content 归入第一个子节点（preface 传播）
-        4. 如果当前 ### < 50% max_chars，尝试与下一个同级 ### 合并
-        5. 如果单个 ### 或合并后的块 > max_chars，按句子边界切分为 sub-batch
-        6. 没有 ### 的文档：以 ## 为 chunk 单位；没有 ## 的文档：# 内容本身作为一个 batch
+        输入为扁平化的 ChapterNode 列表（每个节点已包含完整标题路径前缀），
+        按 max_chars 切分，超长的 content 按段落边界切分为 sub-batch。
 
         Args:
-            tree_chapters: ChapterParser.parse_tree() 的输出
+            chapters: 扁平化的 ChapterNode 列表（无 children）
             max_chars: 每批最大字符数
 
         Returns:
@@ -328,82 +299,14 @@ class BatchBuilder:
 
         """
         batches: list[list[dict[str, str]]] = []
-        half_max = max_chars // 2
 
-        for root in tree_chapters:
-            if not root.children:
-                # 没有子节点，root 本身作为一个 batch
-                content = cls._collect_content(root)
-                if not content:
-                    continue
-                chunks = cls._split_if_needed(root.title, content, max_chars)
-                for chunk_content in chunks:
-                    batches.append([{"title": root.title, "content": chunk_content}])
+        for node in chapters:
+            content = node.content
+            if not content:
                 continue
-
-            # root 的直接子节点是 ##（章节），每个 ## 是一个硬边界
-            for section in root.children:
-                if not section.children:
-                    # section 没有子节点，section 本身作为一个 batch
-                    content = cls._collect_content(section)
-                    if not content:
-                        continue
-                    chunks = cls._split_if_needed(section.title, content, max_chars)
-                    for chunk_content in chunks:
-                        batches.append([{"title": section.title, "content": chunk_content}])
-                    continue
-
-                # 在 section 内部，找到所有 level=3 作为 chunk 单位
-                chunk_nodes = cls._find_chunk_nodes(section, chunk_level=Config.DEFAULT_CHUNK_LEVEL)
-
-                i = 0
-                while i < len(chunk_nodes):
-                    node = chunk_nodes[i]
-                    node_content = cls._collect_content(node)
-                    if not node_content:
-                        i += 1
-                        continue
-                    current_chunks: list[dict[str, str]] = []
-                    current_len = len(node_content)
-                    current_chunks.append({"title": node.title, "content": node_content})
-
-                    # 尝试合并下一个同级节点（如果当前 < 50% max_chars）
-                    j = i + 1
-                    while j < len(chunk_nodes):
-                        next_node = chunk_nodes[j]
-                        if next_node.level != node.level:
-                            break
-                        next_content = cls._collect_content(next_node)
-                        if current_len + len(next_content) <= max_chars:
-                            current_chunks.append(
-                                {"title": next_node.title, "content": next_content}
-                            )
-                            current_len += len(next_content)
-                            j += 1
-                            # 如果已经 >= 50%，停止合并
-                            if current_len >= half_max:
-                                break
-                        else:
-                            break
-
-                    # 检查总长度是否超过 max_chars
-                    if current_len > max_chars:
-                        # 需要切分（通常不会发生，因为合并时已检查）
-                        combined_text = "\n\n".join(c["content"] for c in current_chunks)
-                        splits = cls._split_by_sentences(combined_text, max_chars)
-                        for idx, split in enumerate(splits):
-                            batches.append(
-                                [
-                                    {
-                                        "title": f"{node.title} (part {idx + 1}/{len(splits)})",
-                                        "content": split,
-                                    }
-                                ]
-                            )
-                    else:
-                        batches.append(current_chunks)
-
-                    i = j
+            chunks = cls._split_if_needed(node.title, content, max_chars)
+            for chunk_content in chunks:
+                batches.append([{"title": node.title, "content": chunk_content}])
 
         return batches
 
@@ -444,7 +347,7 @@ class BatchBuilder:
             protected,
         )
 
-        sentences = re.split(r"(?<=[。！？\.\!\?])\s+|\n\n+", protected)
+        sentences = re.split(r"\n\n+", protected)
         chunks: list[str] = []
         current = ""
         for s in sentences:
@@ -862,14 +765,9 @@ class DocGraphPipeline:
         tree_chapters = self.chapter_parser.parse_tree(extracted_text)
         logger.info(f"章节解析完成 | roots={len(tree_chapters)}")
 
-        # 扁平化章节列表
         new_chapters_flat: list[dict[str, Any]] = []
         for root in tree_chapters:
-            if root.children:
-                for child in root.children:
-                    new_chapters_flat.append({"title": child.title, "content": child.content})
-            else:
-                new_chapters_flat.append({"title": root.title, "content": root.content})
+            new_chapters_flat.extend(ChapterParser.collect_all_nodes(root))
 
         # 构建 batch（全部章节，不做增量过滤）
         process_nodes = [
@@ -958,14 +856,9 @@ class DocGraphPipeline:
         # 章节解析
         tree_chapters = self.chapter_parser.parse_tree(extracted_text)
 
-        # 扁平化章节列表
         new_chapters_flat: list[dict[str, Any]] = []
         for root in tree_chapters:
-            if root.children:
-                for child in root.children:
-                    new_chapters_flat.append({"title": child.title, "content": child.content})
-            else:
-                new_chapters_flat.append({"title": root.title, "content": root.content})
+            new_chapters_flat.extend(ChapterParser.collect_all_nodes(root))
 
         # --- 增量分析 ---
         old_doc = self.db.get_document_by_path(file_path)

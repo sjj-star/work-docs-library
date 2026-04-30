@@ -83,8 +83,8 @@
 - ✅ **本地 PDF 解析器 Markdown 格式修复**：解决标题重复和段落内换行被误分段问题，输出格式与 BigModel Expert 保持一致
 - ✅ **完整章节层级构造**：使用 PDF TOC 真实层级生成 `#`/`##`/`###`/`####`，不再扁平化为两级
 - ✅ **段落内换行保留原始 `\n`**：LLM 直接理解换行语义，零额外 token，无 HTML 标签污染
-- ✅ **ChapterParser 多级树重构**：栈结构构建真正的多级树，递归传播 preface
-- ✅ **BatchBuilder 层级设计**：`#` 为文档标题，`##` 为硬边界，`###` 为基本 chunk 单位
+- ✅ **ChapterParser 多级树重构**：栈结构构建真正的多级树；去掉 preface 传播，每个节点保留自己的原始 content
+- ✅ **BatchBuilder 接收扁平化节点**：`ChapterParser.collect_all_nodes()` 收集所有有 content 的节点，为每个 chunk 附加完整标题路径前缀；段落边界切分（`\n\n+`）替代句子边界，避免编号标题被误切开
 - ✅ **数据模型清理**：移除 `Document.chunks`、`Document.metadata`（早期版本）、`Chunk.page_start/page_end` 等无功能实体字段；引入 `StrEnum` 约束状态值。注意：`Chunk.metadata` 在后续版本中重新引入，现承载 `content_hash`/`extracted_entities`/`extracted_relations`/`image_descriptions`/`embedding` 等核心缓存数据
 - ✅ **数据库 schema 简化**：移除 `chapters_override`、`page_start`、`page_end` 列；新增 `_schema_meta` 版本管理表；新增 `query_by_doc()` 辅助方法
 - ✅ **数据质量增强**：`GraphEntity`/`GraphRelation` 新增 `confidence`/`verified`/`created_at`/`updated_at`/`feedback_score` 字段
@@ -98,7 +98,7 @@
 - ✅ **跨产品外设变体建模**：`GraphEntity`/`GraphRelation` 新增 `doc_properties` 字段，保存每个文档的原始属性快照；引入 `Product` 实体类型，文档解析时自动提取产品型号并建立 `Product --[HAS_MODULE]--> Module` 关系；查询接口支持 `doc_id` 参数以获取指定文档的原始属性
 - ✅ **属性索引优化**：`NetworkXGraphStore` 内部维护 `property_index`，`find_by_property()` 从 O(N) 降至 O(1)
 - ✅ **Pipeline 三阶段拆分**：`_process_one` 拆分为 `stage1_parse` / `stage2_build_jsonl` / `stage3_ingest`，支持独立执行和人工干预
-- ✅ 274 个测试全部通过
+- ✅ 280 个测试全部通过
 
 ### 下一阶段（精确到下一步）
 1. **可视化**：图谱可视化导出（Graphviz / D3.js）
@@ -148,7 +148,7 @@
 ### 核心原则
 - **Mock 优先**：所有涉及外部 API 的测试使用 Fake 客户端，**禁止调用真实 API**
 - **回归即修复**：任何导致测试失败的变更必须当场修复
-- **265 个测试用例必须全部通过**
+- **280 个测试用例必须全部通过**
 
 ### 测试文件清单
 | 测试文件 | 说明 |

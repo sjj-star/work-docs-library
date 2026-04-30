@@ -65,13 +65,23 @@ def test_split_by_sentences_no_hard_truncate_fallback():
     assert chunks == [""]
 
 
-def test_split_by_sentences_respects_max_len():
-    """正常段落应按 max_len 切分."""
-    text = "A. " * 200  # 约 800 chars
+def test_split_by_sentences_paragraph_boundary_split():
+    """段落边界应在空行处切分，同一段落保持完整."""
+    text = ("A. " * 50 + "\n\n" + "B. " * 50 + "\n\n" + "C. " * 50)
     chunks = BatchBuilder._split_by_sentences(text, max_len=200)
+    # 空行分隔的段落应被切分到不同 chunk
     assert len(chunks) >= 2
     for c in chunks:
-        assert len(c) <= 200 + 50  # 允许少量超限（单个 sentence 超过 max_len 时）
+        assert len(c) <= 200 + 50  # 允许少量超限（单个段落超过 max_len 时）
+
+
+def test_split_by_sentences_single_long_paragraph_preserved():
+    """无空行的超长段落应作为一个整体保留（段落边界不切分同一段落内）."""
+    text = "A. " * 200  # 约 600 chars，无空行
+    chunks = BatchBuilder._split_by_sentences(text, max_len=200)
+    # 段落边界不切分同一段落，整个文本作为一个 chunk
+    assert len(chunks) == 1
+    assert len(chunks[0]) > 200  # 超过 max_len 但保持完整
 
 
 def test_split_by_sentences_html_table_case_insensitive():
@@ -95,33 +105,28 @@ class TestBatchBuilderFiltersEmptyContent:
         assert len(batches) == 1
         assert batches[0][0]["title"] == "Real Root"
 
-    def test_filters_section_with_empty_content(self):
-        """无子节点且 content 为空的 section 应被过滤."""
-        root = ChapterNode(level=1, title="Doc", content="")
-        sec_empty = ChapterNode(level=2, title="Empty Section", content="")
-        sec_real = ChapterNode(level=2, title="Real Section", content="Real content.")
-        root.children = [sec_empty, sec_real]
-        batches = BatchBuilder.build_batches([root], max_chars=1000)
+    def test_filters_empty_node_in_flat_list(self):
+        """扁平节点列表中 content 为空的节点应被过滤."""
+        batches = BatchBuilder.build_batches([
+            ChapterNode(level=1, title="Empty Section", content=""),
+            ChapterNode(level=1, title="Real Section", content="Real content."),
+        ], max_chars=1000)
         assert len(batches) == 1
         assert batches[0][0]["title"] == "Real Section"
 
-    def test_filters_empty_chunk_node(self):
-        """Content 为空的 chunk 节点应被过滤，不影响后续 chunk."""
-        root = ChapterNode(level=1, title="Doc", content="")
-        sec = ChapterNode(level=2, title="Section", content="")
-        sec.children = [
-            ChapterNode(level=3, title="Empty Chunk", content=""),
-            ChapterNode(level=3, title="Real Chunk", content="Real content."),
-        ]
-        root.children = [sec]
-        batches = BatchBuilder.build_batches([root], max_chars=1000)
+    def test_filters_empty_chunk_in_flat_list(self):
+        """扁平节点列表中 content 为空的 chunk 应被过滤，不影响后续 chunk."""
+        batches = BatchBuilder.build_batches([
+            ChapterNode(level=1, title="Empty Chunk", content=""),
+            ChapterNode(level=1, title="Real Chunk", content="Real content."),
+        ], max_chars=1000)
         assert len(batches) == 1
         assert batches[0][0]["title"] == "Real Chunk"
 
     def test_all_empty_nodes_yield_empty_batches(self):
         """全部节点都为空时应返回空列表."""
-        root = ChapterNode(level=1, title="Doc", content="")
-        sec = ChapterNode(level=2, title="Section", content="")
-        root.children = [sec]
-        batches = BatchBuilder.build_batches([root], max_chars=1000)
+        batches = BatchBuilder.build_batches([
+            ChapterNode(level=1, title="Doc", content=""),
+            ChapterNode(level=1, title="Section", content=""),
+        ], max_chars=1000)
         assert batches == []
