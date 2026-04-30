@@ -719,11 +719,121 @@ def tool_graph_conflicts(params: dict) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# 三阶段 Pipeline 工具
+# ---------------------------------------------------------------------------
+
+
+def tool_doc_parse(params: dict) -> dict:
+    """阶段1: PDF → Markdown."""
+    path = params.get("path")
+    if not path:
+        return {"success": False, "error": "Missing required parameter: path"}
+
+    from core.doc_graph_pipeline import DocGraphPipeline
+
+    pipe = DocGraphPipeline()
+    try:
+        doc_id, output_dir, text, images = pipe.stage1_parse(path)
+        return {
+            "success": True,
+            "doc_id": doc_id,
+            "output_dir": str(output_dir),
+            "chars": len(text),
+            "images": len(images),
+            "message": f"解析完成，可手动编辑 {output_dir}/result.md 后执行 doc_build_batches",
+        }
+    except Exception as e:
+        logger.exception("doc_parse failed")
+        return {"success": False, "error": str(e)}
+
+
+def tool_doc_build_batches(params: dict) -> dict:
+    """阶段2: Markdown → Batch JSONL."""
+    doc_id = params.get("doc_id")
+    if not doc_id:
+        return {"success": False, "error": "Missing required parameter: doc_id"}
+
+    from core.doc_graph_pipeline import DocGraphPipeline
+
+    pipe = DocGraphPipeline()
+    try:
+        jsonl_path, batches, requests = pipe.stage2_build_jsonl(
+            doc_id, max_chars=params.get("max_chars")
+        )
+        return {
+            "success": True,
+            "doc_id": doc_id,
+            "jsonl_path": str(jsonl_path),
+            "batch_count": len(batches),
+            "request_count": len(requests),
+            "message": "JSONL 已生成，可审查后执行 doc_submit_batches",
+        }
+    except Exception as e:
+        logger.exception("doc_build_batches failed")
+        return {"success": False, "error": str(e)}
+
+
+def tool_doc_submit_batches(params: dict) -> dict:
+    """阶段3: JSONL → API → 入库."""
+    doc_id = params.get("doc_id")
+    if not doc_id:
+        return {"success": False, "error": "Missing required parameter: doc_id"}
+
+    from pathlib import Path
+
+    from core.doc_graph_pipeline import DocGraphPipeline
+
+    pipe = DocGraphPipeline()
+    try:
+        # 获取原始文件路径（从数据库或参数）
+        file_path = params.get("file_path")
+        if not file_path:
+            doc = pipe.db.get_document(doc_id)
+            if doc:
+                file_path = doc.source_path
+            else:
+                return {
+                    "success": False,
+                    "error": f"无法找到文档 {doc_id} 的源文件路径，请提供 file_path 参数",
+                }
+
+        parsed_output_dir = Path(Config.DB_PATH).parent / "parsed" / doc_id
+        result_md = parsed_output_dir / "result.md"
+        if not result_md.exists():
+            return {"success": False, "error": f"result.md 不存在 | path={result_md}"}
+
+        extracted_text = result_md.read_text(encoding="utf-8")
+        jsonl_path_param = params.get("jsonl_path")
+        jsonl_path = Path(jsonl_path_param) if jsonl_path_param else None
+
+        result_doc_id = pipe.stage3_ingest(
+            file_path=file_path,
+            doc_id=doc_id,
+            parsed_output_dir=parsed_output_dir,
+            extracted_text=extracted_text,
+            bigmodel_images=[],
+            jsonl_path=jsonl_path,
+            force=params.get("force", False),
+        )
+        return {
+            "success": True,
+            "doc_id": result_doc_id,
+            "message": "文档已入库完成",
+        }
+    except Exception as e:
+        logger.exception("doc_submit_batches failed")
+        return {"success": False, "error": str(e)}
+
+
+# ---------------------------------------------------------------------------
 # Tool 映射
 # ---------------------------------------------------------------------------
 
 TOOL_MAP = {
     "ingest": tool_ingest,
+    "doc_parse": tool_doc_parse,
+    "doc_build_batches": tool_doc_build_batches,
+    "doc_submit_batches": tool_doc_submit_batches,
     "search": tool_search,
     "query": tool_query,
     "status": tool_status,
