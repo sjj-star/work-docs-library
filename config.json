@@ -1,20 +1,61 @@
 {
   "llm": {
-    "provider": "",
     "api_key": "",
     "endpoint": "",
     "model": "",
-    "thinking_enabled": false
+    "thinking_enabled": false,
+    "batch_endpoint": "",
+    "completion_window": "",
+    "batch_max_chars": "",
+    "batch_timeout": "",
+    "max_retries": "",
+    "retry_backoff": "",
+    "timeout": "",
+    "vision_max_edge": "",
+    "vision_quality": ""
   },
   "embedding": {
-    "provider": "",
     "api_key": "",
     "endpoint": "",
     "model": "",
-    "dimension": 0
+    "dimension": null,
+    "batch_endpoint": "",
+    "batch_max_chars": "",
+    "max_retries": "",
+    "retry_backoff": "",
+    "timeout": "",
+    "max_batch_size": ""
   },
-  "bigmodel": {
-    "api_key": ""
+  "parser": {
+    "api_key": "",
+    "timeout": "",
+    "max_retries": "",
+    "poll_interval": ""
   },
-  "batch_size": 0
+  "batch": {
+    "poll_interval": "",
+    "max_poll_retries": "",
+    "max_file_size_mb": "",
+    "parallel_workers": "",
+    "temp_dir": "",
+    "download_template": ""
+  },
+  "plugin": {
+    "search_top_k": "",
+    "query_top_k": "",
+    "graph_max_depth": "",
+    "subgraph_depth": "",
+    "default_limit": ""
+  },
+  "pipeline": {
+    "chunk_level": "",
+    "summary_length": "",
+    "title_max_len": "",
+    "title_min_len": ""
+  },
+  "graph": {
+    "max_path_depth": "",
+    "output_dir": ""
+  },
+  "batch_size": null
 }

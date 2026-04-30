@@ -224,6 +224,10 @@
           "name_pattern": {
             "type": "string",
             "description": "名称模糊匹配（子串，大小写不敏感）"
+          },
+          "doc_id": {
+            "type": "string",
+            "description": "可选，指定文档 ID 以获取该文档中的原始属性快照"
           }
         }
       }
@@ -255,6 +259,10 @@
             "type": "string",
             "description": "方向 out/in/both",
             "default": "out"
+          },
+          "doc_id": {
+            "type": "string",
+            "description": "可选，指定文档 ID 以获取该文档中的原始属性快照"
           }
         },
         "required": [
@@ -625,6 +633,10 @@
           "chunk_db_id": {
             "type": "integer",
             "description": "Chunk 数据库 ID"
+          },
+          "doc_id": {
+            "type": "string",
+            "description": "可选，指定文档 ID 以获取该文档中的原始属性快照"
           }
         },
         "required": [
