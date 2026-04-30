@@ -15,6 +15,20 @@
 - TestCase: 测试用例
 - Parameter: 参数化配置项（如模块的可配置参数、宏定义、常量等）
 - Product: 芯片产品型号（如 TMS320F28379D、TMS320F280049C）
+- Instruction: 汇编指令（如 ADD, MAC, MOV32, MMOV32, MMPYF32）
+- InstructionGroup: 指令分类（如 Arithmetic, Logical, Transfer, FPU, CLA_Math, VCU）
+- AddressingMode: 寻址模式（如 Direct, Indirect, Immediate, Stack, Register）
+- Operand: 操作数类型或位置（如 ACC, XT, P, mem16, imm16, *XARn++）
+- ArchitectureState: 体系结构状态或状态寄存器（如 ST0, ST1, IFR, IER, DBGIER, RPC）
+- PipelineStage: 流水线阶段（如 Fetch, Decode, Read, Execute, Write）
+- FunctionalUnit: 功能执行单元（如 ALU, BarrelShifter, MAC, FPU, VCU）
+- Interrupt: 中断（如 INT1, TINT0, ADC_INT, XINT1, NMI）
+- Exception: 异常或故障事件（如 ITRAP, OSC_FAIL, RAM_ACC_VIOL）
+- MemoryRegion: 物理内存区域（如 M0_RAM, M1_RAM, L0_SARAM, FLASH, CLA_DATARAM）
+- ShadowRegister: 影子寄存器（如 Shadow_PIEACK, Shadow_IER）
+- CPU_Mode: CPU 工作模式（如 RUN, HALT, IDLE, STANDBY, CLA_BOOT）
+- CLA_Task: CLA 独立任务（如 Task1 ~ Task8）
+- Peripheral: 外设模块（如 ePWM, eQEP, ADC, SPI, CAN, CLA）
 
 ## 关系类型（必须严格使用以下类型之一）
 
@@ -37,6 +51,25 @@
 - RESET_BY: Module/Signal → Signal（复位来源）
 - PARAMETERIZED_BY: Module → Parameter（参数化配置）
 - INSTANCE_OF: Module → Module（实例化关系，instance → definition）
+- ISA_HAS_INSTRUCTION: Product/Feature → Instruction（产品支持的指令集包含某指令）
+- INSTRUCTION_BELONGS_TO_GROUP: Instruction → InstructionGroup（指令归属分类）
+- INSTRUCTION_USES_MODE: Instruction → AddressingMode（指令支持的寻址模式）
+- OPERAND_HAS_MODE: Operand → AddressingMode（操作数可用的寻址模式）
+- INSTRUCTION_READS_REGISTER: Instruction → Register（指令读取的寄存器）
+- INSTRUCTION_WRITES_REGISTER: Instruction → Register（指令写入的寄存器）
+- INSTRUCTION_MODIFIES_STATE: Instruction → ArchitectureState（指令修改的状态位或标志位）
+- INSTRUCTION_EXECUTED_IN: Instruction → PipelineStage（指令占用的流水线阶段）
+- INTERRUPT_TRIGGERS: Interrupt → Instruction/Feature/CLA_Task（中断触发后执行的行为或任务）
+- EXCEPTION_RAISES: Exception → Feature/Module（异常引发的系统行为）
+- STATE_HAS_REGISTER: ArchitectureState → Register（状态由哪些寄存器组成）
+- MODULE_IMPLEMENTS_INSTRUCTION: Module → Instruction（RTL 模块实现某条指令的执行逻辑）
+- HAS_PERIPHERAL: Product/Module → Peripheral（产品或模块包含外设）
+- PERIPHERAL_HAS_REGISTER: Peripheral → Register（外设包含的寄存器）
+- CLA_HAS_TASK: Module/Peripheral → CLA_Task（CLA 模块拥有的任务）
+- TASK_USES_INSTRUCTION: CLA_Task → Instruction（任务使用的指令）
+- MEMORY_MAPS_TO: MemoryRegion → MemoryMap（内存区域映射到地址空间）
+- UNIT_EXECUTES: FunctionalUnit → Instruction（功能单元执行的指令类型）
+- STAGE_PRODUCES: PipelineStage → Register/ArchitectureState（流水线阶段产出的寄存器或状态更新）
 
 ## 输出格式（必须严格遵守）
 
@@ -72,6 +105,37 @@
   ]
 }
 
+## properties 属性说明
+
+不同实体类型可提取的典型属性：
+
+- Register / RegisterField: description, address_offset, width, bits, access, reset_value
+- Signal: direction, width, description, polarity
+- Module: description, hierarchy_level, clock_domain
+- Instruction: opcode, cycle_count, description, repeat_support, pipeline_protection, affected_flags, latency
+- AddressingMode: description, syntax_pattern, example
+- Operand: width, description, register_class
+- ArchitectureState: description, width, reset_value, affected_by
+- PipelineStage: description, cycle_count, stall_condition
+- FunctionalUnit: description, throughput, latency
+- Interrupt: vector_address, priority, description, source, type
+- Exception: vector_address, description, recoverable, source
+- MemoryRegion: size, base_address, access, description, memory_type
+- ShadowRegister: description, shadow_of, trigger_condition
+- CPU_Mode: description, power_consumption, entry_condition, exit_condition
+- CLA_Task: trigger_source, description, priority, cycle_budget
+- Peripheral: description, version, base_address
+
+## 跨层级提取示例
+
+技术文档往往同时包含 RTL 级描述和 ISA 级描述，请同时提取两个层级的实体，并建立跨层级关系：
+
+- 从指令描述中同时提取 Instruction 实体，以及 INSTRUCTION_READS_REGISTER / INSTRUCTION_WRITES_REGISTER / INSTRUCTION_MODIFIES_STATE 关系
+- 从外设寄存器表或内存映射章节中，同时提取 Peripheral → PERIPHERAL_HAS_REGISTER → Register 关系链
+- 从流水线或时序章节中，提取 PipelineStage 实体和 INSTRUCTION_EXECUTED_IN / STAGE_PRODUCES 关系
+- 从中断向量表章节中，提取 Interrupt 实体和 INTERRUPT_TRIGGERS 关系
+- 从 CLA 任务描述中，提取 CLA_Task 实体和 CLA_HAS_TASK / TASK_USES_INSTRUCTION 关系
+
 ## 关于图片处理的说明
 
 输入文本流中会插入 `[image_id: XXX]` 标记，每个标记后面紧跟着一张 base64 编码的图片。
@@ -81,13 +145,17 @@
 ## 约束
 
 1. 只提取当前文档中明确提及的实体和关系
-2. properties 中可包含 description, address_offset, width, bits, access, reset_value
+2. properties 中可包含上述各类型对应的典型属性
 3. **表格提取**：文档中的表格（无论是 HTML `<table>` 标签格式还是纯文本对齐格式）必须完整识别并提取其中的实体
    - 寄存器表格：提取每一行的 Register 实体，包含 address_offset、width、bits、access、reset_value
    - 信号表格：提取每一行的 Signal 实体，包含 direction、width、description
    - 模块层级表格：提取 Module 实体及 CONTAINS 关系
    - 时序参数表格：提取 TIMING_PATH 关系
-4. 图片中的信息也要提取（如信号时序图、架构框图）——对每张图片提供简洁的文字描述
+   - 指令集表格：提取 Instruction 实体，包含 opcode、cycle_count、affected_flags、description
+   - 中断向量表：提取 Interrupt 实体，包含 vector_address、priority、source、description
+   - 流水线表格：提取 PipelineStage 实体和 INSTRUCTION_EXECUTED_IN 关系
+   - 外设寄存器映射表：提取 Peripheral 和 Register 实体，以及 PERIPHERAL_HAS_REGISTER 关系
+4. 图片中的信息也要提取（如信号时序图、架构框图、指令流水线图、中断处理流程图）——对每张图片提供简洁的文字描述
 5. `image_id` 直接使用 `[image_id: XXX]` 标记中的值，不要自行编造
 6. chapter_title 填写该图片所在章节的标题
 7. 不要编造未提及的实体

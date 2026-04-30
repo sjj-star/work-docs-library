@@ -60,3 +60,45 @@ def test_build_batch_requests_multiple_batches():
         text_parts = [c["text"] for c in user_content if c["type"] == "text"]
         full_text = "".join(text_parts)
         assert "文档《Test》" in full_text
+
+
+def test_prompt_contains_arch_entity_types():
+    """系统提示词应包含新增的处理器架构实体类型."""
+    extractor = EntityExtractor(batch_client=None)
+    batches = [[{"title": "Instruction Set", "content": "MAC instruction description."}]]
+
+    requests = extractor._build_batch_requests(batches, image_base_dir=None, doc_context="")
+    assert len(requests) == 1
+    system_msg = requests[0]["body"]["messages"][0]["content"]
+
+    # 验证新增实体类型名称存在于系统提示词
+    assert "Instruction" in system_msg
+    assert "AddressingMode" in system_msg
+    assert "ArchitectureState" in system_msg
+    assert "PipelineStage" in system_msg
+    assert "Interrupt" in system_msg
+    assert "CLA_Task" in system_msg
+    assert "Peripheral" in system_msg
+
+    # 验证新增关系类型名称存在于系统提示词
+    assert "INSTRUCTION_READS_REGISTER" in system_msg
+    assert "INSTRUCTION_WRITES_REGISTER" in system_msg
+    assert "MODULE_IMPLEMENTS_INSTRUCTION" in system_msg
+    assert "INTERRUPT_TRIGGERS" in system_msg
+    assert "HAS_PERIPHERAL" in system_msg
+
+
+def test_prompt_contains_arch_properties():
+    """系统提示词应包含 C28x+CLA 专用属性说明."""
+    extractor = EntityExtractor(batch_client=None)
+    batches = [[{"title": "Test", "content": "test"}]]
+
+    requests = extractor._build_batch_requests(batches, image_base_dir=None, doc_context="")
+    system_msg = requests[0]["body"]["messages"][0]["content"]
+
+    assert "opcode" in system_msg
+    assert "cycle_count" in system_msg
+    assert "affected_flags" in system_msg
+    assert "vector_address" in system_msg
+    assert "trigger_source" in system_msg
+    assert "跨层级提取" in system_msg
