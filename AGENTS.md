@@ -212,7 +212,6 @@ config.json（用户持久化配置，项目根目录）
 | `WORKDOCS_PARSER_API_KEY` | 空 | PDF 解析 API Key（BigModel 专用） |
 | `WORKDOCS_LLM_BATCH_MAX_CHARS` | `10000` | 每个 batch 最大文本字符数 |
 | `WORKDOCS_LLM_BATCH_TIMEOUT` | `3600` | Batch API 轮询超时（秒） |
-| `WORKDOCS_EMBED_BATCH_MAX_CHARS` | `4000` | 向量化 chunk 最大字符数 |
 | `WORKDOCS_LLM_VISION_MAX_EDGE` | `1024` | 图片压缩最长边（px） |
 | `WORKDOCS_LLM_VISION_QUALITY` | `85` | JPEG 压缩质量 1-100 |
 | `WORKDOCS_BATCH_MAX_FILE_SIZE_MB` | `100` | 单个 JSONL 文件大小上限 |

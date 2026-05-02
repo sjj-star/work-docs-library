@@ -5,6 +5,7 @@ import logging
 import os
 import sys
 from pathlib import Path
+from typing import Any
 
 from dotenv import load_dotenv
 
@@ -78,30 +79,6 @@ class Config:
     ID_MAP_PATH: Path = _SKILL_ROOT / "knowledge_base" / "id_map.json"
     PROMPT_DIR: Path = _SKILL_ROOT / "scripts" / "prompts"
 
-    @staticmethod
-    def _parse_int_env(name: str, default: int) -> int:
-        """安全地解析整数环境变量."""
-        try:
-            value = os.getenv(name)
-            if value is None:
-                return default
-            return int(value)
-        except (ValueError, TypeError):
-            logger.warning(f"环境变量 {name} 值无效 (使用默认值 {default}): {os.getenv(name)}")
-            return default
-
-    @staticmethod
-    def _parse_float_env(name: str, default: float) -> float:
-        """安全地解析浮点数环境变量."""
-        try:
-            value = os.getenv(name)
-            if value is None:
-                return default
-            return float(value)
-        except (ValueError, TypeError):
-            logger.warning(f"环境变量 {name} 值无效 (使用默认值 {default}): {os.getenv(name)}")
-            return default
-
     # LLM 对话模型配置（总结用）
     LLM_API_KEY: str = _resolve_config("WORKDOCS_LLM_API_KEY", "llm.api_key", "")
     LLM_BASE_URL: str = _resolve_config(
@@ -132,8 +109,7 @@ class Config:
     # LLM Batch 处理配置
     LLM_BATCH_MAX_CHARS: int = 0  # 将在下方初始化
     LLM_BATCH_TIMEOUT: int = 0  # 将在下方初始化
-    # 向量化 chunk 最大字符数（独立配置，embedding 模型上下文通常较短）
-    EMBED_BATCH_MAX_CHARS: int = 0  # 将在下方初始化
+
 
     # --- API Endpoint 配置（服务商无感化） ---
     LLM_BATCH_ENDPOINT: str = _resolve_config(
@@ -185,8 +161,6 @@ class Config:
 
     # --- Pipeline 业务常量 ---
     DEFAULT_SUMMARY_LENGTH: int = 0  # 将在下方初始化
-    CHAPTER_TITLE_MAX_LEN: int = 0  # 将在下方初始化
-    CHAPTER_TITLE_MIN_LEN: int = 0  # 将在下方初始化
     GRAPH_MAX_PATH_DEPTH: int = 0  # 将在下方初始化
 
     # --- 目录配置 ---
@@ -206,9 +180,6 @@ class Config:
         )
         cls.LLM_BATCH_TIMEOUT = int(
             _resolve_config("WORKDOCS_LLM_BATCH_TIMEOUT", "llm.batch_timeout", "3600")
-        )
-        cls.EMBED_BATCH_MAX_CHARS = int(
-            _resolve_config("WORKDOCS_EMBED_BATCH_MAX_CHARS", "embedding.batch_max_chars", "4000")
         )
         cls.BATCH_SIZE = int(_resolve_config("WORKDOCS_BATCH_SIZE", "batch_size", "4"))
         # Vision 图片配置（LLM multimodal batch）
@@ -285,15 +256,37 @@ class Config:
         cls.DEFAULT_SUMMARY_LENGTH = int(
             _resolve_config("WORKDOCS_DEFAULT_SUMMARY_LENGTH", "pipeline.summary_length", "200")
         )
-        cls.CHAPTER_TITLE_MAX_LEN = int(
-            _resolve_config("WORKDOCS_CHAPTER_TITLE_MAX_LEN", "pipeline.title_max_len", "100")
-        )
-        cls.CHAPTER_TITLE_MIN_LEN = int(
-            _resolve_config("WORKDOCS_CHAPTER_TITLE_MIN_LEN", "pipeline.title_min_len", "2")
-        )
         cls.GRAPH_MAX_PATH_DEPTH = int(
             _resolve_config("WORKDOCS_GRAPH_MAX_PATH_DEPTH", "graph.max_path_depth", "6")
         )
+
+    @classmethod
+    def to_dict(cls, mask_sensitive: bool = True) -> dict[str, Any]:
+        """返回当前所有配置项的字典表示.
+
+        Args:
+            mask_sensitive: 若为 True，API Key 等敏感字段以 *** 脱敏显示
+
+        """
+        sensitive_keys = {
+            "LLM_API_KEY",
+            "EMBEDDING_API_KEY",
+            "PARSER_API_KEY",
+        }
+        result: dict[str, Any] = {}
+        for key in dir(cls):
+            if key.startswith("_"):
+                continue
+            val = getattr(cls, key)
+            if callable(val):
+                continue
+            if isinstance(val, Path):
+                val = str(val)
+            if key in sensitive_keys and mask_sensitive and isinstance(val, str) and val:
+                result[key] = val[:4] + "***" if len(val) > 4 else "***"
+            else:
+                result[key] = val
+        return result
 
     @classmethod
     def llm_configured(cls) -> bool:
