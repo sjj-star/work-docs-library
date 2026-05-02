@@ -41,20 +41,9 @@ class BigModelParserClient:
     @staticmethod
     def _resolve_api_key() -> str:
         """解析 Parser API Key."""
-        # 优先级：环境变量(Kimi注入) > config.json > .env
-        import os
+        from .config import Config
 
-        env_val = os.getenv("parser.api_key", "")
-        if env_val:
-            return env_val
-        # config.json
-        from .config import _CONFIG_JSON
-
-        val = _CONFIG_JSON.get("parser", {}).get("api_key", "")
-        if val:
-            return val
-        # .env
-        return os.getenv("WORKDOCS_PARSER_API_KEY", "")
+        return Config.PARSER_API_KEY
 
     def create_task(self, file_path: str | Path, tool_type: str = "expert") -> str:
         """创建文件解析任务.

@@ -10,6 +10,7 @@ import logging
 import os
 import sys
 from pathlib import Path
+from typing import Any
 
 from core.config import Config
 from core.graph_store import GraphEntity, GraphRelation
@@ -825,11 +826,94 @@ def tool_doc_submit_batches(params: dict) -> dict:
         return {"success": False, "error": str(e)}
 
 
+def tool_config(params: dict) -> dict:
+    """打印当前生效的配置值."""
+    from core.config import Config
+
+    mask = params.get("mask_sensitive", True)
+    config_dict = Config.to_dict(mask_sensitive=mask)
+
+    # 分组展示
+    groups: dict[str, dict[str, Any]] = {
+        "LLM 配置": {},
+        "Embedding 配置": {},
+        "解析器配置": {},
+        "Batch 配置": {},
+        "Plugin 配置": {},
+        "Pipeline 配置": {},
+        "路径配置": {},
+        "其他": {},
+    }
+
+    group_map: dict[str, str] = {
+        "LLM_API_KEY": "LLM 配置",
+        "LLM_BASE_URL": "LLM 配置",
+        "LLM_MODEL": "LLM 配置",
+        "LLM_THINKING_ENABLED": "LLM 配置",
+        "LLM_BATCH_ENDPOINT": "LLM 配置",
+        "LLM_BATCH_MAX_CHARS": "LLM 配置",
+        "LLM_BATCH_TIMEOUT": "LLM 配置",
+        "LLM_BATCH_COMPLETION_WINDOW": "LLM 配置",
+        "LLM_MAX_RETRIES": "LLM 配置",
+        "LLM_RETRY_BACKOFF": "LLM 配置",
+        "LLM_TIMEOUT": "LLM 配置",
+        "LLM_VISION_MAX_EDGE": "LLM 配置",
+        "LLM_VISION_QUALITY": "LLM 配置",
+        "EMBEDDING_API_KEY": "Embedding 配置",
+        "EMBEDDING_BASE_URL": "Embedding 配置",
+        "EMBEDDING_MODEL": "Embedding 配置",
+        "EMBEDDING_BATCH_ENDPOINT": "Embedding 配置",
+        "EMBEDDING_DIMENSION": "Embedding 配置",
+        "EMBED_MAX_RETRIES": "Embedding 配置",
+        "EMBED_RETRY_BACKOFF": "Embedding 配置",
+        "EMBED_TIMEOUT": "Embedding 配置",
+        "EMBED_MAX_BATCH_SIZE": "Embedding 配置",
+        "PARSER_API_KEY": "解析器配置",
+        "PARSER_TIMEOUT": "解析器配置",
+        "PARSER_MAX_RETRIES": "解析器配置",
+        "PARSER_POLL_INTERVAL": "解析器配置",
+        "BATCH_SIZE": "Batch 配置",
+        "BATCH_POLL_INTERVAL": "Batch 配置",
+        "BATCH_MAX_POLL_RETRIES": "Batch 配置",
+        "BATCH_MAX_FILE_SIZE_MB": "Batch 配置",
+        "BATCH_PARALLEL_WORKERS": "Batch 配置",
+        "BATCH_FILE_DOWNLOAD_TEMPLATE": "Batch 配置",
+        "BATCH_TEMP_DIR": "Batch 配置",
+        "PLUGIN_SEARCH_TOP_K": "Plugin 配置",
+        "PLUGIN_QUERY_TOP_K": "Plugin 配置",
+        "PLUGIN_GRAPH_MAX_DEPTH": "Plugin 配置",
+        "PLUGIN_SUBGRAPH_DEPTH": "Plugin 配置",
+        "PLUGIN_DEFAULT_LIMIT": "Plugin 配置",
+        "DEFAULT_SUMMARY_LENGTH": "Pipeline 配置",
+        "GRAPH_MAX_PATH_DEPTH": "Pipeline 配置",
+        "DB_PATH": "路径配置",
+        "FAISS_INDEX_PATH": "路径配置",
+        "ID_MAP_PATH": "路径配置",
+        "PROMPT_DIR": "路径配置",
+        "GRAPH_OUTPUT_DIR": "路径配置",
+    }
+
+    for key, val in config_dict.items():
+        group = group_map.get(key, "其他")
+        groups[group][key] = val
+
+    # 过滤空组
+    groups = {k: v for k, v in groups.items() if v}
+
+    return {
+        "success": True,
+        "llm_configured": Config.llm_configured(),
+        "embedding_configured": Config.embedding_configured(),
+        "config_groups": groups,
+    }
+
+
 # ---------------------------------------------------------------------------
 # Tool 映射
 # ---------------------------------------------------------------------------
 
 TOOL_MAP = {
+    "config": tool_config,
     "ingest": tool_ingest,
     "doc_parse": tool_doc_parse,
     "doc_build_batches": tool_doc_build_batches,

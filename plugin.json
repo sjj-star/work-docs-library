@@ -725,6 +725,25 @@
       }
     },
     {
+      "name": "config",
+      "description": "打印当前生效的配置参数值（支持敏感字段脱敏）",
+      "command": [
+        "venv/bin/python3",
+        "scripts/plugin_router.py",
+        "config"
+      ],
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "mask_sensitive": {
+            "type": "boolean",
+            "description": "是否脱敏显示 API Key 等敏感字段",
+            "default": true
+          }
+        }
+      }
+    },
+    {
       "name": "doc_parse",
       "description": "将 PDF 文件解析为 Markdown 和图片，输出到 knowledge_base/parsed/{doc_id}/。用户可手动编辑 result.md 后进入阶段2",
       "command": [
