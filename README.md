@@ -239,27 +239,23 @@ Kimi CLI 通过 `plugin.json` 注册以下工具：
 | `doc_build_batches` | 阶段2：Markdown → Batch JSONL（本地生成，不调用 API） |
 | `doc_submit_batches` | 阶段3：提交 Batch API 并保存原始结果文件 |
 | `doc_ingest_results` | 阶段4：从结果文件解析实体、构建图谱、向量化并入库 |
-| `search` | 基于 FAISS 的语义向量搜索 |
+| `semantic_search` | 语义向量搜索（`graph_depth=0`）+ 可选关联图谱扩展（`graph_depth>0`） |
 | `query` | 按章节、关键词、概念查询 chunk |
-| `status` | 列出所有已导入文档 |
+| `status` | 列出所有已导入文档，或查看指定文档的详细状态与进度 |
 | `toc` | 查看文档目录 |
-| `progress` | 查看文档处理进度 |
 | `reprocess` | 强制重新处理文档 |
-| `get_content` | 获取完整未截断内容 |
-| `graph_query` | 查询知识图谱实体（按类型/名称） |
-| `graph_neighbors` | 查询实体的邻居节点（含关系属性） |
+| `get_content` | 获取完整未截断内容，可选同时返回关联图谱实体/关系 |
+| `graph_query` | 查询知识图谱实体（`depth=0`），支持扩展邻居（`depth=1`）和子图（`depth>1`） |
 | `graph_path` | 查找两实体间的路径（支持关系过滤） |
-| `graph_subgraph` | 提取以某实体为中心的子图 |
-| `graph_add_entity` | 添加/更新图谱实体 |
-| `graph_update_entity` | 更新实体属性 |
+| `graph_upsert_entity` | 添加/更新图谱实体（已存在则更新，不存在则创建） |
 | `graph_delete_entity` | 删除实体（级联删边） |
-| `graph_add_relation` | 添加/更新图谱关系 |
+| `graph_upsert_relation` | 添加/更新图谱关系 |
 | `graph_delete_relation` | 删除关系 |
-| `graph_verify_entity` | 标记实体为已验证 |
-| `graph_search_with_graph` | 语义搜索 + 关联图谱扩展 |
-| `graph_get_content_with_entities` | 获取 chunk 及关联实体 |
-| `graph_feedback` | 提交对实体/关系的反馈 |
+| `graph_feedback` | 提交（`action=submit`）或查询（`action=query`）对实体/关系的反馈 |
 | `graph_conflicts` | 查询冲突日志 |
+| `graph_provenance` | 实体来源溯源：从图谱实体追溯到原始文档 chunk（调试与验证） |
+| `rebuild_global_graph` | 全量重建全局图谱（修复不一致） |
+| `config` | 打印当前生效配置（支持脱敏） |
 
 ---
 

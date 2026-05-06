@@ -217,29 +217,19 @@ class KnowledgeBaseService:
 
         # 保存全局图快照，用于失败回滚
         backup_g = copy.deepcopy(self.graph._g)
-        backup_index = {
-            k: set(v) for k, v in self.graph._property_index.items()
-        }
+        backup_index = {k: set(v) for k, v in self.graph._property_index.items()}
 
         try:
             # 从全局图中精确移除旧文档贡献
             self.graph.remove_document_contributions(doc_id)
             # 使用独立的 graph_store 处理
-            pipe = DocGraphPipeline(
-                db=self.db, vec=self.vec, graph_store=NetworkXGraphStore()
-            )
+            pipe = DocGraphPipeline(db=self.db, vec=self.vec, graph_store=NetworkXGraphStore())
             try:
-                result = pipe._process_one(
-                    doc.source_path, dry_run=False, force=True
-                )
+                result = pipe._process_one(doc.source_path, dry_run=False, force=True)
                 if not result:
                     raise RuntimeError(f"Reprocess failed for {doc_id}")
                 # 将重新处理后的图谱合并到全局图
-                graph_path = (
-                    Config.DB_PATH.parent
-                    / Config.GRAPH_OUTPUT_DIR
-                    / f"{doc_id}.json"
-                )
+                graph_path = Config.DB_PATH.parent / Config.GRAPH_OUTPUT_DIR / f"{doc_id}.json"
                 if graph_path.exists():
                     temp = NetworkXGraphStore()
                     temp.load(graph_path)
