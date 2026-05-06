@@ -360,11 +360,27 @@ class KnowledgeDB:
     # -- 冲突日志 --
 
     def insert_conflict_logs(self, logs: list[dict]) -> None:
-        """批量插入冲突日志."""
+        """批量插入冲突日志.
+
+        支持实体冲突和关系冲突。关系冲突通过合成 entity_type/name
+        保留完整上下文，无需修改数据库 schema。
+        """
         if not logs:
             return
         with self._connect() as conn:
             for log in logs:
+                entity_type = log.get("entity_type", "")
+                name = log.get("name", "")
+                # 关系冲突：合成可读的 entity_type / name
+                if not entity_type and "from_type" in log:
+                    rel_type = log.get("rel_type", "")
+                    entity_type = f"Relation[{rel_type}]"
+                    name = (
+                        f"{log.get('from_type', '')}::"
+                        f"{log.get('from_name', '')} -> "
+                        f"{log.get('to_type', '')}::"
+                        f"{log.get('to_name', '')}"
+                    )
                 conn.execute(
                     """
                     INSERT INTO conflict_logs
@@ -372,8 +388,8 @@ class KnowledgeDB:
                     VALUES (?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
-                        log.get("entity_type", ""),
-                        log.get("name", ""),
+                        entity_type,
+                        name,
                         log.get("property_key", ""),
                         str(log.get("old_value", "")),
                         str(log.get("new_value", "")),

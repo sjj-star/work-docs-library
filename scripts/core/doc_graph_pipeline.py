@@ -169,7 +169,7 @@ class ChapterParser:
 
         规则：
         - 按 heading level 确定父子关系（level 小的为父，同级为兄弟）
-        - # 和第一个 ## 之间的文字归入第一个 ## 的 preface
+        - 每个节点保留自己的原始 content，不互相合并
         - 没有 # 时，第一个 heading 自动上移为 #
 
         Returns:
@@ -360,7 +360,12 @@ class BatchBuilder:
             if len(current) + len(s) + 2 > max_len:
                 if current:
                     chunks.append(current)
-                current = s
+                if len(s) > max_len:
+                    # 单个段落/保护块超过限制，作为独立 chunk
+                    chunks.append(s)
+                    current = ""
+                else:
+                    current = s
             else:
                 current = (current + "\n\n" + s).strip() if current else s
         if current:
@@ -673,7 +678,7 @@ class EntityExtractor:
             return json.loads(cleaned)
         except json.JSONDecodeError:
             try:
-                cleaned = re.sub(r",(\s*[}\]])", r"", cleaned)
+                cleaned = re.sub(r",(\s*[}\]])", r"\1", cleaned)
                 return json.loads(cleaned)
             except json.JSONDecodeError:
                 logger.warning(f"JSON 解析失败 | raw={raw[:200]}...")
@@ -696,6 +701,7 @@ class DocGraphPipeline:
         self.db = db or KnowledgeDB()
         self.vec = vec or VectorIndex(dim=Config.EMBEDDING_DIMENSION)
         self.graph = graph_store or NetworkXGraphStore()
+        self._owns_graph = graph_store is None
 
         # 客户端
         try:
@@ -976,6 +982,21 @@ class DocGraphPipeline:
         )
         return new_chapters_flat, unchanged, changed, added, removed, old_doc, file_hash
 
+    @staticmethod
+    def _is_valid_results_file(path: Path) -> bool:
+        """校验 results.jsonl 文件是否包含至少一个有效的 JSON 行."""
+        if not path.exists() or path.stat().st_size == 0:
+            return False
+        try:
+            with open(path, encoding="utf-8") as f:
+                first_line = f.readline().strip()
+                if not first_line:
+                    return False
+                json.loads(first_line)
+                return True
+        except (json.JSONDecodeError, OSError):
+            return False
+
     def stage3_submit_batches(
         self,
         doc_id: str,
@@ -999,19 +1020,19 @@ class DocGraphPipeline:
             if existing and existing.file_hash == file_hash:
                 if existing.status == DocumentStatus.DONE:
                     logger.info(f"跳过未变更文档 | file={file_path} | doc_id={doc_id}")
-                    if results_path.exists():
+                    if self._is_valid_results_file(results_path):
                         return results_path
                 if (
                     existing.status == DocumentStatus.BATCH_SUBMITTED
-                    and results_path.exists()
+                    and self._is_valid_results_file(results_path)
                 ):
                     logger.info(
-                        f"Batch 已提交且结果文件存在，跳过 | file={file_path} | doc_id={doc_id}"
+                        f"Batch 已提交且结果文件有效，跳过 | file={file_path} | doc_id={doc_id}"
                     )
                     return results_path
-            # 如果结果文件已存在且非 force，直接返回
-            if results_path.exists():
-                logger.info(f"结果文件已存在，跳过提交 | path={results_path}")
+            # 如果结果文件已存在且有效且非 force，直接返回
+            if self._is_valid_results_file(results_path):
+                logger.info(f"结果文件已存在且有效，跳过提交 | path={results_path}")
                 return results_path
 
         logger.info(f"开始阶段3 Batch 提交 | file={file_path} | doc_id={doc_id}")
@@ -1074,6 +1095,23 @@ class DocGraphPipeline:
                 for r in results:
                     f.write(json.dumps(r, ensure_ascii=False) + "\n")
         logger.info(f"Batch 结果已保存 | path={results_path}")
+        # 保存增量分析结果摘要，供 stage4 校验一致性
+        incremental_info = {
+            "unchanged_titles": [ch["title"] for ch, _ in unchanged],
+            "changed_titles": [ch["title"] for ch in changed],
+            "added_titles": [ch["title"] for ch in added],
+            "removed_titles": [ck.chapter_title for ck in removed],
+            "result_md_hash": hashlib.md5(
+                (Config.DB_PATH.parent / "parsed" / doc_id / "result.md")
+                .read_bytes()
+            ).hexdigest(),
+        }
+        info_path = batch_dir / f"{doc_id}_incremental.json"
+        info_path.write_text(
+            json.dumps(incremental_info, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+
         self.db.update_document_status(doc_id, DocumentStatus.BATCH_SUBMITTED)
         return results_path
 
@@ -1089,8 +1127,8 @@ class DocGraphPipeline:
         Returns:
             doc_id
         """
-        # 确保每个文档使用干净的局部图谱
-        if hasattr(self.graph, "clear"):
+        # 确保每个文档使用干净的局部图谱（仅清空局部创建的图）
+        if self._owns_graph and hasattr(self.graph, "clear"):
             self.graph.clear()
 
         # 检查是否需要重新处理
@@ -1123,6 +1161,36 @@ class DocGraphPipeline:
         new_chapters_flat, unchanged, changed, added, removed, old_doc, _ = (
             self._incremental_analysis(file_path, extracted_text, force)
         )
+
+        # 校验增量分析结果与 stage3 是否一致
+        info_path = results_path.parent / f"{doc_id}_incremental.json"
+        if info_path.exists():
+            info = json.loads(info_path.read_text(encoding="utf-8"))
+            expected_hash = info.get("result_md_hash", "")
+            actual_hash = hashlib.md5(
+                (Config.DB_PATH.parent / "parsed" / doc_id / "result.md")
+                .read_bytes()
+            ).hexdigest()
+            if expected_hash != actual_hash:
+                logger.warning(
+                    f"result.md 在 stage3 后被修改，增量分析结果可能不一致 | "
+                    f"doc_id={doc_id}"
+                )
+            else:
+                current_titles = {
+                    "unchanged": [ch["title"] for ch, _ in unchanged],
+                    "changed": [ch["title"] for ch in changed],
+                    "added": [ch["title"] for ch in added],
+                    "removed": [ck.chapter_title for ck in removed],
+                }
+                for key in ("unchanged_titles", "changed_titles", "added_titles", "removed_titles"):
+                    expected = set(info.get(key, []))
+                    actual = set(current_titles.get(key.replace("_titles", ""), []))
+                    if expected != actual:
+                        logger.warning(
+                            f"增量分析结果与 stage3 不一致 ({key}) | "
+                            f"doc_id={doc_id}"
+                        )
 
         # --- 实体提取 ---
         all_entities: list[GraphEntity] = []
@@ -1225,20 +1293,24 @@ class DocGraphPipeline:
             )
 
         # --- 保存 chunks → SQLite → 向量化 ---
-        self._save_chunks_to_db(
-            doc_id,
-            file_path,
-            file_hash,
-            new_chapters_flat,
-            extracted_text,
-            unchanged,
-            changed,
-            added,
-            removed,
-            all_image_descriptions,
-            all_entities,
-            all_relations,
-        )
+        try:
+            self._save_chunks_to_db(
+                doc_id,
+                file_path,
+                file_hash,
+                new_chapters_flat,
+                extracted_text,
+                unchanged,
+                changed,
+                added,
+                removed,
+                all_image_descriptions,
+                all_entities,
+                all_relations,
+            )
+        except Exception:
+            self.db.update_document_status(doc_id, DocumentStatus.FAILED)
+            raise
 
         # --- 持久化图谱 ---
         graph_path = Config.DB_PATH.parent / Config.GRAPH_OUTPUT_DIR / f"{doc_id}.json"
@@ -1321,27 +1393,40 @@ class DocGraphPipeline:
             file_hash = hashlib.md5(Path(file_path).read_bytes()).hexdigest()
             return file_hash[:16]
 
-        # 阶段1: PDF → Markdown
-        doc_id, _parsed_output_dir, _extracted_text, _bigmodel_images = self.stage1_parse(file_path)
+        file_hash = hashlib.md5(Path(file_path).read_bytes()).hexdigest()
+        doc_id = file_hash[:16]
 
-        # 阶段2: Markdown → JSONL
-        jsonl_path, _batches, _requests = self.stage2_build_jsonl(doc_id)
+        try:
+            # 阶段1: PDF → Markdown
+            doc_id, _parsed_output_dir, _extracted_text, _bigmodel_images = (
+                self.stage1_parse(file_path)
+            )
 
-        # 阶段3: 提交 Batch API 并保存结果
-        results_path = self.stage3_submit_batches(
-            doc_id=doc_id,
-            file_path=file_path,
-            jsonl_path=jsonl_path,
-            force=force,
-        )
+            # 阶段2: Markdown → JSONL
+            jsonl_path, _batches, _requests = self.stage2_build_jsonl(doc_id)
 
-        # 阶段4: 从结果文件解析并入库
-        return self.stage4_ingest_results(
-            doc_id=doc_id,
-            file_path=file_path,
-            results_path=results_path,
-            force=force,
-        )
+            # 阶段3: 提交 Batch API 并保存结果
+            results_path = self.stage3_submit_batches(
+                doc_id=doc_id,
+                file_path=file_path,
+                jsonl_path=jsonl_path,
+                force=force,
+            )
+
+            # 阶段4: 从结果文件解析并入库
+            return self.stage4_ingest_results(
+                doc_id=doc_id,
+                file_path=file_path,
+                results_path=results_path,
+                force=force,
+            )
+        except Exception as e:
+            logger.error(f"文档处理失败 | file={file_path} | doc_id={doc_id} | error={e}")
+            try:
+                self.db.update_document_status(doc_id, DocumentStatus.FAILED)
+            except Exception:
+                pass
+            raise
 
     def _save_chunks_to_db(
         self,
@@ -1382,12 +1467,16 @@ class DocGraphPipeline:
         def _build_metadata(ch_title: str, ch_hash: str, old_ck: Chunk | None) -> dict[str, Any]:
             """构建 chunk metadata，包含缓存的实体/关系/embedding."""
             ch_ents = [e for e in entity_dicts if e.get("source_chapter") == ch_title]
-            ch_ent_names = {e.get("name", "") for e in ch_ents}
+            ch_ent_keys = {
+                (e.get("type", ""), e.get("name", "")) for e in ch_ents
+            }
             # 按章节过滤关系：保留 from 或 to 在当前章节实体列表中的关系
+            # 使用 (type, name) 元组避免跨类型同名污染
             ch_rels = [
                 r
                 for r in relation_dicts
-                if r.get("from", "") in ch_ent_names or r.get("to", "") in ch_ent_names
+                if (r.get("from_type", ""), r.get("from", "")) in ch_ent_keys
+                or (r.get("to_type", ""), r.get("to", "")) in ch_ent_keys
             ]
             # 按章节过滤图片描述
             ch_images = [img for img in image_descriptions if img.get("chapter_title") == ch_title]
@@ -1460,33 +1549,41 @@ class DocGraphPipeline:
                 else:
                     reembed_pairs.append((ck.content, ck.id))
 
+            all_items: list[tuple[int, list[float]]] = []
             if reuse_pairs:
-                self.db.update_chunks_embedded_batch(reuse_pairs)
-                self.vec.add_batch(reuse_pairs)
+                all_items.extend(reuse_pairs)
 
             if reembed_pairs:
                 texts, valid_ids = zip(*reembed_pairs)
                 if self.embedding_batch_client:
-                    logger.info(f"开始批量向量化 | chunks={len(texts)} | client=BigModelBatch")
+                    logger.info(
+                        f"开始批量向量化 | chunks={len(texts)} | client=BigModelBatch"
+                    )
                     embeddings = self.embedding_batch_client.submit_embedding_batch(
                         texts=list(texts),
                         timeout=Config.LLM_BATCH_TIMEOUT,
                     )
-                    items = list(zip(valid_ids, embeddings))
-                    self.db.update_chunks_embedded_batch(items)
-                    self.vec.add_batch(items)
+                    all_items.extend(list(zip(valid_ids, embeddings)))
                 else:
                     embedder = EmbeddingClient()
                     for i in range(0, len(texts), Config.BATCH_SIZE):
                         batch_texts = list(texts[i : i + Config.BATCH_SIZE])
                         batch_ids = list(valid_ids[i : i + Config.BATCH_SIZE])
                         embeddings = embedder.embed(batch_texts)
-                        items = list(zip(batch_ids, embeddings))
-                        self.db.update_chunks_embedded_batch(items)
-                        self.vec.add_batch(items)
+                        all_items.extend(list(zip(batch_ids, embeddings)))
                     embedder.close()
+
+            # 统一写入 SQLite 和 FAISS，确保原子性
+            if all_items:
+                self.db.update_chunks_embedded_batch(all_items)
+                self.vec.add_batch(all_items)
         except Exception as e:
-            logger.warning(f"向量化失败 | doc_id={doc_id} | error={e}")
+            logger.error(f"向量化失败 | doc_id={doc_id} | error={e}")
+            # 清理该文档在 FAISS 中可能已添加的向量
+            self.vec.remove_doc(chunk_db_ids)
+            for db_id in chunk_db_ids:
+                self.db.update_chunk_status(db_id, "failed")
+            raise
 
         # 5. 更新 chunk 状态为 done
         for db_id in chunk_db_ids:
@@ -1498,12 +1595,23 @@ class DocGraphPipeline:
         chapter_title: str,
         image_descriptions: list[dict[str, Any]],
     ) -> str:
-        """将图片文字化结果合并到 chunk 内容中."""
+        """将图片文字化结果合并到 chunk 内容中.
+
+        按 chapter_title 过滤，只追加当前章节相关的图片描述。
+        """
         if not image_descriptions:
             return content
 
+        chapter_images = [
+            d
+            for d in image_descriptions
+            if d.get("chapter_title", "") == chapter_title
+        ]
+        if not chapter_images:
+            return content
+
         parts = [content, "\n\n【图片内容】"]
-        for d in image_descriptions:
+        for d in chapter_images:
             img_id = d.get("image_id", "unknown")
             img_desc = d.get("description", "")
             parts.append(f"[{img_id}] {img_desc}")
@@ -1513,3 +1621,7 @@ class DocGraphPipeline:
         """关闭资源."""
         if self.parser_client:
             self.parser_client = None
+        if self.llm_batch:
+            self.llm_batch.close()
+        if self.embedding_batch_client:
+            self.embedding_batch_client.close()

@@ -567,9 +567,15 @@ class NetworkXGraphStore(GraphStore):
     # -- 实体操作 --
 
     def _add_to_property_index(self, nid: str, entity_type: str, properties: dict) -> None:
-        """将实体属性加入索引."""
+        """将实体属性加入索引.
+
+        对不可哈希值（list/dict）自动序列化为 JSON 字符串作为索引 key。
+        """
         for k, v in properties.items():
-            key = (entity_type, k, v)
+            try:
+                key = (entity_type, k, v)
+            except TypeError:
+                key = (entity_type, k, json.dumps(v, sort_keys=True))
             if key not in self._property_index:
                 self._property_index[key] = set()
             self._property_index[key].add(nid)
@@ -577,7 +583,10 @@ class NetworkXGraphStore(GraphStore):
     def _remove_from_property_index(self, nid: str, entity_type: str, properties: dict) -> None:
         """从索引中移除实体属性."""
         for k, v in properties.items():
-            key = (entity_type, k, v)
+            try:
+                key = (entity_type, k, v)
+            except TypeError:
+                key = (entity_type, k, json.dumps(v, sort_keys=True))
             if key in self._property_index:
                 self._property_index[key].discard(nid)
                 if not self._property_index[key]:
@@ -972,6 +981,13 @@ class NetworkXGraphStore(GraphStore):
                     self._g.nodes[nid]["source_doc_ids"] = sids
                 else:
                     nodes_to_remove.append(nid)
+
+        # 清理属性索引中待移除节点的条目
+        for nid in nodes_to_remove:
+            data = self._g.nodes[nid]
+            self._remove_from_property_index(
+                nid, data.get("entity_type", ""), data.get("properties", {})
+            )
 
         # 移除孤儿节点（一并移除其关联边）
         self._g.remove_nodes_from(nodes_to_remove)
