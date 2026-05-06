@@ -68,6 +68,39 @@
 
 ---
 
+## 中间产物持久化原则
+
+> 从源数据到最终知识库图谱的全流程中，每个阶段的输出都必须以人类可读、可编辑、可重新加载的格式持久化到磁盘。这是确保人为干预、质量检查、数据重建等特殊复杂需求得以高效稳定地贯穿项目持续开发的核心机制。
+
+### 为什么必须持久化？
+
+技术文档的信息密度极高，Pipeline 中任何一处的黑盒处理都可能导致关键寄存器、信号或时序参数的丢失。将每个中间结果显式落盘，使整条链路从"一次性黑盒"转变为"可审计、可回滚、可修复"的透明流水线：
+
+- **人为干预**：任意阶段完成后，开发人员可直接审查、修改磁盘上的中间产物，再重新触发后续阶段，无需从头执行。
+- **质量检查**：通过对比上下游产物（如 `result.md` 与 `results.jsonl` 中的提取结果）快速定位数据质量问题，明确是解析器失真、LLM 提取偏差还是图谱合并错误。
+- **数据重建**：任一阶段失败后，基于已持久化的上游产物重新执行该阶段即可，无需回到源文件重新开始。
+- **成本保护**：API 调用阶段（`stage3_submit_batches`）与本地处理阶段（`stage4_ingest_results`）解耦。若入库失败，无需重新付费调用 Batch API，直接重试 stage4 即可。
+
+### 当前 Pipeline 的持久化映射
+
+| 阶段 | 产物路径 | 说明 |
+|------|----------|------|
+| Stage 1 (Parse) | `knowledge_base/parsed/{doc_id}/result.md` | 解析后的 Markdown（可人工编辑后重新触发 stage2） |
+| Stage 2 (Build JSONL) | `knowledge_base/batch/{doc_id}.jsonl` | Batch API 输入请求 |
+| Stage 2 (Build JSONL) | `knowledge_base/batch/{doc_id}_batch_info.json` | request → chapter 映射，用于结果回填 |
+| Stage 3 (Submit) | `knowledge_base/batch/{doc_id}_results.jsonl` | API 原始返回结果（可审查、可编辑后重新触发 stage4） |
+| Stage 4 (Ingest) | `knowledge_base/graphs/{doc_id}.json` | 文档级子图快照（可从任意子图重建全局图） |
+| Stage 4 (Ingest) | `knowledge_base/workdocs.db` + `knowledge_base/faiss.index` | SQLite 元数据与 FAISS 向量索引 |
+
+### 开发约束
+
+- **新增 Pipeline 阶段时，必须同步定义该阶段的持久化产物**：包括文件格式、存储路径、以及从该产物重新加载并继续下游处理的接口。
+- **禁止阶段间纯内存传递大规模数据**：阶段之间的数据流转必须通过磁盘文件完成；仅允许在内存中传递小对象（如状态标记、文件路径、轻量级元数据字典）。
+- **产物格式优先人类可读**：优先使用 Markdown、JSONL、JSON 等人类可直接阅读、对比、diff、手动编辑的格式，避免二进制或高度压缩的私有格式。
+- **向后兼容的加载接口**：读取中间产物的代码必须能优雅处理格式演进（如缺失字段、新增字段），通过默认值或版本检测保证旧产物仍可加载。
+
+---
+
 ## 开发计划
 
 ### 当前阶段（已完成）
@@ -97,7 +130,7 @@
 - ✅ **处理器架构图谱扩展（C28x+CLA）**：新增 `Instruction`/`InstructionGroup`/`AddressingMode`/`Operand`/`ArchitectureState`/`PipelineStage`/`FunctionalUnit`/`Interrupt`/`Exception`/`MemoryRegion`/`ShadowRegister`/`CPU_Mode`/`CLA_Task`/`Peripheral` 等实体类型，以及 `ISA_HAS_INSTRUCTION`/`INSTRUCTION_READS_REGISTER`/`INSTRUCTION_WRITES_REGISTER`/`INSTRUCTION_MODIFIES_STATE`/`MODULE_IMPLEMENTS_INSTRUCTION`/`INTERRUPT_TRIGGERS`/`HAS_PERIPHERAL`/`CLA_HAS_TASK` 等跨层级关系类型，支持 ISA 层级与 RTL 层级的知识互通
 - ✅ **跨产品外设变体建模**：`GraphEntity`/`GraphRelation` 新增 `doc_properties` 字段，保存每个文档的原始属性快照；引入 `Product` 实体类型，文档解析时自动提取产品型号并建立 `Product --[HAS_MODULE]--> Module` 关系；查询接口支持 `doc_id` 参数以获取指定文档的原始属性
 - ✅ **属性索引优化**：`NetworkXGraphStore` 内部维护 `property_index`，`find_by_property()` 从 O(N) 降至 O(1)
-- ✅ **Pipeline 四阶段拆分**：`_process_one` 拆分为 `stage1_parse` / `stage2_build_jsonl` / `stage3_submit_batches` / `stage4_ingest_results`，每个中间产物（result.md / requests.jsonl / batch_info.json / results.jsonl / 子图谱 JSON）均可独立执行、人为干预、重新执行
+- ✅ **Pipeline 四阶段拆分**（中间产物持久化原则的具体实践）：`_process_one` 拆分为 `stage1_parse` / `stage2_build_jsonl` / `stage3_submit_batches` / `stage4_ingest_results`，每个中间产物（result.md / requests.jsonl / batch_info.json / results.jsonl / 子图谱 JSON）均可独立执行、人为干预、重新执行
 - ✅ 283 个测试全部通过
 
 ### 下一阶段（精确到下一步）
