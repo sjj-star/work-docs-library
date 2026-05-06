@@ -528,7 +528,10 @@ class EntityExtractor:
         return self.extract_from_requests(requests, batches, doc_id)
 
     def extract_from_requests(self, requests, batches, doc_id=""):
-        """从已构建的 requests 列表提交 Batch API 提取实体（不重新构建 requests）."""
+        """从已构建的 requests 列表提交 Batch API 提取实体（不重新构建 requests）.
+
+        注意：此方法保留向后兼容，新代码推荐使用 extract_from_results_file.
+        """
         if not self.batch_client or not requests:
             return [], [], []
 
@@ -539,6 +542,10 @@ class EntityExtractor:
             logger.error(f"Batch 请求失败 | error={e}")
             return [], [], []
 
+        return self._parse_results(results, batches, doc_id)
+
+    def _parse_results(self, results, batches, doc_id=""):
+        """从 Batch API 返回的 results 解析实体/关系/图片描述."""
         all_entities, all_relations, all_image_descriptions = [], [], []
         for i, result in enumerate(results):
             body = result.get("response", {}).get("body", {})
@@ -579,6 +586,76 @@ class EntityExtractor:
                 all_image_descriptions.append(img_desc)
 
         logger.info(f"实体提取完成 | entities={len(all_entities)} | relations={len(all_relations)}")
+        return all_entities, all_relations, all_image_descriptions
+
+    def extract_from_results_file(
+        self,
+        results_path: Path,
+        doc_id: str = "",
+        chapter_map: dict[str, str] | None = None,
+    ) -> tuple[list[GraphEntity], list[GraphRelation], list[dict[str, Any]]]:
+        """从磁盘上的 results.jsonl 文件解析实体/关系.
+
+        Args:
+            results_path: Batch API 结果文件路径（JSONL 格式）
+            doc_id: 文档 ID
+            chapter_map: custom_id -> chapter_title 映射（可选）
+
+        Returns:
+            (entities, relations, image_descriptions)
+        """
+        if not results_path.exists():
+            logger.warning(f"结果文件不存在 | path={results_path}")
+            return [], [], []
+
+        from core.batch_clients import _parse_jsonl
+
+        results = _parse_jsonl(results_path.read_text(encoding="utf-8"))
+        logger.info(f"从文件解析 Batch 结果 | path={results_path} | results={len(results)}")
+
+        all_entities, all_relations, all_image_descriptions = [], [], []
+        for result in results:
+            custom_id = result.get("custom_id", "")
+            body = result.get("response", {}).get("body", {})
+            choices = body.get("choices", [])
+            if not choices:
+                continue
+            content = choices[0].get("message", {}).get("content", "")
+            data = self._safe_parse_json(content)
+            if not data:
+                continue
+
+            chapter_title = chapter_map.get(custom_id, "") if chapter_map else ""
+            for e in data.get("entities", []):
+                if e.get("type") in ALL_NODE_TYPES and e.get("name"):
+                    all_entities.append(
+                        GraphEntity(
+                            entity_type=e["type"],
+                            name=e["name"],
+                            properties=e.get("properties", {}),
+                            source_doc_ids={doc_id},
+                            source_chapter=chapter_title,
+                        )
+                    )
+            for r in data.get("relationships", []):
+                if r.get("type") in ALL_REL_TYPES:
+                    all_relations.append(
+                        GraphRelation(
+                            rel_type=r["type"],
+                            from_name=r.get("from", ""),
+                            to_name=r.get("to", ""),
+                            from_type=r.get("from_type", ""),
+                            to_type=r.get("to_type", ""),
+                            properties=r.get("properties", {}),
+                            source_doc_ids={doc_id},
+                        )
+                    )
+            for img_desc in data.get("image_descriptions", []):
+                all_image_descriptions.append(img_desc)
+
+        logger.info(
+            f"文件解析完成 | entities={len(all_entities)} | relations={len(all_relations)}"
+        )
         return all_entities, all_relations, all_image_descriptions
 
     def _safe_parse_json(self, raw):
@@ -811,38 +888,227 @@ class DocGraphPipeline:
         _build_jsonl(requests, jsonl_path)
         logger.info(f"JSONL 已生成 | path={jsonl_path} | requests={len(requests)}")
 
+        # 保存 batch_info 映射（request index -> chapter titles）
+        batch_info = []
+        for i, batch in enumerate(batches):
+            titles = [ch["title"] for ch in batch]
+            batch_info.append(
+                {
+                    "index": i,
+                    "custom_id": f"batch_{i}",
+                    "chapter_titles": titles,
+                }
+            )
+        batch_info_path = batch_dir / f"{doc_id}_batch_info.json"
+        batch_info_path.write_text(
+            json.dumps(batch_info, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+        logger.info(f"Batch info 已保存 | path={batch_info_path} | batches={len(batch_info)}")
+
         return jsonl_path, batches, requests
 
-    def stage3_ingest(
+    def _read_result_md(self, doc_id: str) -> str:
+        """读取 parsed/{doc_id}/result.md."""
+        result_md_path = Config.DB_PATH.parent / "parsed" / doc_id / "result.md"
+        if not result_md_path.exists():
+            raise FileNotFoundError(f"result.md 不存在 | path={result_md_path}")
+        return result_md_path.read_text(encoding="utf-8")
+
+    def _incremental_analysis(
         self,
         file_path: str,
-        doc_id: str,
-        parsed_output_dir: Path,
         extracted_text: str,
-        bigmodel_images: list[Path],
+        force: bool = False,
+    ) -> tuple[
+        list[dict[str, Any]],
+        list[tuple[dict[str, Any], Chunk]],
+        list[dict[str, Any]],
+        list[dict[str, Any]],
+        list[Chunk],
+        Document | None,
+        str,
+    ]:
+        """章节级增量分析.
+
+        Returns:
+            (new_chapters_flat, unchanged, changed, added, removed, old_doc, file_hash)
+        """
+        file_hash = hashlib.md5(Path(file_path).read_bytes()).hexdigest()
+
+        # 章节解析
+        tree_chapters = self.chapter_parser.parse_tree(extracted_text)
+        new_chapters_flat: list[dict[str, Any]] = []
+        for root in tree_chapters:
+            new_chapters_flat.extend(ChapterParser.collect_all_nodes(root))
+
+        # 与旧数据比较
+        old_doc = self.db.get_document_by_path(file_path)
+        old_chunks: list[Chunk] = []
+        if old_doc:
+            old_chunks = self.db.query_by_doc(old_doc.doc_id)
+
+        old_chunk_map = {ck.chapter_title: ck for ck in old_chunks}
+        unchanged: list[tuple[dict[str, Any], Chunk]] = []
+        changed: list[dict[str, Any]] = []
+        added: list[dict[str, Any]] = []
+        removed: list[Chunk] = []
+
+        for ch in new_chapters_flat:
+            ch_hash = hashlib.md5(ch["content"].encode()).hexdigest()[:16]
+            ch["content_hash"] = ch_hash
+            if ch["title"] in old_chunk_map:
+                old_ck = old_chunk_map[ch["title"]]
+                old_hash = old_ck.metadata.get("content_hash", "")
+                if old_hash == ch_hash and not force:
+                    unchanged.append((ch, old_ck))
+                else:
+                    changed.append(ch)
+            else:
+                added.append(ch)
+
+        for title, old_ck in old_chunk_map.items():
+            if title not in {c["title"] for c in new_chapters_flat}:
+                removed.append(old_ck)
+
+        logger.info(
+            f"章节增量分析 | 未变={len(unchanged)} | "
+            f"变更={len(changed)} | 新增={len(added)} | 删除={len(removed)}"
+        )
+        return new_chapters_flat, unchanged, changed, added, removed, old_doc, file_hash
+
+    def stage3_submit_batches(
+        self,
+        doc_id: str,
+        file_path: str,
         jsonl_path: Path | None = None,
         force: bool = False,
-    ) -> str:
-        """阶段3: JSONL → API → 实体提取 → 向量化 → 入库.
+    ) -> Path:
+        """阶段3: 提交 Batch API 并保存原始结果.
 
-        若 jsonl_path 为 None，默认读取 knowledge_base/batch/{doc_id}.jsonl。
+        Returns:
+            results_path: knowledge_base/batch/{doc_id}_results.jsonl
+        """
+        batch_dir = Config.DB_PATH.parent / "batch"
+        batch_dir.mkdir(parents=True, exist_ok=True)
+        results_path = batch_dir / f"{doc_id}_results.jsonl"
+
+        # 检查是否需要处理
+        file_hash = hashlib.md5(Path(file_path).read_bytes()).hexdigest()
+        if not force:
+            existing = self.db.get_document_by_path(file_path)
+            if existing and existing.file_hash == file_hash:
+                if existing.status == DocumentStatus.DONE:
+                    logger.info(f"跳过未变更文档 | file={file_path} | doc_id={doc_id}")
+                    if results_path.exists():
+                        return results_path
+                if (
+                    existing.status == DocumentStatus.BATCH_SUBMITTED
+                    and results_path.exists()
+                ):
+                    logger.info(
+                        f"Batch 已提交且结果文件存在，跳过 | file={file_path} | doc_id={doc_id}"
+                    )
+                    return results_path
+            # 如果结果文件已存在且非 force，直接返回
+            if results_path.exists():
+                logger.info(f"结果文件已存在，跳过提交 | path={results_path}")
+                return results_path
+
+        logger.info(f"开始阶段3 Batch 提交 | file={file_path} | doc_id={doc_id}")
+        self.db.update_document_status(doc_id, DocumentStatus.PROCESSING)
+
+        extracted_text = self._read_result_md(doc_id)
+        new_chapters_flat, unchanged, changed, added, removed, old_doc, _ = (
+            self._incremental_analysis(file_path, extracted_text, force)
+        )
+
+        # 构建变更/新增章节的 batches
+        process_nodes: list[ChapterNode] = []
+        for ch in changed + added:
+            process_nodes.append(ChapterNode(level=1, title=ch["title"], content=ch["content"]))
+        batches = (
+            BatchBuilder.build_batches(process_nodes, Config.LLM_BATCH_MAX_CHARS)
+            if process_nodes
+            else []
+        )
+
+        if not batches or not self.llm_batch:
+            logger.info("无变更章节或 BatchClient 不可用，跳过 API 提交")
+            # 创建空结果文件
+            results_path.write_text("", encoding="utf-8")
+            return results_path
+
+        # 构建 requests
+        parsed_output_dir = Config.DB_PATH.parent / "parsed" / doc_id
+        doc_title = ""
+        tree_chapters = self.chapter_parser.parse_tree(extracted_text)
+        if tree_chapters:
+            doc_title = tree_chapters[0].title
+        product_name = _extract_product_name(extracted_text, file_path) or ""
+        doc_context_parts = []
+        if doc_title:
+            doc_context_parts.append(f"文档《{doc_title}》")
+        if product_name:
+            doc_context_parts.append(f"产品型号 {product_name}")
+        doc_context = ""
+        if doc_context_parts:
+            doc_context = "以下章节来自 " + "，".join(doc_context_parts) + "。\n\n---\n"
+
+        requests = self.entity_extractor._build_batch_requests(
+            batches=batches,
+            image_base_dir=parsed_output_dir,
+            doc_context=doc_context,
+        )
+
+        # 删除旧结果文件（如果存在）
+        if results_path.exists():
+            results_path.unlink()
+
+        # 提交并保存结果
+        logger.info(f"提交 Batch | requests={len(requests)} | output={results_path}")
+        results = self.llm_batch.submit_parallel_batches(requests, output_path=results_path)
+        # fallback：如果 BatchClient 未写入文件（如 Mock 客户端），手动写入
+        if results and (not results_path.exists() or results_path.stat().st_size == 0):
+            results_path.parent.mkdir(parents=True, exist_ok=True)
+            with open(results_path, "w", encoding="utf-8") as f:
+                for r in results:
+                    f.write(json.dumps(r, ensure_ascii=False) + "\n")
+        logger.info(f"Batch 结果已保存 | path={results_path}")
+        self.db.update_document_status(doc_id, DocumentStatus.BATCH_SUBMITTED)
+        return results_path
+
+    def stage4_ingest_results(
+        self,
+        doc_id: str,
+        file_path: str,
+        results_path: Path,
+        force: bool = False,
+    ) -> str:
+        """阶段4: 从 Batch 结果文件解析并入库.
+
+        Returns:
+            doc_id
         """
         # 确保每个文档使用干净的局部图谱
         if hasattr(self.graph, "clear"):
             self.graph.clear()
 
-        file_hash = hashlib.md5(Path(file_path).read_bytes()).hexdigest()
-        suffix = Path(file_path).suffix.lower()
-
         # 检查是否需要重新处理
+        file_hash = hashlib.md5(Path(file_path).read_bytes()).hexdigest()
         if not force:
             existing = self.db.get_document_by_path(file_path)
-            if existing and existing.file_hash == file_hash and existing.status == "done":
+            if (
+                existing
+                and existing.file_hash == file_hash
+                and existing.status == DocumentStatus.DONE
+            ):
                 logger.info(f"跳过未变更文档 | file={file_path} | doc_id={doc_id}")
                 return existing.doc_id
 
-        logger.info(f"开始阶段3入库 | file={file_path} | doc_id={doc_id}")
+        logger.info(f"开始阶段4入库 | file={file_path} | doc_id={doc_id}")
         self.db.update_document_status(doc_id, DocumentStatus.PROCESSING)
+
+        suffix = Path(file_path).suffix.lower()
 
         # 获取 PDF 实际页数
         pdf_page_count = 0
@@ -853,56 +1119,9 @@ class DocGraphPipeline:
             except Exception as e:
                 logger.warning(f"获取 PDF 页数失败 | error={e}")
 
-        # 章节解析
-        tree_chapters = self.chapter_parser.parse_tree(extracted_text)
-
-        new_chapters_flat: list[dict[str, Any]] = []
-        for root in tree_chapters:
-            new_chapters_flat.extend(ChapterParser.collect_all_nodes(root))
-
-        # --- 增量分析 ---
-        old_doc = self.db.get_document_by_path(file_path)
-        old_chunks: list[Chunk] = []
-        if old_doc:
-            old_chunks = self.db.query_by_doc(old_doc.doc_id)
-
-        old_chunk_map = {ck.chapter_title: ck for ck in old_chunks}
-        unchanged_chapters: list[tuple[dict[str, Any], Chunk]] = []
-        changed_chapters: list[dict[str, Any]] = []
-        added_chapters: list[dict[str, Any]] = []
-        removed_chunks: list[Chunk] = []
-
-        for ch in new_chapters_flat:
-            ch_hash = hashlib.md5(ch["content"].encode()).hexdigest()[:16]
-            ch["content_hash"] = ch_hash
-            if ch["title"] in old_chunk_map:
-                old_ck = old_chunk_map[ch["title"]]
-                old_hash = old_ck.metadata.get("content_hash", "")
-                if old_hash == ch_hash and not force:
-                    unchanged_chapters.append((ch, old_ck))
-                else:
-                    changed_chapters.append(ch)
-            else:
-                added_chapters.append(ch)
-
-        for title, old_ck in old_chunk_map.items():
-            if title not in {c["title"] for c in new_chapters_flat}:
-                removed_chunks.append(old_ck)
-
-        logger.info(
-            f"章节增量分析 | 未变={len(unchanged_chapters)} | "
-            f"变更={len(changed_chapters)} | 新增={len(added_chapters)} | "
-            f"删除={len(removed_chunks)}"
-        )
-
-        # 为变更/新增章节构建 batch
-        process_nodes: list[ChapterNode] = []
-        for ch in changed_chapters + added_chapters:
-            process_nodes.append(ChapterNode(level=1, title=ch["title"], content=ch["content"]))
-        batches = (
-            BatchBuilder.build_batches(process_nodes, Config.LLM_BATCH_MAX_CHARS)
-            if process_nodes
-            else []
+        extracted_text = self._read_result_md(doc_id)
+        new_chapters_flat, unchanged, changed, added, removed, old_doc, _ = (
+            self._incremental_analysis(file_path, extracted_text, force)
         )
 
         # --- 实体提取 ---
@@ -911,7 +1130,7 @@ class DocGraphPipeline:
         all_image_descriptions: list[dict[str, Any]] = []
 
         # 复用未变章节的实体缓存
-        for ch, old_ck in unchanged_chapters:
+        for ch, old_ck in unchanged:
             cached_ents = old_ck.metadata.get("extracted_entities", [])
             cached_rels = old_ck.metadata.get("extracted_relations", [])
             cached_imgs = old_ck.metadata.get("image_descriptions", [])
@@ -939,38 +1158,22 @@ class DocGraphPipeline:
                 )
             all_image_descriptions.extend(cached_imgs)
 
-        # 从 JSONL 或重新构建 requests，提交 API
-        if self.llm_batch and batches:
-            if jsonl_path and jsonl_path.exists():
-                # 从 JSONL 读取 requests
-                from core.batch_clients import _parse_jsonl
+        # 从结果文件解析变更章节
+        if results_path.exists() and results_path.stat().st_size > 0:
+            # 构建 chapter_map（从 batch_info.json）
+            batch_info_path = results_path.parent / f"{doc_id}_batch_info.json"
+            chapter_map: dict[str, str] = {}
+            if batch_info_path.exists():
+                batch_info = json.loads(batch_info_path.read_text(encoding="utf-8"))
+                for info in batch_info:
+                    titles = info.get("chapter_titles", [])
+                    chapter_map[info.get("custom_id", "")] = titles[0] if titles else ""
 
-                requests = _parse_jsonl(jsonl_path.read_text(encoding="utf-8"))
-                logger.info(f"从 JSONL 读取 requests | path={jsonl_path} | count={len(requests)}")
-                ents, rels, img_descs = self.entity_extractor.extract_from_requests(
-                    requests=requests,
-                    batches=batches,
-                    doc_id=doc_id,
-                )
-            else:
-                # 重新构建 requests 并提交
-                doc_title = tree_chapters[0].title if tree_chapters else ""
-                product_name = _extract_product_name(extracted_text, file_path) or ""
-                doc_context_parts = []
-                if doc_title:
-                    doc_context_parts.append(f"文档《{doc_title}》")
-                if product_name:
-                    doc_context_parts.append(f"产品型号 {product_name}")
-                doc_context = ""
-                if doc_context_parts:
-                    doc_context = "以下章节来自 " + "，".join(doc_context_parts) + "。\n\n---\n"
-
-                ents, rels, img_descs = self.entity_extractor.extract_from_batches(
-                    batches=batches,
-                    image_base_dir=parsed_output_dir,
-                    doc_id=doc_id,
-                    doc_context=doc_context,
-                )
+            ents, rels, img_descs = self.entity_extractor.extract_from_results_file(
+                results_path=results_path,
+                doc_id=doc_id,
+                chapter_map=chapter_map,
+            )
             all_entities.extend(ents)
             all_relations.extend(rels)
             all_image_descriptions.extend(img_descs)
@@ -1028,10 +1231,10 @@ class DocGraphPipeline:
             file_hash,
             new_chapters_flat,
             extracted_text,
-            unchanged_chapters,
-            changed_chapters,
-            added_chapters,
-            removed_chunks,
+            unchanged,
+            changed,
+            added,
+            removed,
             all_image_descriptions,
             all_entities,
             all_relations,
@@ -1061,7 +1264,7 @@ class DocGraphPipeline:
                 file_type=suffix.lstrip("."),
                 total_pages=pdf_page_count,
                 file_hash=file_hash,
-                status="done",
+                status=DocumentStatus.DONE,
             )
         )
 
@@ -1079,6 +1282,34 @@ class DocGraphPipeline:
         logger.info(f"文档入库完成 | doc_id={doc_id}")
         return doc_id
 
+    def stage3_ingest(
+        self,
+        file_path: str,
+        doc_id: str,
+        parsed_output_dir: Path,
+        extracted_text: str,
+        bigmodel_images: list[Path],
+        jsonl_path: Path | None = None,
+        force: bool = False,
+    ) -> str:
+        """阶段3: JSONL → API → 实体提取 → 向量化 → 入库.
+
+        已废弃：内部委托给 stage3_submit_batches + stage4_ingest_results。
+        保留此方法以保证向后兼容。
+        """
+        results_path = self.stage3_submit_batches(
+            doc_id=doc_id,
+            file_path=file_path,
+            jsonl_path=jsonl_path,
+            force=force,
+        )
+        return self.stage4_ingest_results(
+            doc_id=doc_id,
+            file_path=file_path,
+            results_path=results_path,
+            force=force,
+        )
+
     def _process_one(
         self,
         file_path: str,
@@ -1091,19 +1322,24 @@ class DocGraphPipeline:
             return file_hash[:16]
 
         # 阶段1: PDF → Markdown
-        doc_id, parsed_output_dir, extracted_text, bigmodel_images = self.stage1_parse(file_path)
+        doc_id, _parsed_output_dir, _extracted_text, _bigmodel_images = self.stage1_parse(file_path)
 
         # 阶段2: Markdown → JSONL
-        jsonl_path, batches, requests = self.stage2_build_jsonl(doc_id)
+        jsonl_path, _batches, _requests = self.stage2_build_jsonl(doc_id)
 
-        # 阶段3: JSONL → API → 入库
-        return self.stage3_ingest(
-            file_path=file_path,
+        # 阶段3: 提交 Batch API 并保存结果
+        results_path = self.stage3_submit_batches(
             doc_id=doc_id,
-            parsed_output_dir=parsed_output_dir,
-            extracted_text=extracted_text,
-            bigmodel_images=bigmodel_images,
+            file_path=file_path,
             jsonl_path=jsonl_path,
+            force=force,
+        )
+
+        # 阶段4: 从结果文件解析并入库
+        return self.stage4_ingest_results(
+            doc_id=doc_id,
+            file_path=file_path,
+            results_path=results_path,
             force=force,
         )
 

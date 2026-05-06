@@ -37,6 +37,7 @@ class KnowledgeBaseService:
         self.db = db or KnowledgeDB()
         self.vec = vec or VectorIndex(dim=Config.EMBEDDING_DIMENSION)
         self.graph = graph_store or NetworkXGraphStore()
+        self._embedder: EmbeddingClient | None = None
         if graph_store is None:
             self._load_all_graphs()
 
@@ -84,6 +85,46 @@ class KnowledgeBaseService:
         global_path.parent.mkdir(parents=True, exist_ok=True)
         self.graph.save(global_path)
 
+    def rebuild_global_graph(self) -> dict[str, int]:
+        """全量重建全局图：清空后从所有子图重新加载.
+
+        用于修复全局图与磁盘子图之间的不一致。
+
+        Returns:
+            重建后的图谱统计信息
+        """
+        logger.info("开始全量重建全局图谱...")
+        self.graph.clear()
+        graphs_dir = Config.DB_PATH.parent / Config.GRAPH_OUTPUT_DIR
+        loaded = 0
+        if graphs_dir.exists():
+            for gp in sorted(graphs_dir.glob("*.json")):
+                if gp.name == "global.json":
+                    continue
+                try:
+                    temp = NetworkXGraphStore()
+                    temp.load(gp)
+                    self._merge_graph(temp)
+                    loaded += 1
+                except Exception as e:
+                    logger.warning(f"加载子图失败 | path={gp} | error={e}")
+        self._save_global_graph()
+        stats = self.graph.stats()
+        logger.info(f"全局图谱重建完成 | loaded={loaded} | {stats}")
+        return stats
+
+    def _get_embedder(self) -> EmbeddingClient:
+        """获取复用的 EmbeddingClient 实例（懒加载）."""
+        if self._embedder is None:
+            self._embedder = EmbeddingClient()
+        return self._embedder
+
+    def close(self) -> None:
+        """关闭资源."""
+        if self._embedder is not None:
+            self._embedder.close()
+            self._embedder = None
+
     def ingest_document(self, path: str, dry_run: bool = False, force: bool = False) -> list[str]:
         """导入文档（支持单文件或目录）.
 
@@ -99,19 +140,16 @@ class KnowledgeBaseService:
         pipe = DocGraphPipeline(db=self.db, vec=self.vec, graph_store=NetworkXGraphStore())
         try:
             doc_ids = pipe.ingest(str(path), dry_run=dry_run, force=force)
-            # 重建全局图：清空后从所有文档子图重新加载，确保无幽灵数据
-            self.graph.clear()
-            graphs_dir = Config.DB_PATH.parent / "graphs"
-            if graphs_dir.exists():
-                for gp in sorted(graphs_dir.glob("*.json")):
-                    if gp.name == "global.json":
-                        continue
+            # 增量合并：只加载新导入的文档子图到全局图
+            for doc_id in doc_ids:
+                graph_path = Config.DB_PATH.parent / Config.GRAPH_OUTPUT_DIR / f"{doc_id}.json"
+                if graph_path.exists():
                     try:
                         temp = NetworkXGraphStore()
-                        temp.load(gp)
+                        temp.load(graph_path)
                         self._merge_graph(temp)
                     except Exception as e:
-                        logger.warning(f"加载子图失败 | path={gp} | error={e}")
+                        logger.warning(f"加载子图失败 | path={graph_path} | error={e}")
             self._save_global_graph()
             return doc_ids
         finally:
@@ -194,18 +232,15 @@ class KnowledgeBaseService:
             每个结果包含 score 和 chunk 基本信息
             [{"score": float, "chunk": Chunk}, ...]
         """
-        embedder = EmbeddingClient()
-        try:
-            emb = embedder.embed([str(text)])[0]
-            hits = self.vec.search(emb, top_k=top_k)
-            results = []
-            for db_id, score in hits:
-                chunk = self.db.get_chunk_by_db_id(db_id)
-                if chunk:
-                    results.append({"score": round(float(score), 4), "chunk": chunk})
-            return results
-        finally:
-            embedder.close()
+        embedder = self._get_embedder()
+        emb = embedder.embed([str(text)])[0]
+        hits = self.vec.search(emb, top_k=top_k)
+        results = []
+        for db_id, score in hits:
+            chunk = self.db.get_chunk_by_db_id(db_id)
+            if chunk:
+                results.append({"score": round(float(score), 4), "chunk": chunk})
+        return results
 
     def query_chunks(
         self,
@@ -507,12 +542,9 @@ class KnowledgeBaseService:
         Returns:
             {"chunks": [...], "related_entities": [...], "subgraphs": [...]}
         """
-        embedder = EmbeddingClient()
-        try:
-            emb = embedder.embed([str(text)])[0]
-            hits = self.vec.search(emb, top_k=top_k)
-        finally:
-            embedder.close()
+        embedder = self._get_embedder()
+        emb = embedder.embed([str(text)])[0]
+        hits = self.vec.search(emb, top_k=top_k)
 
         chunks = []
         related_entities: list[dict] = []
@@ -596,14 +628,16 @@ class KnowledgeBaseService:
                         self._apply_doc_properties(global_e, doc_id)
                         entities.append(global_e)
 
-        # 从全局图查询关联关系的最新状态
-        entity_keys = {f"{e.entity_type}::{e.name}" for e in entities}
+        # 从全局图查询关联关系的最新状态（通过实体邻居查询，避免遍历所有边）
         seen_rel: set[str] = set()
-        for rel in self.graph.all_relations():
-            from_key = f"{rel.from_type}::{rel.from_name}"
-            to_key = f"{rel.to_type}::{rel.to_name}"
-            if from_key in entity_keys or to_key in entity_keys:
-                rel_key = f"{from_key}--{rel.rel_type}--{to_key}"
+        for entity in entities:
+            for rel in self.graph.get_entity_relations(
+                entity.entity_type, entity.name, direction="both"
+            ):
+                rel_key = (
+                    f"{rel.from_type}::{rel.from_name}--"
+                    f"{rel.rel_type}--{rel.to_type}::{rel.to_name}"
+                )
                 if rel_key not in seen_rel:
                     seen_rel.add(rel_key)
                     self._apply_doc_properties_to_relation(rel, doc_id)

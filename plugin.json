@@ -1,7 +1,7 @@
 {
   "name": "work-docs-library",
   "version": "1.0.0",
-  "description": "通用化技术文档知识库管理插件，支持 PDF 提取、知识图谱构建、向量索引与语义搜索。支持分阶段处理：doc_parse → doc_build_batches → doc_submit_batches",
+  "description": "通用化技术文档知识库管理插件，支持 PDF 提取、知识图谱构建、向量索引与语义搜索。支持分阶段处理：doc_parse → doc_build_batches → doc_submit_batches → doc_ingest_results",
   "config_file": "config.json",
   "inject": {
     "llm.api_key": "api_key",
@@ -792,7 +792,7 @@
     },
     {
       "name": "doc_submit_batches",
-      "description": "提交 Batch JSONL 到 LLM API，提取实体、构建图谱、向量化并入库",
+      "description": "提交 Batch JSONL 到 LLM API，下载并保存原始结果文件（不直接入库）",
       "command": [
         "venv/bin/python3",
         "scripts/plugin_router.py",
@@ -822,6 +822,80 @@
         "required": [
           "doc_id"
         ]
+      }
+    },
+    {
+      "name": "doc_ingest_results",
+      "description": "从 Batch API 结果文件解析实体、构建图谱、向量化并入库",
+      "command": [
+        "venv/bin/python3",
+        "scripts/plugin_router.py",
+        "doc_ingest_results"
+      ],
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "doc_id": {
+            "type": "string",
+            "description": "文档 ID"
+          },
+          "file_path": {
+            "type": "string",
+            "description": "可选，原始 PDF 文件路径（若数据库中无记录则必填）"
+          },
+          "results_path": {
+            "type": "string",
+            "description": "可选，结果文件路径（默认 knowledge_base/batch/{doc_id}_results.jsonl）"
+          },
+          "force": {
+            "type": "boolean",
+            "description": "强制重新处理，忽略缓存",
+            "default": false
+          }
+        },
+        "required": [
+          "doc_id"
+        ]
+      }
+    },
+    {
+      "name": "get_feedback",
+      "description": "查询对知识图谱实体或关系的反馈汇总",
+      "command": [
+        "venv/bin/python3",
+        "scripts/plugin_router.py",
+        "get_feedback"
+      ],
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "entity_type": {
+            "type": "string",
+            "description": "目标实体类型过滤"
+          },
+          "entity_name": {
+            "type": "string",
+            "description": "目标实体名称过滤"
+          },
+          "limit": {
+            "type": "integer",
+            "description": "最大返回数量",
+            "default": 100
+          }
+        }
+      }
+    },
+    {
+      "name": "rebuild_global_graph",
+      "description": "全量重建全局知识图谱（清空后从所有子图重新加载，用于修复不一致）",
+      "command": [
+        "venv/bin/python3",
+        "scripts/plugin_router.py",
+        "rebuild_global_graph"
+      ],
+      "parameters": {
+        "type": "object",
+        "properties": {}
       }
     }
   ]

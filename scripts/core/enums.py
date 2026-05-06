@@ -18,6 +18,7 @@ class DocumentStatus(StrEnum):
 
     PENDING = "pending"
     PROCESSING = "processing"
+    BATCH_SUBMITTED = "batch_submitted"
     DONE = "done"
     FAILED = "failed"
 

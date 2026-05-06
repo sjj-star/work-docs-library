@@ -817,6 +817,34 @@ class NetworkXGraphStore(GraphStore):
 
         return results
 
+    def get_entity_relations(
+        self,
+        entity_type: str,
+        name: str,
+        direction: str = "both",
+    ) -> list[GraphRelation]:
+        """获取与指定实体相关的所有完整关系.
+
+        Args:
+            entity_type: 实体类型
+            name: 实体名称
+            direction: 方向 out/in/both
+
+        Returns:
+            GraphRelation 列表
+        """
+        nid = self._node_id(entity_type, name)
+        if nid not in self._g:
+            return []
+        results: list[GraphRelation] = []
+        if direction in ("out", "both"):
+            for _, target, data in self._g.out_edges(nid, data=True):
+                results.append(self._edge_to_relation(nid, target, data))
+        if direction in ("in", "both"):
+            for source, _, data in self._g.in_edges(nid, data=True):
+                results.append(self._edge_to_relation(source, nid, data))
+        return results
+
     def all_relations(self) -> list[GraphRelation]:
         """all_relations 函数."""
         return [self._edge_to_relation(u, v, data) for u, v, data in self._g.edges(data=True)]

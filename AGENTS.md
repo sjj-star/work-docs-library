@@ -97,8 +97,8 @@
 - ✅ **处理器架构图谱扩展（C28x+CLA）**：新增 `Instruction`/`InstructionGroup`/`AddressingMode`/`Operand`/`ArchitectureState`/`PipelineStage`/`FunctionalUnit`/`Interrupt`/`Exception`/`MemoryRegion`/`ShadowRegister`/`CPU_Mode`/`CLA_Task`/`Peripheral` 等实体类型，以及 `ISA_HAS_INSTRUCTION`/`INSTRUCTION_READS_REGISTER`/`INSTRUCTION_WRITES_REGISTER`/`INSTRUCTION_MODIFIES_STATE`/`MODULE_IMPLEMENTS_INSTRUCTION`/`INTERRUPT_TRIGGERS`/`HAS_PERIPHERAL`/`CLA_HAS_TASK` 等跨层级关系类型，支持 ISA 层级与 RTL 层级的知识互通
 - ✅ **跨产品外设变体建模**：`GraphEntity`/`GraphRelation` 新增 `doc_properties` 字段，保存每个文档的原始属性快照；引入 `Product` 实体类型，文档解析时自动提取产品型号并建立 `Product --[HAS_MODULE]--> Module` 关系；查询接口支持 `doc_id` 参数以获取指定文档的原始属性
 - ✅ **属性索引优化**：`NetworkXGraphStore` 内部维护 `property_index`，`find_by_property()` 从 O(N) 降至 O(1)
-- ✅ **Pipeline 三阶段拆分**：`_process_one` 拆分为 `stage1_parse` / `stage2_build_jsonl` / `stage3_ingest`，支持独立执行和人工干预
-- ✅ 280 个测试全部通过
+- ✅ **Pipeline 四阶段拆分**：`_process_one` 拆分为 `stage1_parse` / `stage2_build_jsonl` / `stage3_submit_batches` / `stage4_ingest_results`，每个中间产物（result.md / requests.jsonl / batch_info.json / results.jsonl / 子图谱 JSON）均可独立执行、人为干预、重新执行
+- ✅ 283 个测试全部通过
 
 ### 下一阶段（精确到下一步）
 1. **可视化**：图谱可视化导出（Graphviz / D3.js）
@@ -148,7 +148,7 @@
 ### 核心原则
 - **Mock 优先**：所有涉及外部 API 的测试使用 Fake 客户端，**禁止调用真实 API**
 - **回归即修复**：任何导致测试失败的变更必须当场修复
-- **280 个测试用例必须全部通过**
+- **283 个测试用例必须全部通过**
 
 ### 测试文件清单
 | 测试文件 | 说明 |
@@ -169,7 +169,7 @@
 | `test_entity_extractor.py` | EntityExtractor multimodal batch 请求构建测试 |
 | `test_batch_builder.py` | BatchBuilder 切分保护与空 content 过滤测试 |
 | `test_parsed_docs_jsonl.py` | 真实文档端到端 JSONL 生成测试 |
-| `test_pipeline_stages.py` | 三阶段 pipeline 拆分测试 |
+| `test_pipeline_stages.py` | 四阶段 pipeline 拆分测试 |
 
 ### Mock 方法
 使用 `monkeypatch.setattr` 替换客户端类方法：

@@ -43,12 +43,14 @@ flowchart TB
     D --> E[BatchBuilder 构建 batch]
     E --> F[EntityExtractor multimodal batch]
     F --> G[LLM Batch API]
-    G --> H[entities + relationships + image_descriptions]
-    H --> I[GraphStore 图谱]
-    H --> J[_save_chunks_to_db]
-    J --> K[BatchClient 向量化]
-    K --> L[SQLite + FAISS]
-    I --> M[图谱 JSON 持久化]
+    G --> H[results.jsonl 原始结果]
+    H --> I[stage4_ingest_results 解析入库]
+    I --> J[GraphStore 图谱]
+    I --> K[_save_chunks_to_db]
+    K --> L[BatchClient 向量化]
+    L --> M[SQLite + FAISS]
+    J --> N[图谱 JSON 持久化]
+    E --> O[requests.jsonl + batch_info.json]
 ```
 
 **数据流说明：**
@@ -166,7 +168,7 @@ cp scripts/.env.example scripts/.env
 
 ### 2. 分阶段导入（支持人工干预）
 
-当 PDF 解析后的 Markdown 需要手动调整时，可使用三阶段流程：
+当 PDF 解析后的 Markdown 需要手动调整时，可使用四阶段流程：
 
 ```bash
 # 阶段1: PDF → Markdown
@@ -177,10 +179,15 @@ cp scripts/.env.example scripts/.env
 # 阶段2: Markdown → Batch JSONL
 /doc_build_batches xxx
 # 输出: jsonl=knowledge_base/batch/xxx.jsonl, batch_count=23
-# 可审查 JSONL 内容
+# 可审查 JSONL 和 batch_info.json 内容
 
-# 阶段3: JSONL → API → 入库
+# 阶段3: JSONL → API → 保存结果
 /doc_submit_batches xxx
+# 输出: results_path=knowledge_base/batch/xxx_results.jsonl
+# 可审查 API 原始返回结果
+
+# 阶段4: 结果文件 → 解析入库
+/doc_ingest_results xxx
 # 输出: 文档已入库完成
 ```
 
@@ -230,7 +237,8 @@ Kimi CLI 通过 `plugin.json` 注册以下工具：
 | `ingest` | 提取并存储文档（PDF），完整流程一次性执行 |
 | `doc_parse` | 阶段1：PDF → Markdown + 图片（可手动调整） |
 | `doc_build_batches` | 阶段2：Markdown → Batch JSONL（本地生成，不调用 API） |
-| `doc_submit_batches` | 阶段3：JSONL → API → 实体提取 → 向量化 → 入库 |
+| `doc_submit_batches` | 阶段3：提交 Batch API 并保存原始结果文件 |
+| `doc_ingest_results` | 阶段4：从结果文件解析实体、构建图谱、向量化并入库 |
 | `search` | 基于 FAISS 的语义向量搜索 |
 | `query` | 按章节、关键词、概念查询 chunk |
 | `status` | 列出所有已导入文档 |
@@ -298,9 +306,11 @@ Kimi CLI 通过 `plugin.json` 注册以下工具：
 ### 文档处理管道
 | 模块 | 职责 |
 |------|------|
-| `core/doc_graph_pipeline.py` | ⭐ **DocGraphPipeline**：主管道，涵盖解析 → 章节树 → batch 构建 → multimodal 实体提取 → 图谱 → 向量化 |
+| `core/doc_graph_pipeline.py` | ⭐ **DocGraphPipeline**：主管道，涵盖解析 → 章节树 → batch 构建 → multimodal 实体提取 → 结果保存 → 解析入库 → 图谱 → 向量化 |
 | `core/bigmodel_parser_client.py` | BigModel Expert 文件解析客户端（⚠️ BigModel 专用 API） |
-| `core/batch_clients.py` | BaseBatchClient + BatchClient（通用 OpenAI-compatible Batch API，含并行批处理） |
+| `core/batch_clients.py` | BaseBatchClient + BatchClient（通用 OpenAI-compatible Batch API，含并行批处理与结果保存） |
+| `core/llm_chat_client.py` | LLM 对话客户端（辅助用途） |
+| `core/knowledge_base_service.py` | 统一服务层封装（DB + VectorIndex + GraphStore + Pipeline） |
 
 ### 数据模型与存储
 | 模块 | 职责 |
@@ -377,7 +387,7 @@ cd /path/to/work-docs-library
 PYTHONPATH=scripts ./venv/bin/python -m pytest scripts/tests/ -v
 ```
 
-**当前状态：216 个测试全部通过。**
+**当前状态：283 个测试全部通过。**
 
 ### 常用测试文档
 

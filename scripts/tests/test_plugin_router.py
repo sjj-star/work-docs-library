@@ -853,7 +853,7 @@ def test_tool_doc_build_batches_missing_doc_id():
 
 
 def test_tool_doc_submit_batches_success(patched_config, monkeypatch):
-    """tool_doc_submit_batches 应完成入库."""
+    """tool_doc_submit_batches 应提交 Batch 并保存结果文件."""
     monkeypatch.setattr(Config, "LLM_API_KEY", "fake-llm-key")
     monkeypatch.setattr(Config, "LLM_MODEL", "gpt-4o-mini")
     monkeypatch.setattr(Config, "EMBEDDING_API_KEY", "fake-emb-key")
@@ -874,6 +874,35 @@ def test_tool_doc_submit_batches_success(patched_config, monkeypatch):
 
     # stage3
     result = plugin_router.tool_doc_submit_batches({"doc_id": doc_id, "file_path": str(pdf)})
+    assert result["success"] is True
+    assert result["doc_id"] == doc_id
+    assert "results_path" in result
+    assert Path(result["results_path"]).exists()
+
+
+def test_tool_doc_ingest_results_success(patched_config, monkeypatch):
+    """tool_doc_ingest_results 应从结果文件完成入库."""
+    monkeypatch.setattr(Config, "LLM_API_KEY", "fake-llm-key")
+    monkeypatch.setattr(Config, "LLM_MODEL", "gpt-4o-mini")
+    monkeypatch.setattr(Config, "EMBEDDING_API_KEY", "fake-emb-key")
+    monkeypatch.setattr(Config, "EMBEDDING_MODEL", "text-embedding-3-small")
+
+    _mock_llm_and_embedder(monkeypatch)
+
+    pdf = patched_config / "doc.pdf"
+    _make_pdf(pdf, ["## Section A\n\nContent A.\n\n## Section B\n\nContent B."])
+
+    # stage1 + stage2 + stage3
+    parse_result = plugin_router.tool_doc_parse({"path": str(pdf)})
+    doc_id = parse_result["doc_id"]
+    plugin_router.tool_doc_build_batches({"doc_id": doc_id})
+    submit_result = plugin_router.tool_doc_submit_batches({"doc_id": doc_id, "file_path": str(pdf)})
+    results_path = submit_result["results_path"]
+
+    # stage4
+    result = plugin_router.tool_doc_ingest_results(
+        {"doc_id": doc_id, "file_path": str(pdf), "results_path": results_path}
+    )
     assert result["success"] is True
     assert result["doc_id"] == doc_id
 
