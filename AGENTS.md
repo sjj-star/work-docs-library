@@ -202,7 +202,7 @@
 - ✅ 零数据丢失：移除所有源数据过滤和截断
 - ✅ Prompt 外部化：所有提示词在 `scripts/prompts/*.txt`
 - ✅ 代码清理：删除 11 个旧文件、4 个旧 prompt 文件、7 个旧测试文件
-- ✅ **API 接口重构**：新增 `KnowledgeBaseService` 统一服务层；Plugin 暴露 22 个工具。代码中额外实现了 `get_feedback()` 方法（用于汇总实体反馈评分），但尚未在 `plugin.json` 中注册为 CLI 工具
+- ✅ **API 接口重构**：新增 `KnowledgeBaseService` 统一服务层；Plugin 暴露 22 个优化工具。`semantic_search` 合并语义搜索与图谱扩展，`graph_query` 支持深度扩展（实体→邻居→子图），`graph_upsert_entity` 统一添加/更新/验证，`graph_feedback` 统一提交与查询反馈，新增 `graph_provenance` 实现实体→文档溯源
 - ✅ **图谱查询增强**：`GraphStore.find_path()` BFS 路径搜索、`search_entities()` 模糊搜索
 - ✅ **跨文档知识互通**：全局统一图谱 `global.json` + 文档子图快照 `{doc_id}.json`，同名同类型实体自动去重
 - ✅ **章节级增量更新**：`content_hash` 指纹比较，未变章节复用实体缓存与 embedding，仅 LLM 提取变更/新增章节
@@ -215,7 +215,7 @@
 - ✅ **数据模型清理**：移除 `Document.chunks`、`Document.metadata`（早期版本）、`Chunk.page_start/page_end` 等无功能实体字段；引入 `StrEnum` 约束状态值。注意：`Chunk.metadata` 在后续版本中重新引入，现承载 `content_hash`/`extracted_entities`/`extracted_relations`/`image_descriptions`/`embedding` 等核心缓存数据
 - ✅ **数据库 schema 简化**：移除 `chapters_override`、`page_start`、`page_end` 列；新增 `_schema_meta` 版本管理表；新增 `query_by_doc()` 辅助方法
 - ✅ **数据质量增强**：`GraphEntity`/`GraphRelation` 新增 `confidence`/`verified`/`created_at`/`updated_at`/`feedback_score` 字段
-- ✅ **图谱动态更新接口**：Plugin 暴露 `graph_add_entity`/`graph_update_entity`/`graph_delete_entity`/`graph_add_relation`/`graph_delete_relation`/`graph_verify_entity` 等 6 个写工具。注意：`graph_update_relation` 尚未实现（如需要，可通过 `graph_delete_relation` + `graph_add_relation` 组合实现）
+- ✅ **图谱动态更新接口**：Plugin 暴露 `graph_upsert_entity`/`graph_delete_entity`/`graph_upsert_relation`/`graph_delete_relation` 等 4 个写工具。`graph_update_relation` 可通过 `graph_delete_relation` + `graph_upsert_relation` 组合实现
 - ✅ **冲突检测与日志**：同名实体属性差异自动记录 `conflict_logs` 表，供人工审核
 - ✅ **语义-图谱联合查询**：`search_with_graph()` 先 FAISS 语义搜索再扩展关联子图
 - ✅ **chunk+实体联合返回**：`get_content_with_entities()` 返回 chunk 及其关联的图谱实体/关系
@@ -263,7 +263,7 @@
 | `scripts/prompts/*.txt` | ✅ 可改 | 提示词文件，运行时读取 |
 | `scripts/tests/*.py` | ✅ 可改 | 测试文件 |
 | `scripts/parsers/*.py` | ⚠️ 需批准 | 解析器影响数据输入质量 |
-| `plugin.json` | ⚠️ 需批准 | 插件定义，用户明确要求时可修改 |
+| `plugin.json` | ⚠️ 需批准 | 插件定义，用户明确要求时可修改（已完成 v1.1.0 重构：30→22 工具） |
 | `config.json` | ✅ 可改 | 用户持久化配置模板 |
 | `README.md` / `AGENTS.md` / `DESIGN.md` | ✅ 可改 | 文档必须随代码同步更新 |
 | `knowledge_base/` | ❌ 禁止 | 运行时生成数据 |

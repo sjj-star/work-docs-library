@@ -1,7 +1,7 @@
 {
   "name": "work-docs-library",
-  "version": "1.0.0",
-  "description": "通用化技术文档知识库管理插件，支持 PDF 提取、知识图谱构建、向量索引与语义搜索。支持分阶段处理：doc_parse → doc_build_batches → doc_submit_batches → doc_ingest_results",
+  "version": "1.1.0",
+  "description": "通用化技术文档知识库管理插件，支持 PDF 提取、知识图谱构建、向量索引与语义搜索。优化后的 API 设计：21 个工具覆盖文档导入、语义搜索、图谱查询与修改、来源溯源与调试。",
   "config_file": "config.json",
   "inject": {
     "llm.api_key": "api_key",
@@ -10,7 +10,7 @@
   "tools": [
     {
       "name": "ingest",
-      "description": "提取并存储文档到知识库，生成 embedding 和 chunk",
+      "description": "提取并存储文档到知识库，生成 embedding 和 chunk。一键式完成全部四阶段处理。",
       "command": [
         "venv/bin/python3",
         "scripts/plugin_router.py",
@@ -35,12 +35,12 @@
       }
     },
     {
-      "name": "search",
-      "description": "基于 FAISS 的语义向量搜索",
+      "name": "semantic_search",
+      "description": "语义向量搜索。graph_depth=0 时为纯语义搜索，>0 时联合查询关联的知识图谱实体和子图。",
       "command": [
         "venv/bin/python3",
         "scripts/plugin_router.py",
-        "search"
+        "semantic_search"
       ],
       "parameters": {
         "type": "object",
@@ -53,6 +53,11 @@
             "type": "integer",
             "description": "返回结果数量",
             "default": 5
+          },
+          "graph_depth": {
+            "type": "integer",
+            "description": "图谱扩展深度，0=纯语义搜索（默认），>0 时扩展关联图谱",
+            "default": 0
           }
         },
         "required": [
@@ -101,7 +106,7 @@
     },
     {
       "name": "status",
-      "description": "列出已导入知识库的所有文档",
+      "description": "列出已导入知识库的所有文档，或查看指定文档的详细状态和进度统计",
       "command": [
         "venv/bin/python3",
         "scripts/plugin_router.py",
@@ -109,7 +114,12 @@
       ],
       "parameters": {
         "type": "object",
-        "properties": {}
+        "properties": {
+          "doc_id": {
+            "type": "string",
+            "description": "文档 ID，提供时返回该文档的详细状态和进度"
+          }
+        }
       }
     },
     {
@@ -135,27 +145,6 @@
       }
     },
     {
-      "name": "progress",
-      "description": "显示文档的总结进度",
-      "command": [
-        "venv/bin/python3",
-        "scripts/plugin_router.py",
-        "progress"
-      ],
-      "parameters": {
-        "type": "object",
-        "properties": {
-          "doc_id": {
-            "type": "string",
-            "description": "文档 ID"
-          }
-        },
-        "required": [
-          "doc_id"
-        ]
-      }
-    },
-    {
       "name": "reprocess",
       "description": "强制重新处理文档",
       "command": [
@@ -178,7 +167,7 @@
     },
     {
       "name": "get_content",
-      "description": "获取文档的完整章节或 chunk 原始内容（不截断）",
+      "description": "获取文档的完整章节或 chunk 原始内容（不截断），可选同时返回关联的图谱实体和关系",
       "command": [
         "venv/bin/python3",
         "scripts/plugin_router.py",
@@ -189,7 +178,7 @@
         "properties": {
           "doc_id": {
             "type": "string",
-            "description": "文档 ID（查询 chapter/page 时必填）"
+            "description": "文档 ID（查询 chapter 时必填）"
           },
           "chapter": {
             "type": "string",
@@ -198,13 +187,18 @@
           "chunk_db_id": {
             "type": "integer",
             "description": "Chunk 数据库 ID"
+          },
+          "with_entities": {
+            "type": "boolean",
+            "description": "是否同时返回关联的图谱实体和关系（默认 false）",
+            "default": false
           }
         }
       }
     },
     {
       "name": "graph_query",
-      "description": "查询知识图谱中的实体（按类型或名称搜索）",
+      "description": "查询知识图谱实体。depth=0 返回实体信息（默认），depth=1 同时返回邻居，depth>1 同时返回子图。",
       "command": [
         "venv/bin/python3",
         "scripts/plugin_router.py",
@@ -228,47 +222,29 @@
           "doc_id": {
             "type": "string",
             "description": "可选，指定文档 ID 以获取该文档中的原始属性快照"
-          }
-        }
-      }
-    },
-    {
-      "name": "graph_neighbors",
-      "description": "查询知识图谱中某实体的邻居节点",
-      "command": [
-        "venv/bin/python3",
-        "scripts/plugin_router.py",
-        "graph_neighbors"
-      ],
-      "parameters": {
-        "type": "object",
-        "properties": {
-          "entity_type": {
-            "type": "string",
-            "description": "实体类型"
           },
-          "name": {
-            "type": "string",
-            "description": "实体名称"
+          "depth": {
+            "type": "integer",
+            "description": "查询深度：0=实体信息（默认），1=邻居，>1=子图",
+            "default": 0
           },
           "rel_type": {
             "type": "string",
-            "description": "关系类型过滤"
+            "description": "关系类型过滤（depth>=1 时生效）"
           },
           "direction": {
             "type": "string",
-            "description": "方向 out/in/both",
+            "description": "方向 out/in/both（depth>=1 时生效，默认 out）",
             "default": "out"
           },
-          "doc_id": {
-            "type": "string",
-            "description": "可选，指定文档 ID 以获取该文档中的原始属性快照"
+          "rel_types": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "关系类型过滤列表（depth>1 时生效）"
           }
-        },
-        "required": [
-          "entity_type",
-          "name"
-        ]
+        }
       }
     },
     {
@@ -313,50 +289,12 @@
       }
     },
     {
-      "name": "graph_subgraph",
-      "description": "提取以某实体为中心的知识子图",
+      "name": "graph_upsert_entity",
+      "description": "添加或更新知识图谱中的实体。若实体已存在则更新属性，不存在则创建。",
       "command": [
         "venv/bin/python3",
         "scripts/plugin_router.py",
-        "graph_subgraph"
-      ],
-      "parameters": {
-        "type": "object",
-        "properties": {
-          "center_type": {
-            "type": "string",
-            "description": "中心实体类型"
-          },
-          "center_name": {
-            "type": "string",
-            "description": "中心实体名称"
-          },
-          "depth": {
-            "type": "integer",
-            "description": "搜索深度",
-            "default": 1
-          },
-          "rel_types": {
-            "type": "array",
-            "items": {
-              "type": "string"
-            },
-            "description": "关系类型过滤列表"
-          }
-        },
-        "required": [
-          "center_type",
-          "center_name"
-        ]
-      }
-    },
-    {
-      "name": "graph_add_entity",
-      "description": "添加或更新知识图谱中的实体",
-      "command": [
-        "venv/bin/python3",
-        "scripts/plugin_router.py",
-        "graph_add_entity"
+        "graph_upsert_entity"
       ],
       "parameters": {
         "type": "object",
@@ -387,46 +325,7 @@
           },
           "verified": {
             "type": "boolean",
-            "description": "是否已人工验证",
-            "default": false
-          }
-        },
-        "required": [
-          "entity_type",
-          "name"
-        ]
-      }
-    },
-    {
-      "name": "graph_update_entity",
-      "description": "更新知识图谱实体的属性",
-      "command": [
-        "venv/bin/python3",
-        "scripts/plugin_router.py",
-        "graph_update_entity"
-      ],
-      "parameters": {
-        "type": "object",
-        "properties": {
-          "entity_type": {
-            "type": "string",
-            "description": "实体类型"
-          },
-          "name": {
-            "type": "string",
-            "description": "实体名称"
-          },
-          "properties": {
-            "type": "object",
-            "description": "新属性字典（覆盖原有 properties）"
-          },
-          "confidence": {
-            "type": "number",
-            "description": "新置信度"
-          },
-          "verified": {
-            "type": "boolean",
-            "description": "新验证状态"
+            "description": "是否已人工验证（可选，不提供时保持原有值）"
           }
         },
         "required": [
@@ -462,12 +361,12 @@
       }
     },
     {
-      "name": "graph_add_relation",
-      "description": "添加或更新知识图谱中的关系",
+      "name": "graph_upsert_relation",
+      "description": "添加或更新知识图谱中的关系。若关系已存在则更新属性。",
       "command": [
         "venv/bin/python3",
         "scripts/plugin_router.py",
-        "graph_add_relation"
+        "graph_upsert_relation"
       ],
       "parameters": {
         "type": "object",
@@ -503,7 +402,7 @@
           },
           "verified": {
             "type": "boolean",
-            "description": "是否已人工验证",
+            "description": "是否已验证",
             "default": false
           }
         },
@@ -558,95 +457,8 @@
       }
     },
     {
-      "name": "graph_verify_entity",
-      "description": "标记知识图谱实体为已验证或取消验证",
-      "command": [
-        "venv/bin/python3",
-        "scripts/plugin_router.py",
-        "graph_verify_entity"
-      ],
-      "parameters": {
-        "type": "object",
-        "properties": {
-          "entity_type": {
-            "type": "string",
-            "description": "实体类型"
-          },
-          "name": {
-            "type": "string",
-            "description": "实体名称"
-          },
-          "verified": {
-            "type": "boolean",
-            "description": "验证状态",
-            "default": true
-          }
-        },
-        "required": [
-          "entity_type",
-          "name"
-        ]
-      }
-    },
-    {
-      "name": "graph_search_with_graph",
-      "description": "语义搜索并联合查询关联的知识图谱实体和子图",
-      "command": [
-        "venv/bin/python3",
-        "scripts/plugin_router.py",
-        "graph_search_with_graph"
-      ],
-      "parameters": {
-        "type": "object",
-        "properties": {
-          "text": {
-            "type": "string",
-            "description": "搜索文本"
-          },
-          "top_k": {
-            "type": "integer",
-            "description": "语义搜索返回数量",
-            "default": 5
-          },
-          "graph_depth": {
-            "type": "integer",
-            "description": "图谱扩展深度",
-            "default": 1
-          }
-        },
-        "required": [
-          "text"
-        ]
-      }
-    },
-    {
-      "name": "graph_get_content_with_entities",
-      "description": "获取 chunk 内容及其关联的知识图谱实体和关系",
-      "command": [
-        "venv/bin/python3",
-        "scripts/plugin_router.py",
-        "graph_get_content_with_entities"
-      ],
-      "parameters": {
-        "type": "object",
-        "properties": {
-          "chunk_db_id": {
-            "type": "integer",
-            "description": "Chunk 数据库 ID"
-          },
-          "doc_id": {
-            "type": "string",
-            "description": "可选，指定文档 ID 以获取该文档中的原始属性快照"
-          }
-        },
-        "required": [
-          "chunk_db_id"
-        ]
-      }
-    },
-    {
       "name": "graph_feedback",
-      "description": "提交对知识图谱实体或关系的反馈（正确/错误标记）",
+      "description": "提交或查询对知识图谱实体/关系的反馈（正确/错误标记）。action=submit 提交反馈，action=query 查询反馈汇总。",
       "command": [
         "venv/bin/python3",
         "scripts/plugin_router.py",
@@ -655,9 +467,14 @@
       "parameters": {
         "type": "object",
         "properties": {
+          "action": {
+            "type": "string",
+            "description": "操作类型：submit（提交反馈，默认）或 query（查询反馈）",
+            "default": "submit"
+          },
           "rating": {
             "type": "integer",
-            "description": "评分 +1（正确）或 -1（错误）"
+            "description": "评分 +1（正确）或 -1（错误），submit 时必需"
           },
           "entity_type": {
             "type": "string",
@@ -690,10 +507,15 @@
           "comment": {
             "type": "string",
             "description": "评论说明"
+          },
+          "limit": {
+            "type": "integer",
+            "description": "query 模式下最大返回数量",
+            "default": 100
           }
         },
         "required": [
-          "rating"
+          "action"
         ]
       }
     },
@@ -725,22 +547,33 @@
       }
     },
     {
-      "name": "config",
-      "description": "打印当前生效的配置参数值（支持敏感字段脱敏）",
+      "name": "graph_provenance",
+      "description": "查询知识图谱实体的来源溯源：从实体追溯到提取它的原始文档、章节和 chunk。用于调试和验证图谱准确性。",
       "command": [
         "venv/bin/python3",
         "scripts/plugin_router.py",
-        "config"
+        "graph_provenance"
       ],
       "parameters": {
         "type": "object",
         "properties": {
-          "mask_sensitive": {
-            "type": "boolean",
-            "description": "是否脱敏显示 API Key 等敏感字段",
-            "default": true
+          "entity_type": {
+            "type": "string",
+            "description": "实体类型"
+          },
+          "name": {
+            "type": "string",
+            "description": "实体名称"
+          },
+          "doc_id": {
+            "type": "string",
+            "description": "可选，限定只查某文档的来源"
           }
-        }
+        },
+        "required": [
+          "entity_type",
+          "name"
+        ]
       }
     },
     {
@@ -859,33 +692,6 @@
       }
     },
     {
-      "name": "get_feedback",
-      "description": "查询对知识图谱实体或关系的反馈汇总",
-      "command": [
-        "venv/bin/python3",
-        "scripts/plugin_router.py",
-        "get_feedback"
-      ],
-      "parameters": {
-        "type": "object",
-        "properties": {
-          "entity_type": {
-            "type": "string",
-            "description": "目标实体类型过滤"
-          },
-          "entity_name": {
-            "type": "string",
-            "description": "目标实体名称过滤"
-          },
-          "limit": {
-            "type": "integer",
-            "description": "最大返回数量",
-            "default": 100
-          }
-        }
-      }
-    },
-    {
       "name": "rebuild_global_graph",
       "description": "全量重建全局知识图谱（清空后从所有子图重新加载，用于修复不一致）",
       "command": [
@@ -896,6 +702,25 @@
       "parameters": {
         "type": "object",
         "properties": {}
+      }
+    },
+    {
+      "name": "config",
+      "description": "打印当前生效的配置参数值（支持敏感字段脱敏）",
+      "command": [
+        "venv/bin/python3",
+        "scripts/plugin_router.py",
+        "config"
+      ],
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "mask_sensitive": {
+            "type": "boolean",
+            "description": "是否脱敏显示 API Key 等敏感字段",
+            "default": true
+          }
+        }
       }
     }
   ]

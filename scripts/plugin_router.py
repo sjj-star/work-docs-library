@@ -101,6 +101,11 @@ def _get_service() -> KnowledgeBaseService:
     return KnowledgeBaseService()
 
 
+# ---------------------------------------------------------------------------
+# 文档导入工具
+# ---------------------------------------------------------------------------
+
+
 def tool_ingest(params: dict) -> dict:
     """导入文档."""
     path = params.get("path")
@@ -117,639 +122,6 @@ def tool_ingest(params: dict) -> dict:
         "doc_ids": doc_ids,
         "message": f"Ingested {len(doc_ids)} document(s).",
     }
-
-
-def tool_search(params: dict) -> dict:
-    """语义向量搜索."""
-    text = params.get("text")
-    if not text:
-        return {"success": False, "error": "Missing required parameter: text"}
-    top_k = params.get("top_k", Config.PLUGIN_SEARCH_TOP_K)
-
-    svc = _get_service()
-    try:
-        results = svc.search_semantic(str(text), top_k=top_k)
-    except RuntimeError as e:
-        return {"success": False, "error": str(e)}
-
-    return {
-        "success": True,
-        "results": [{"score": r["score"], **_chunk_to_dict(r["chunk"])} for r in results],
-    }
-
-
-def tool_query(params: dict) -> dict:
-    """结构化 chunk 查询."""
-    doc_id = params.get("doc_id")
-    chapter = params.get("chapter")
-    chapter_regex = params.get("chapter_regex")
-    keyword = params.get("keyword")
-    concept = params.get("concept")
-    top_k = params.get("top_k", Config.PLUGIN_QUERY_TOP_K)
-
-    svc = _get_service()
-    try:
-        chunks = svc.query_chunks(
-            doc_id=doc_id,
-            chapter=chapter,
-            chapter_regex=chapter_regex,
-            keyword=keyword,
-            concept=concept,
-            top_k=top_k,
-        )
-    except ValueError as e:
-        return {"success": False, "error": str(e)}
-
-    return {"success": True, "results": [_chunk_to_dict(ck) for ck in chunks]}
-
-
-def tool_status(params: dict) -> dict:
-    """列出所有文档."""
-    svc = _get_service()
-    docs = svc.list_documents()
-    return {
-        "success": True,
-        "documents": [
-            {
-                "doc_id": d.doc_id,
-                "title": d.title,
-                "status": d.status,
-                "total_pages": d.total_pages,
-                "extracted_at": d.extracted_at,
-            }
-            for d in docs
-        ],
-    }
-
-
-def tool_toc(params: dict) -> dict:
-    """获取文档目录或按标题搜索."""
-    svc = _get_service()
-    doc_id = params.get("doc_id")
-    match = params.get("match")
-
-    if doc_id:
-        doc = svc.get_document(doc_id)
-        if not doc:
-            return {"success": False, "error": f"Document {doc_id} not found."}
-        chapters = svc.db.get_chapters(doc_id)
-        return {
-            "success": True,
-            "doc_id": doc_id,
-            "title": doc.title,
-            "total_pages": doc.total_pages,
-            "status": doc.status,
-            "chapters": [
-                {
-                    "title": ch.title,
-                    "start_page": ch.start_page,
-                    "end_page": ch.end_page,
-                    "level": ch.level,
-                }
-                for ch in chapters
-            ],
-        }
-    elif match:
-        docs = svc.db.search_documents_by_title(match)
-        return {
-            "success": True,
-            "match": match,
-            "documents": [
-                {
-                    "doc_id": d.doc_id,
-                    "title": d.title,
-                    "status": d.status,
-                    "total_pages": d.total_pages,
-                }
-                for d in docs
-                if d
-            ],
-        }
-    else:
-        return {"success": False, "error": "Provide either doc_id or match."}
-
-
-def tool_progress(params: dict) -> dict:
-    """获取文档处理进度."""
-    doc_id = params.get("doc_id")
-    if not doc_id:
-        return {"success": False, "error": "Missing required parameter: doc_id"}
-
-    svc = _get_service()
-    stats = svc.get_document_progress(doc_id)
-    return {"success": True, "doc_id": doc_id, **stats}
-
-
-def tool_reprocess(params: dict) -> dict:
-    """强制重新处理文档."""
-    doc_id = params.get("doc_id")
-    if not doc_id:
-        return {"success": False, "error": "Missing required parameter: doc_id"}
-
-    svc = _get_service()
-    try:
-        new_id = svc.reprocess_document(doc_id)
-        return {"success": True, "doc_id": new_id, "message": "Reprocessed."}
-    except (ValueError, RuntimeError) as e:
-        return {"success": False, "error": str(e)}
-
-
-def tool_get_content(params: dict) -> dict:
-    """获取 chunk 完整内容."""
-    doc_id = params.get("doc_id")
-    chapter = params.get("chapter")
-    chunk_db_id = params.get("chunk_db_id")
-
-    svc = _get_service()
-    try:
-        result = svc.get_chunk_content(
-            chunk_db_id=chunk_db_id,
-            doc_id=doc_id,
-            chapter=chapter,
-        )
-    except ValueError as e:
-        return {"success": False, "error": str(e)}
-
-    chunks = result["chunks"]
-    chunk_meta = [
-        {
-            "chunk_db_id": ck.id,
-            "chunk_id": ck.chunk_id,
-            "chapter_title": ck.chapter_title,
-        }
-        for ck in chunks
-    ]
-
-    first = chunks[0]
-    return {
-        "success": True,
-        "query_type": result["query_type"],
-        "doc_id": first.doc_id,
-        "chapter_title": first.chapter_title,
-        "content": result["content"],
-        "total_chars": len(result["content"]),
-        "chunks": chunk_meta,
-    }
-
-
-# ---------------------------------------------------------------------------
-# 图谱查询工具
-# ---------------------------------------------------------------------------
-
-
-def tool_graph_query(params: dict) -> dict:
-    """查询图谱实体.
-
-    参数:
-        entity_type: 实体类型（如 Module, Signal, Register）
-        name: 精确名称匹配
-        name_pattern: 名称模糊匹配（子串，大小写不敏感）
-        doc_id: 可选，指定文档 ID 以获取该文档中的原始属性快照
-    """
-    entity_type = params.get("entity_type")
-    name = params.get("name")
-    name_pattern = params.get("name_pattern")
-    doc_id = params.get("doc_id")
-
-    svc = _get_service()
-
-    if name and entity_type:
-        # 精确查询
-        entity = svc.get_entity(entity_type, name)
-        if not entity:
-            return {"success": True, "count": 0, "entities": []}
-        if doc_id:
-            svc._apply_doc_properties(entity, doc_id)
-        return {"success": True, "count": 1, "entities": [_entity_to_dict(entity)]}
-
-    # 搜索查询
-    entities = svc.find_entities(entity_type=entity_type, name_pattern=name_pattern, doc_id=doc_id)
-    return {
-        "success": True,
-        "count": len(entities),
-        "entities": [_entity_to_dict(e) for e in entities],
-    }
-
-
-def tool_graph_neighbors(params: dict) -> dict:
-    """查询实体的邻居节点.
-
-    参数:
-        entity_type: 实体类型
-        name: 实体名称
-        rel_type: 关系类型过滤（可选）
-        direction: 方向 out/in/both（默认 out）
-        doc_id: 可选，指定文档 ID 以获取该文档中的原始属性快照
-    """
-    entity_type = params.get("entity_type")
-    name = params.get("name")
-    if not entity_type or not name:
-        return {"success": False, "error": "Missing entity_type or name"}
-
-    rel_type = params.get("rel_type")
-    direction = params.get("direction", "out")
-    doc_id = params.get("doc_id")
-
-    svc = _get_service()
-    neighbors = svc.get_neighbors(entity_type, name, rel_type, direction, doc_id)
-    return {
-        "success": True,
-        "center": {"type": entity_type, "name": name},
-        "direction": direction,
-        "count": len(neighbors),
-        "neighbors": [
-            {
-                "entity": _entity_to_dict(entity),
-                "relation": rel,
-                "relation_properties": rel_props,
-            }
-            for entity, rel, rel_props in neighbors
-        ],
-    }
-
-
-def tool_graph_path(params: dict) -> dict:
-    """查找两实体间的路径.
-
-    参数:
-        from_type, from_name: 起点实体
-        to_type, to_name: 终点实体
-        max_depth: 最大搜索深度（默认 3，最大 6）
-    """
-    from_type = params.get("from_type")
-    from_name = params.get("from_name")
-    to_type = params.get("to_type")
-    to_name = params.get("to_name")
-    if not all([from_type, from_name, to_type, to_name]):
-        return {"success": False, "error": "Missing from/to entity parameters"}
-
-    max_depth = params.get("max_depth", Config.PLUGIN_GRAPH_MAX_DEPTH)
-    svc = _get_service()
-    paths = svc.find_path(str(from_type), str(from_name), str(to_type), str(to_name), max_depth)
-
-    # 将节点 ID 解析为 (type, name)
-    def _parse_nid(nid: str) -> dict:
-        parts = nid.split("::", 1)
-        return {"type": parts[0], "name": parts[1] if len(parts) > 1 else nid}
-
-    return {
-        "success": True,
-        "from": {"type": from_type, "name": from_name},
-        "to": {"type": to_type, "name": to_name},
-        "max_depth": max_depth,
-        "path_count": len(paths),
-        "paths": [[_parse_nid(nid) for nid in p] for p in paths],
-    }
-
-
-def tool_graph_subgraph(params: dict) -> dict:
-    """提取以某实体为中心的子图.
-
-    参数:
-        center_type, center_name: 中心实体
-        depth: 搜索深度（默认 1）
-        rel_types: 关系类型过滤列表（可选）
-    """
-    center_type = params.get("center_type")
-    center_name = params.get("center_name")
-    if not center_type or not center_name:
-        return {"success": False, "error": "Missing center_type or center_name"}
-
-    depth = params.get("depth", Config.PLUGIN_SUBGRAPH_DEPTH)
-    rel_types = set(params.get("rel_types", [])) if params.get("rel_types") else None
-
-    svc = _get_service()
-    subgraph = svc.get_subgraph(center_type, center_name, depth, rel_types)
-
-    return {
-        "success": True,
-        "center": {"type": center_type, "name": center_name},
-        "depth": depth,
-        "node_count": subgraph.node_count,
-        "edge_count": subgraph.edge_count,
-        "entities": [_entity_to_dict(e) for e in subgraph.entities()],
-        "relations": [_relation_to_dict(r) for r in subgraph.relations()],
-    }
-
-
-# ---------------------------------------------------------------------------
-# 图谱动态更新工具
-# ---------------------------------------------------------------------------
-
-
-def tool_graph_add_entity(params: dict) -> dict:
-    """添加或更新知识图谱实体.
-
-    参数:
-        entity_type: 实体类型
-        name: 实体名称
-        properties: 属性字典（可选）
-        source_doc_ids: 来源文档 ID 列表（可选）
-        confidence: 置信度 0.0-1.0（默认 1.0）
-        verified: 是否已验证（默认 false）
-    """
-    entity_type = params.get("entity_type")
-    name = params.get("name")
-    if not entity_type or not name:
-        return {"success": False, "error": "Missing entity_type or name"}
-
-    entity = GraphEntity(
-        entity_type=entity_type,
-        name=name,
-        properties=params.get("properties", {}),
-        source_doc_ids=set(params.get("source_doc_ids", [])),
-        confidence=params.get("confidence", 1.0),
-        verified=params.get("verified", False),
-    )
-    svc = _get_service()
-    conflicts = svc.add_entity(entity)
-    return {
-        "success": True,
-        "entity": _entity_to_dict(entity),
-        "conflicts": conflicts,
-        "message": f"Entity {entity_type}::{name} added/updated. Conflicts: {len(conflicts)}",
-    }
-
-
-def tool_graph_update_entity(params: dict) -> dict:
-    """更新知识图谱实体属性.
-
-    参数:
-        entity_type: 实体类型
-        name: 实体名称
-        properties: 新属性字典（可选，会覆盖原有 properties）
-        confidence: 新置信度（可选）
-        verified: 新验证状态（可选）
-    """
-    entity_type = params.get("entity_type")
-    name = params.get("name")
-    if not entity_type or not name:
-        return {"success": False, "error": "Missing entity_type or name"}
-
-    svc = _get_service()
-    ok = svc.update_entity(
-        entity_type=entity_type,
-        name=name,
-        properties=params.get("properties"),
-        confidence=params.get("confidence"),
-        verified=params.get("verified"),
-    )
-    if not ok:
-        return {"success": False, "error": f"Entity {entity_type}::{name} not found"}
-    return {"success": True, "entity_type": entity_type, "name": name, "message": "Updated."}
-
-
-def tool_graph_delete_entity(params: dict) -> dict:
-    """删除知识图谱实体（级联删除关联边）.
-
-    参数:
-        entity_type: 实体类型
-        name: 实体名称
-    """
-    entity_type = params.get("entity_type")
-    name = params.get("name")
-    if not entity_type or not name:
-        return {"success": False, "error": "Missing entity_type or name"}
-
-    svc = _get_service()
-    ok = svc.delete_entity(entity_type, name)
-    if not ok:
-        return {"success": False, "error": f"Entity {entity_type}::{name} not found"}
-    return {"success": True, "entity_type": entity_type, "name": name, "message": "Deleted."}
-
-
-def tool_graph_add_relation(params: dict) -> dict:
-    """添加或更新知识图谱关系.
-
-    参数:
-        rel_type: 关系类型
-        from_type, from_name: 起点实体
-        to_type, to_name: 终点实体
-        properties: 属性字典（可选）
-        confidence: 置信度（默认 1.0）
-        verified: 是否已验证（默认 false）
-    """
-    rel_type = params.get("rel_type")
-    from_type = params.get("from_type")
-    from_name = params.get("from_name")
-    to_type = params.get("to_type")
-    to_name = params.get("to_name")
-    if not all([rel_type, from_type, from_name, to_type, to_name]):
-        return {"success": False, "error": "Missing required relation parameters"}
-
-    relation = GraphRelation(
-        rel_type=str(rel_type),
-        from_type=str(from_type),
-        from_name=str(from_name),
-        to_type=str(to_type),
-        to_name=str(to_name),
-        properties=params.get("properties", {}),
-        confidence=params.get("confidence", 1.0),
-        verified=params.get("verified", False),
-    )
-    svc = _get_service()
-    conflicts = svc.add_relation(relation)
-    return {
-        "success": True,
-        "relation": _relation_to_dict(relation),
-        "conflicts": conflicts,
-        "message": f"Relation {rel_type} added/updated. Conflicts: {len(conflicts)}",
-    }
-
-
-def tool_graph_delete_relation(params: dict) -> dict:
-    """删除知识图谱关系.
-
-    参数:
-        rel_type: 关系类型
-        from_type, from_name: 起点实体
-        to_type, to_name: 终点实体
-    """
-    rel_type = params.get("rel_type")
-    from_type = params.get("from_type")
-    from_name = params.get("from_name")
-    to_type = params.get("to_type")
-    to_name = params.get("to_name")
-    if not all([rel_type, from_type, from_name, to_type, to_name]):
-        return {"success": False, "error": "Missing required relation parameters"}
-
-    svc = _get_service()
-    ok = svc.delete_relation(
-        str(from_type), str(from_name), str(to_type), str(to_name), str(rel_type)
-    )
-    if not ok:
-        return {"success": False, "error": "Relation not found"}
-    return {
-        "success": True,
-        "rel_type": rel_type,
-        "from": f"{from_type}::{from_name}",
-        "to": f"{to_type}::{to_name}",
-        "message": "Deleted.",
-    }
-
-
-def tool_graph_verify_entity(params: dict) -> dict:
-    """标记知识图谱实体为已验证.
-
-    参数:
-        entity_type: 实体类型
-        name: 实体名称
-        verified: 验证状态（默认 true）
-    """
-    entity_type = params.get("entity_type")
-    name = params.get("name")
-    if not entity_type or not name:
-        return {"success": False, "error": "Missing entity_type or name"}
-
-    verified = params.get("verified", True)
-    svc = _get_service()
-    ok = svc.verify_entity(entity_type, name, verified)
-    if not ok:
-        return {"success": False, "error": f"Entity {entity_type}::{name} not found"}
-    return {
-        "success": True,
-        "entity_type": entity_type,
-        "name": name,
-        "verified": verified,
-        "message": f"Verified={verified}.",
-    }
-
-
-def tool_graph_search_with_graph(params: dict) -> dict:
-    """语义搜索 + 图谱联合查询.
-
-    参数:
-        text: 搜索文本
-        top_k: 语义搜索返回数量（默认 5）
-        graph_depth: 图谱扩展深度（默认 1）
-    """
-    text = params.get("text")
-    if not text:
-        return {"success": False, "error": "Missing required parameter: text"}
-    top_k = params.get("top_k", Config.PLUGIN_SEARCH_TOP_K)
-    graph_depth = params.get("graph_depth", Config.PLUGIN_SUBGRAPH_DEPTH)
-
-    svc = _get_service()
-    try:
-        result = svc.search_with_graph(str(text), top_k=top_k, graph_depth=graph_depth)
-    except RuntimeError as e:
-        return {"success": False, "error": str(e)}
-
-    return {
-        "success": True,
-        "text": text,
-        "chunks": [{"score": c["score"], **_chunk_to_dict(c["chunk"])} for c in result["chunks"]],
-        "related_entities": result["related_entities"],
-        "subgraphs": result["subgraphs"],
-    }
-
-
-def tool_graph_get_content_with_entities(params: dict) -> dict:
-    """获取 chunk 内容及其关联的图谱实体.
-
-    参数:
-        chunk_db_id: Chunk 数据库 ID
-        doc_id: 可选，指定文档 ID 以获取该文档中的原始属性快照
-    """
-    chunk_db_id = params.get("chunk_db_id")
-    if chunk_db_id is None:
-        return {"success": False, "error": "Missing required parameter: chunk_db_id"}
-
-    doc_id = params.get("doc_id")
-    svc = _get_service()
-    try:
-        result = svc.get_content_with_entities(int(chunk_db_id), doc_id)
-    except ValueError as e:
-        return {"success": False, "error": str(e)}
-
-    return {
-        "success": True,
-        "chunk": _chunk_to_dict(result["chunk"]),
-        "entities": [_entity_to_dict(e) for e in result["entities"]],
-        "relations": [_relation_to_dict(r) for r in result["relations"]],
-    }
-
-
-def tool_graph_feedback(params: dict) -> dict:
-    """提交对实体或关系的反馈.
-
-    参数:
-        rating: 评分 +1（正确）或 -1（错误）
-        entity_type, entity_name: 目标实体（可选）
-        relation_type, from_type, from_name, to_type, to_name: 目标关系（可选）
-        comment: 评论（可选）
-    """
-    rating = params.get("rating")
-    if rating not in (1, -1):
-        return {"success": False, "error": "rating must be +1 or -1"}
-
-    svc = _get_service()
-    feedback_id = svc.submit_feedback(
-        rating=rating,
-        entity_type=params.get("entity_type"),
-        entity_name=params.get("entity_name"),
-        relation_type=params.get("relation_type"),
-        relation_from_type=params.get("from_type"),
-        relation_from_name=params.get("from_name"),
-        relation_to_type=params.get("to_type"),
-        relation_to_name=params.get("to_name"),
-        comment=params.get("comment", ""),
-    )
-    return {
-        "success": True,
-        "feedback_id": feedback_id,
-        "message": "Feedback submitted.",
-    }
-
-
-def tool_graph_conflicts(params: dict) -> dict:
-    """查询知识图谱冲突日志.
-
-    参数:
-        entity_type: 实体类型过滤（可选）
-        name: 实体名称过滤（可选）
-        limit: 最大返回数量（默认 100）
-    """
-    svc = _get_service()
-    logs = svc.get_conflict_logs(
-        entity_type=params.get("entity_type"),
-        name=params.get("name"),
-        limit=params.get("limit", Config.PLUGIN_DEFAULT_LIMIT),
-    )
-    return {"success": True, "count": len(logs), "logs": logs}
-
-
-def tool_get_feedback(params: dict) -> dict:
-    """查询对知识图谱实体或关系的反馈汇总.
-
-    参数:
-        entity_type: 实体类型过滤（可选）
-        entity_name: 实体名称过滤（可选）
-        limit: 最大返回数量（默认 100）
-    """
-    svc = _get_service()
-    feedbacks = svc.get_feedback(
-        entity_type=params.get("entity_type"),
-        entity_name=params.get("entity_name"),
-        limit=params.get("limit", Config.PLUGIN_DEFAULT_LIMIT),
-    )
-    return {"success": True, "count": len(feedbacks), "feedbacks": feedbacks}
-
-
-def tool_rebuild_global_graph(params: dict) -> dict:
-    """全量重建全局知识图谱（清空后从所有子图重新加载，用于修复不一致）."""
-    svc = _get_service()
-    stats = svc.rebuild_global_graph()
-    return {
-        "success": True,
-        "message": f"全局图谱已重建 | nodes={stats['nodes']} | edges={stats['edges']}",
-        "stats": stats,
-    }
-
-
-# ---------------------------------------------------------------------------
-# 四阶段 Pipeline 工具
-# ---------------------------------------------------------------------------
 
 
 def tool_doc_parse(params: dict) -> dict:
@@ -814,7 +186,6 @@ def tool_doc_submit_batches(params: dict) -> dict:
 
     pipe = DocGraphPipeline()
     try:
-        # 获取原始文件路径（从数据库或参数）
         file_path = params.get("file_path")
         if not file_path:
             doc = pipe.db.get_document(doc_id)
@@ -840,8 +211,7 @@ def tool_doc_submit_batches(params: dict) -> dict:
             "doc_id": doc_id,
             "results_path": str(results_path),
             "message": (
-                f"Batch 已提交，结果已保存至 {results_path}，"
-                "执行 doc_ingest_results 完成入库"
+                f"Batch 已提交，结果已保存至 {results_path}，执行 doc_ingest_results 完成入库"
             ),
         }
     except Exception as e:
@@ -861,7 +231,6 @@ def tool_doc_ingest_results(params: dict) -> dict:
 
     pipe = DocGraphPipeline()
     try:
-        # 获取原始文件路径（从数据库或参数）
         file_path = params.get("file_path")
         if not file_path:
             doc = pipe.db.get_document(doc_id)
@@ -877,7 +246,6 @@ def tool_doc_ingest_results(params: dict) -> dict:
         if results_path_param:
             results_path = Path(results_path_param)
         else:
-            # 默认路径
             results_path = Path(Config.DB_PATH).parent / "batch" / f"{doc_id}_results.jsonl"
 
         result_doc_id = pipe.stage4_ingest_results(
@@ -896,14 +264,664 @@ def tool_doc_ingest_results(params: dict) -> dict:
         return {"success": False, "error": str(e)}
 
 
+def tool_reprocess(params: dict) -> dict:
+    """强制重新处理文档."""
+    doc_id = params.get("doc_id")
+    if not doc_id:
+        return {"success": False, "error": "Missing required parameter: doc_id"}
+
+    svc = _get_service()
+    try:
+        new_id = svc.reprocess_document(doc_id)
+        return {"success": True, "doc_id": new_id, "message": "Reprocessed."}
+    except (ValueError, RuntimeError) as e:
+        return {"success": False, "error": str(e)}
+
+
+# ---------------------------------------------------------------------------
+# 状态与调试工具
+# ---------------------------------------------------------------------------
+
+
+def tool_status(params: dict) -> dict:
+    """列出文档或查看文档详情与进度.
+
+    参数:
+        doc_id: 可选，提供时返回该文档的详细状态和进度统计
+    """
+    svc = _get_service()
+    doc_id = params.get("doc_id")
+
+    if doc_id:
+        # 文档详情 + 进度（原 progress 功能）
+        doc = svc.get_document(doc_id)
+        if not doc:
+            return {"success": False, "error": f"Document {doc_id} not found."}
+        stats = svc.get_document_progress(doc_id)
+        return {
+            "success": True,
+            "doc_id": doc_id,
+            "title": doc.title,
+            "status": doc.status,
+            "total_pages": doc.total_pages,
+            **stats,
+        }
+
+    # 文档列表（原 status 功能）
+    docs = svc.list_documents()
+    return {
+        "success": True,
+        "documents": [
+            {
+                "doc_id": d.doc_id,
+                "title": d.title,
+                "status": d.status,
+                "total_pages": d.total_pages,
+                "extracted_at": d.extracted_at,
+            }
+            for d in docs
+        ],
+    }
+
+
+def tool_toc(params: dict) -> dict:
+    """获取文档目录或按标题搜索."""
+    svc = _get_service()
+    doc_id = params.get("doc_id")
+    match = params.get("match")
+
+    if doc_id:
+        doc = svc.get_document(doc_id)
+        if not doc:
+            return {"success": False, "error": f"Document {doc_id} not found."}
+        chapters = svc.db.get_chapters(doc_id)
+        return {
+            "success": True,
+            "doc_id": doc_id,
+            "title": doc.title,
+            "total_pages": doc.total_pages,
+            "status": doc.status,
+            "chapters": [
+                {
+                    "title": ch.title,
+                    "start_page": ch.start_page,
+                    "end_page": ch.end_page,
+                    "level": ch.level,
+                }
+                for ch in chapters
+            ],
+        }
+    elif match:
+        docs = svc.db.search_documents_by_title(match)
+        return {
+            "success": True,
+            "match": match,
+            "documents": [
+                {
+                    "doc_id": d.doc_id,
+                    "title": d.title,
+                    "status": d.status,
+                    "total_pages": d.total_pages,
+                }
+                for d in docs
+                if d
+            ],
+        }
+    else:
+        return {"success": False, "error": "Provide either doc_id or match."}
+
+
+# ---------------------------------------------------------------------------
+# 内容查询工具
+# ---------------------------------------------------------------------------
+
+
+def tool_semantic_search(params: dict) -> dict:
+    """语义向量搜索（可选联合知识图谱扩展）.
+
+    参数:
+        text: 搜索文本（required）
+        top_k: 返回结果数量（默认 5）
+        graph_depth: 图谱扩展深度，0 为纯语义搜索（默认），>0 时扩展关联图谱
+    """
+    text = params.get("text")
+    if not text:
+        return {"success": False, "error": "Missing required parameter: text"}
+    top_k = params.get("top_k", Config.PLUGIN_SEARCH_TOP_K)
+    graph_depth = params.get("graph_depth", 0)
+
+    svc = _get_service()
+    try:
+        if graph_depth > 0:
+            result = svc.search_with_graph(str(text), top_k=top_k, graph_depth=graph_depth)
+            return {
+                "success": True,
+                "text": text,
+                "graph_depth": graph_depth,
+                "chunks": [
+                    {"score": c["score"], **_chunk_to_dict(c["chunk"])} for c in result["chunks"]
+                ],
+                "related_entities": result["related_entities"],
+                "subgraphs": result["subgraphs"],
+            }
+        else:
+            results = svc.search_semantic(str(text), top_k=top_k)
+            return {
+                "success": True,
+                "text": text,
+                "results": [{"score": r["score"], **_chunk_to_dict(r["chunk"])} for r in results],
+            }
+    except RuntimeError as e:
+        return {"success": False, "error": str(e)}
+
+
+def tool_query(params: dict) -> dict:
+    """结构化 chunk 查询.
+
+    参数:
+        doc_id: 文档 ID（chapter/concept 查询必需）
+        chapter: 章节标题子串匹配
+        chapter_regex: 章节标题正则匹配
+        keyword: 关键词匹配（跨文档）
+        concept: 概念名匹配（需 doc_id）
+        top_k: 最大返回数量（默认 10）
+    """
+    doc_id = params.get("doc_id")
+    chapter = params.get("chapter")
+    chapter_regex = params.get("chapter_regex")
+    keyword = params.get("keyword")
+    concept = params.get("concept")
+    top_k = params.get("top_k", Config.PLUGIN_QUERY_TOP_K)
+
+    svc = _get_service()
+    try:
+        chunks = svc.query_chunks(
+            doc_id=doc_id,
+            chapter=chapter,
+            chapter_regex=chapter_regex,
+            keyword=keyword,
+            concept=concept,
+            top_k=top_k,
+        )
+    except ValueError as e:
+        return {"success": False, "error": str(e)}
+
+    return {"success": True, "results": [_chunk_to_dict(ck) for ck in chunks]}
+
+
+def tool_get_content(params: dict) -> dict:
+    """获取 chunk 完整内容（可选关联图谱实体）.
+
+    参数:
+        doc_id: 文档 ID（查询 chapter 时必填）
+        chapter: 章节标题子串匹配
+        chunk_db_id: Chunk 数据库 ID
+        with_entities: 是否同时返回关联的图谱实体和关系（默认 false）
+    """
+    doc_id = params.get("doc_id")
+    chapter = params.get("chapter")
+    chunk_db_id = params.get("chunk_db_id")
+    with_entities = params.get("with_entities", False)
+
+    svc = _get_service()
+
+    if with_entities:
+        if chunk_db_id is None:
+            return {"success": False, "error": "chunk_db_id is required when with_entities=true"}
+        try:
+            result = svc.get_content_with_entities(int(chunk_db_id), doc_id)
+        except ValueError as e:
+            return {"success": False, "error": str(e)}
+        return {
+            "success": True,
+            "chunk": _chunk_to_dict(result["chunk"]),
+            "entities": [_entity_to_dict(e) for e in result["entities"]],
+            "relations": [_relation_to_dict(r) for r in result["relations"]],
+        }
+
+    try:
+        result = svc.get_chunk_content(
+            chunk_db_id=chunk_db_id,
+            doc_id=doc_id,
+            chapter=chapter,
+        )
+    except ValueError as e:
+        return {"success": False, "error": str(e)}
+
+    chunks = result["chunks"]
+    chunk_meta = [
+        {
+            "chunk_db_id": ck.id,
+            "chunk_id": ck.chunk_id,
+            "chapter_title": ck.chapter_title,
+        }
+        for ck in chunks
+    ]
+
+    first = chunks[0]
+    return {
+        "success": True,
+        "query_type": result["query_type"],
+        "doc_id": first.doc_id,
+        "chapter_title": first.chapter_title,
+        "content": result["content"],
+        "total_chars": len(result["content"]),
+        "chunks": chunk_meta,
+    }
+
+
+# ---------------------------------------------------------------------------
+# 图谱查询工具
+# ---------------------------------------------------------------------------
+
+
+def tool_graph_query(params: dict) -> dict:
+    """查询知识图谱实体（支持深度扩展邻居和子图）.
+
+    参数:
+        entity_type: 实体类型（如 Module, Signal, Register）
+        name: 精确名称匹配（需配合 entity_type）
+        name_pattern: 名称模糊匹配（子串，大小写不敏感）
+        doc_id: 可选，指定文档 ID 以获取该文档中的原始属性快照
+        depth: 查询深度（默认 0）
+            0 = 仅返回实体信息
+            1 = 同时返回邻居节点
+            >1 = 同时返回子图
+        rel_type: 关系类型过滤（depth>=1 时生效）
+        direction: 方向 out/in/both（depth>=1 时生效，默认 out）
+        rel_types: 关系类型过滤列表（depth>1 时生效）
+    """
+    entity_type = params.get("entity_type")
+    name = params.get("name")
+    name_pattern = params.get("name_pattern")
+    doc_id = params.get("doc_id")
+    depth = params.get("depth", 0)
+    rel_type = params.get("rel_type")
+    direction = params.get("direction", "out")
+    rel_types = set(params.get("rel_types", [])) if params.get("rel_types") else None
+
+    svc = _get_service()
+
+    # 精确查询
+    if name and entity_type:
+        entity = svc.get_entity(entity_type, name)
+        if not entity:
+            return {"success": True, "count": 0, "entities": []}
+        if doc_id:
+            entity = svc._apply_doc_properties(entity, doc_id)
+
+        result = {
+            "success": True,
+            "count": 1,
+            "entities": [_entity_to_dict(entity)],
+        }
+
+        if depth >= 1:
+            neighbors = svc.get_neighbors(entity_type, name, rel_type, direction, doc_id)
+            result["neighbors"] = [
+                {
+                    "entity": _entity_to_dict(nentity),
+                    "relation": rel,
+                    "relation_properties": rel_props,
+                }
+                for nentity, rel, rel_props in neighbors
+            ]
+            result["neighbor_count"] = len(neighbors)
+
+        if depth > 1:
+            subgraph = svc.get_subgraph(entity_type, name, depth, rel_types)
+            result["subgraph"] = {
+                "depth": depth,
+                "node_count": subgraph.node_count,
+                "edge_count": subgraph.edge_count,
+                "entities": [_entity_to_dict(e) for e in subgraph.entities()],
+                "relations": [_relation_to_dict(r) for r in subgraph.relations()],
+            }
+
+        return result
+
+    # 搜索查询
+    entities = svc.find_entities(entity_type=entity_type, name_pattern=name_pattern, doc_id=doc_id)
+    return {
+        "success": True,
+        "count": len(entities),
+        "entities": [_entity_to_dict(e) for e in entities],
+    }
+
+
+def tool_graph_path(params: dict) -> dict:
+    """查找知识图谱中两实体间的路径.
+
+    参数:
+        from_type, from_name: 起点实体
+        to_type, to_name: 终点实体
+        max_depth: 最大搜索深度（默认 3，最大 6）
+    """
+    from_type = params.get("from_type")
+    from_name = params.get("from_name")
+    to_type = params.get("to_type")
+    to_name = params.get("to_name")
+    if not all([from_type, from_name, to_type, to_name]):
+        return {"success": False, "error": "Missing from/to entity parameters"}
+
+    max_depth = params.get("max_depth", Config.PLUGIN_GRAPH_MAX_DEPTH)
+    svc = _get_service()
+    paths = svc.find_path(str(from_type), str(from_name), str(to_type), str(to_name), max_depth)
+
+    def _parse_nid(nid: str) -> dict:
+        parts = nid.split("::", 1)
+        return {"type": parts[0], "name": parts[1] if len(parts) > 1 else nid}
+
+    return {
+        "success": True,
+        "from": {"type": from_type, "name": from_name},
+        "to": {"type": to_type, "name": to_name},
+        "max_depth": max_depth,
+        "path_count": len(paths),
+        "paths": [[_parse_nid(nid) for nid in p] for p in paths],
+    }
+
+
+# ---------------------------------------------------------------------------
+# 图谱写操作工具
+# ---------------------------------------------------------------------------
+
+
+def tool_graph_upsert_entity(params: dict) -> dict:
+    """添加或更新知识图谱实体.
+
+    参数:
+        entity_type: 实体类型
+        name: 实体名称
+        properties: 属性字典（可选）
+        source_doc_ids: 来源文档 ID 列表（可选）
+        confidence: 置信度 0.0-1.0（默认 1.0）
+        verified: 是否已人工验证（可选，不提供时保持原有值）
+    """
+    entity_type = params.get("entity_type")
+    name = params.get("name")
+    if not entity_type or not name:
+        return {"success": False, "error": "Missing entity_type or name"}
+
+    svc = _get_service()
+    existing = svc.get_entity(entity_type, name)
+
+    if existing:
+        # 更新模式（原 graph_update_entity + graph_verify_entity）
+        ok = svc.update_entity(
+            entity_type=entity_type,
+            name=name,
+            properties=params.get("properties"),
+            confidence=params.get("confidence"),
+            verified=params.get("verified"),
+        )
+        if not ok:
+            return {"success": False, "error": f"Entity {entity_type}::{name} not found"}
+        return {
+            "success": True,
+            "entity_type": entity_type,
+            "name": name,
+            "mode": "updated",
+            "message": "Updated.",
+        }
+
+    # 创建模式（原 graph_add_entity）
+    entity = GraphEntity(
+        entity_type=entity_type,
+        name=name,
+        properties=params.get("properties", {}),
+        source_doc_ids=set(params.get("source_doc_ids", [])),
+        confidence=params.get("confidence", 1.0),
+        verified=params.get("verified", False),
+    )
+    conflicts = svc.add_entity(entity)
+    return {
+        "success": True,
+        "entity": _entity_to_dict(entity),
+        "conflicts": conflicts,
+        "mode": "created",
+        "message": f"Entity {entity_type}::{name} created. Conflicts: {len(conflicts)}",
+    }
+
+
+def tool_graph_delete_entity(params: dict) -> dict:
+    """删除知识图谱中的实体（级联删除关联边）.
+
+    参数:
+        entity_type: 实体类型
+        name: 实体名称
+    """
+    entity_type = params.get("entity_type")
+    name = params.get("name")
+    if not entity_type or not name:
+        return {"success": False, "error": "Missing entity_type or name"}
+
+    svc = _get_service()
+    ok = svc.delete_entity(entity_type, name)
+    if not ok:
+        return {"success": False, "error": f"Entity {entity_type}::{name} not found"}
+    return {"success": True, "entity_type": entity_type, "name": name, "message": "Deleted."}
+
+
+def tool_graph_upsert_relation(params: dict) -> dict:
+    """添加或更新知识图谱中的关系.
+
+    参数:
+        rel_type: 关系类型
+        from_type, from_name: 起点实体
+        to_type, to_name: 终点实体
+        properties: 关系属性字典（可选）
+        confidence: 置信度（默认 1.0）
+        verified: 是否已验证（默认 false）
+    """
+    rel_type = params.get("rel_type")
+    from_type = params.get("from_type")
+    from_name = params.get("from_name")
+    to_type = params.get("to_type")
+    to_name = params.get("to_name")
+    if not all([rel_type, from_type, from_name, to_type, to_name]):
+        return {"success": False, "error": "Missing required relation parameters"}
+
+    relation = GraphRelation(
+        rel_type=str(rel_type),
+        from_type=str(from_type),
+        from_name=str(from_name),
+        to_type=str(to_type),
+        to_name=str(to_name),
+        properties=params.get("properties", {}),
+        confidence=params.get("confidence", 1.0),
+        verified=params.get("verified", False),
+    )
+    svc = _get_service()
+    conflicts = svc.add_relation(relation)
+    return {
+        "success": True,
+        "relation": _relation_to_dict(relation),
+        "conflicts": conflicts,
+        "message": f"Relation {rel_type} added/updated. Conflicts: {len(conflicts)}",
+    }
+
+
+def tool_graph_delete_relation(params: dict) -> dict:
+    """删除知识图谱中的关系.
+
+    参数:
+        rel_type: 关系类型
+        from_type, from_name: 起点实体
+        to_type, to_name: 终点实体
+    """
+    rel_type = params.get("rel_type")
+    from_type = params.get("from_type")
+    from_name = params.get("from_name")
+    to_type = params.get("to_type")
+    to_name = params.get("to_name")
+    if not all([rel_type, from_type, from_name, to_type, to_name]):
+        return {"success": False, "error": "Missing required relation parameters"}
+
+    svc = _get_service()
+    ok = svc.delete_relation(
+        str(from_type), str(from_name), str(to_type), str(to_name), str(rel_type)
+    )
+    if not ok:
+        return {"success": False, "error": "Relation not found"}
+    return {
+        "success": True,
+        "rel_type": rel_type,
+        "from": f"{from_type}::{from_name}",
+        "to": f"{to_type}::{to_name}",
+        "message": "Deleted.",
+    }
+
+
+# ---------------------------------------------------------------------------
+# 反馈与冲突工具
+# ---------------------------------------------------------------------------
+
+
+def tool_graph_feedback(params: dict) -> dict:
+    """提交或查询对知识图谱实体/关系的反馈.
+
+    参数:
+        action: "submit" 或 "query"（默认 submit）
+        -- submit 模式 --
+        rating: 评分 +1（正确）或 -1（错误）
+        entity_type, entity_name: 目标实体（可选）
+        relation_type, from_type, from_name, to_type, to_name: 目标关系（可选）
+        comment: 评论说明（可选）
+        -- query 模式 --
+        entity_type, entity_name: 过滤条件（可选）
+        limit: 最大返回数量（默认 100）
+    """
+    action = params.get("action", "submit")
+    svc = _get_service()
+
+    if action == "submit":
+        rating = params.get("rating")
+        if rating not in (1, -1):
+            return {"success": False, "error": "rating must be +1 or -1"}
+        feedback_id = svc.submit_feedback(
+            rating=rating,
+            entity_type=params.get("entity_type"),
+            entity_name=params.get("entity_name"),
+            relation_type=params.get("relation_type"),
+            relation_from_type=params.get("from_type"),
+            relation_from_name=params.get("from_name"),
+            relation_to_type=params.get("to_type"),
+            relation_to_name=params.get("to_name"),
+            comment=params.get("comment", ""),
+        )
+        return {
+            "success": True,
+            "feedback_id": feedback_id,
+            "message": "Feedback submitted.",
+        }
+    elif action == "query":
+        feedbacks = svc.get_feedback(
+            entity_type=params.get("entity_type"),
+            entity_name=params.get("entity_name"),
+            limit=params.get("limit", Config.PLUGIN_DEFAULT_LIMIT),
+        )
+        return {"success": True, "count": len(feedbacks), "feedbacks": feedbacks}
+    else:
+        return {"success": False, "error": "action must be 'submit' or 'query'"}
+
+
+def tool_graph_conflicts(params: dict) -> dict:
+    """查询知识图谱冲突日志（同名实体属性覆盖记录）.
+
+    参数:
+        entity_type: 实体类型过滤
+        name: 实体名称过滤
+        limit: 最大返回数量（默认 100）
+    """
+    svc = _get_service()
+    logs = svc.get_conflict_logs(
+        entity_type=params.get("entity_type"),
+        name=params.get("name"),
+        limit=params.get("limit", Config.PLUGIN_DEFAULT_LIMIT),
+    )
+    return {"success": True, "count": len(logs), "logs": logs}
+
+
+# ---------------------------------------------------------------------------
+# 维护与溯源工具
+# ---------------------------------------------------------------------------
+
+
+def tool_graph_provenance(params: dict) -> dict:
+    """查询知识图谱实体的来源溯源（实体 → 来源 chunk → 原始文档）.
+
+    参数:
+        entity_type: 实体类型（required）
+        name: 实体名称（required）
+        doc_id: 可选，限定只查某文档的来源
+    """
+    entity_type = params.get("entity_type")
+    name = params.get("name")
+    if not entity_type or not name:
+        return {"success": False, "error": "Missing entity_type or name"}
+
+    doc_id = params.get("doc_id")
+    svc = _get_service()
+    entity = svc.get_entity(entity_type, name)
+    if not entity:
+        return {"success": True, "count": 0, "sources": []}
+
+    sources: list[dict[str, Any]] = []
+    target_doc_ids = [doc_id] if doc_id else sorted(entity.source_doc_ids)
+
+    for src_doc_id in target_doc_ids:
+        doc = svc.get_document(src_doc_id)
+        doc_title = doc.title if doc else src_doc_id
+
+        # 从 chunk metadata 查找提取该实体的 chunk
+        chunks = svc.db.query_by_doc(src_doc_id)
+        for ck in chunks:
+            meta_entities = ck.metadata.get("extracted_entities", [])
+            for me in meta_entities:
+                if me.get("type") == entity_type and me.get("name") == name:
+                    props_snapshot: dict[str, Any] = {}
+                    if entity.doc_properties and src_doc_id in entity.doc_properties:
+                        props_snapshot = dict(entity.doc_properties[src_doc_id])
+                    sources.append(
+                        {
+                            "doc_id": src_doc_id,
+                            "doc_title": doc_title,
+                            "chunk_db_id": ck.id,
+                            "chapter_title": ck.chapter_title,
+                            "confidence": me.get("confidence", entity.confidence),
+                            "properties_snapshot": props_snapshot,
+                        }
+                    )
+                    break
+
+    return {
+        "success": True,
+        "entity_type": entity_type,
+        "name": name,
+        "count": len(sources),
+        "sources": sources,
+    }
+
+
+def tool_rebuild_global_graph(params: dict) -> dict:
+    """全量重建全局知识图谱（清空后从所有子图重新加载，用于修复不一致）."""
+    svc = _get_service()
+    stats = svc.rebuild_global_graph()
+    return {
+        "success": True,
+        "message": f"全局图谱已重建 | nodes={stats['nodes']} | edges={stats['edges']}",
+        "stats": stats,
+    }
+
+
 def tool_config(params: dict) -> dict:
-    """打印当前生效的配置值."""
+    """打印当前生效的配置参数值（支持敏感字段脱敏）."""
     from core.config import Config
 
     mask = params.get("mask_sensitive", True)
     config_dict = Config.to_dict(mask_sensitive=mask)
 
-    # 分组展示
     groups: dict[str, dict[str, Any]] = {
         "LLM 配置": {},
         "Embedding 配置": {},
@@ -967,7 +985,6 @@ def tool_config(params: dict) -> dict:
         group = group_map.get(key, "其他")
         groups[group][key] = val
 
-    # 过滤空组
     groups = {k: v for k, v in groups.items() if v}
 
     return {
@@ -989,28 +1006,21 @@ TOOL_MAP = {
     "doc_build_batches": tool_doc_build_batches,
     "doc_submit_batches": tool_doc_submit_batches,
     "doc_ingest_results": tool_doc_ingest_results,
-    "search": tool_search,
+    "semantic_search": tool_semantic_search,
     "query": tool_query,
     "status": tool_status,
     "toc": tool_toc,
-    "progress": tool_progress,
     "reprocess": tool_reprocess,
     "get_content": tool_get_content,
     "graph_query": tool_graph_query,
-    "graph_neighbors": tool_graph_neighbors,
     "graph_path": tool_graph_path,
-    "graph_subgraph": tool_graph_subgraph,
-    "graph_add_entity": tool_graph_add_entity,
-    "graph_update_entity": tool_graph_update_entity,
+    "graph_upsert_entity": tool_graph_upsert_entity,
     "graph_delete_entity": tool_graph_delete_entity,
-    "graph_add_relation": tool_graph_add_relation,
+    "graph_upsert_relation": tool_graph_upsert_relation,
     "graph_delete_relation": tool_graph_delete_relation,
-    "graph_verify_entity": tool_graph_verify_entity,
-    "graph_search_with_graph": tool_graph_search_with_graph,
-    "graph_get_content_with_entities": tool_graph_get_content_with_entities,
     "graph_feedback": tool_graph_feedback,
     "graph_conflicts": tool_graph_conflicts,
-    "get_feedback": tool_get_feedback,
+    "graph_provenance": tool_graph_provenance,
     "rebuild_global_graph": tool_rebuild_global_graph,
 }
 

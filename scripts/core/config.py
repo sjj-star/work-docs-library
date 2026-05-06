@@ -110,7 +110,6 @@ class Config:
     LLM_BATCH_MAX_CHARS: int = 0  # 将在下方初始化
     LLM_BATCH_TIMEOUT: int = 0  # 将在下方初始化
 
-
     # --- API Endpoint 配置（服务商无感化） ---
     LLM_BATCH_ENDPOINT: str = _resolve_config(
         "WORKDOCS_LLM_BATCH_ENDPOINT", "llm.batch_endpoint", "/v1/chat/completions"

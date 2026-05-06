@@ -222,9 +222,7 @@ class ChapterParser:
         if node.content:
             path_lines = [f"{'#' * (i + 1)} {t}" for i, t in enumerate(path) if t]
             path_prefix = "\n".join(path_lines)
-            full_content = (
-                f"{path_prefix}\n\n{node.content}" if path_prefix else node.content
-            )
+            full_content = f"{path_prefix}\n\n{node.content}" if path_prefix else node.content
             result.append({"title": node.title, "content": full_content})
         for child in node.children:
             result.extend(cls.collect_all_nodes(child, path))
@@ -658,9 +656,7 @@ class EntityExtractor:
             for img_desc in data.get("image_descriptions", []):
                 all_image_descriptions.append(img_desc)
 
-        logger.info(
-            f"文件解析完成 | entities={len(all_entities)} | relations={len(all_relations)}"
-        )
+        logger.info(f"文件解析完成 | entities={len(all_entities)} | relations={len(all_relations)}")
         return all_entities, all_relations, all_image_descriptions
 
     def _safe_parse_json(self, raw):
@@ -858,11 +854,7 @@ class DocGraphPipeline:
             for ch in new_chapters_flat
         ]
         max_chars = max_chars or Config.LLM_BATCH_MAX_CHARS
-        batches = (
-            BatchBuilder.build_batches(process_nodes, max_chars)
-            if process_nodes
-            else []
-        )
+        batches = BatchBuilder.build_batches(process_nodes, max_chars) if process_nodes else []
         logger.info(f"Batch 构建完成 | batches={len(batches)}")
 
         # 构建 doc_context
@@ -1102,8 +1094,7 @@ class DocGraphPipeline:
             "added_titles": [ch["title"] for ch in added],
             "removed_titles": [ck.chapter_title for ck in removed],
             "result_md_hash": hashlib.md5(
-                (Config.DB_PATH.parent / "parsed" / doc_id / "result.md")
-                .read_bytes()
+                (Config.DB_PATH.parent / "parsed" / doc_id / "result.md").read_bytes()
             ).hexdigest(),
         }
         info_path = batch_dir / f"{doc_id}_incremental.json"
@@ -1168,13 +1159,11 @@ class DocGraphPipeline:
             info = json.loads(info_path.read_text(encoding="utf-8"))
             expected_hash = info.get("result_md_hash", "")
             actual_hash = hashlib.md5(
-                (Config.DB_PATH.parent / "parsed" / doc_id / "result.md")
-                .read_bytes()
+                (Config.DB_PATH.parent / "parsed" / doc_id / "result.md").read_bytes()
             ).hexdigest()
             if expected_hash != actual_hash:
                 logger.warning(
-                    f"result.md 在 stage3 后被修改，增量分析结果可能不一致 | "
-                    f"doc_id={doc_id}"
+                    f"result.md 在 stage3 后被修改，增量分析结果可能不一致 | doc_id={doc_id}"
                 )
             else:
                 current_titles = {
@@ -1187,10 +1176,7 @@ class DocGraphPipeline:
                     expected = set(info.get(key, []))
                     actual = set(current_titles.get(key.replace("_titles", ""), []))
                     if expected != actual:
-                        logger.warning(
-                            f"增量分析结果与 stage3 不一致 ({key}) | "
-                            f"doc_id={doc_id}"
-                        )
+                        logger.warning(f"增量分析结果与 stage3 不一致 ({key}) | doc_id={doc_id}")
 
         # --- 实体提取 ---
         all_entities: list[GraphEntity] = []
@@ -1398,8 +1384,8 @@ class DocGraphPipeline:
 
         try:
             # 阶段1: PDF → Markdown
-            doc_id, _parsed_output_dir, _extracted_text, _bigmodel_images = (
-                self.stage1_parse(file_path)
+            doc_id, _parsed_output_dir, _extracted_text, _bigmodel_images = self.stage1_parse(
+                file_path
             )
 
             # 阶段2: Markdown → JSONL
@@ -1467,9 +1453,7 @@ class DocGraphPipeline:
         def _build_metadata(ch_title: str, ch_hash: str, old_ck: Chunk | None) -> dict[str, Any]:
             """构建 chunk metadata，包含缓存的实体/关系/embedding."""
             ch_ents = [e for e in entity_dicts if e.get("source_chapter") == ch_title]
-            ch_ent_keys = {
-                (e.get("type", ""), e.get("name", "")) for e in ch_ents
-            }
+            ch_ent_keys = {(e.get("type", ""), e.get("name", "")) for e in ch_ents}
             # 按章节过滤关系：保留 from 或 to 在当前章节实体列表中的关系
             # 使用 (type, name) 元组避免跨类型同名污染
             ch_rels = [
@@ -1556,9 +1540,7 @@ class DocGraphPipeline:
             if reembed_pairs:
                 texts, valid_ids = zip(*reembed_pairs)
                 if self.embedding_batch_client:
-                    logger.info(
-                        f"开始批量向量化 | chunks={len(texts)} | client=BigModelBatch"
-                    )
+                    logger.info(f"开始批量向量化 | chunks={len(texts)} | client=BigModelBatch")
                     embeddings = self.embedding_batch_client.submit_embedding_batch(
                         texts=list(texts),
                         timeout=Config.LLM_BATCH_TIMEOUT,
@@ -1603,9 +1585,7 @@ class DocGraphPipeline:
             return content
 
         chapter_images = [
-            d
-            for d in image_descriptions
-            if d.get("chapter_title", "") == chapter_title
+            d for d in image_descriptions if d.get("chapter_title", "") == chapter_title
         ]
         if not chapter_images:
             return content

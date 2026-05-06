@@ -1231,9 +1231,7 @@ def test_new_arch_rel_types(graph_store):
     # 建立 ISA 层级 ↔ RTL 层级的混合图谱
     entities = [
         GraphEntity(entity_type="Module", name="ALU", properties={"description": "算术逻辑单元"}),
-        GraphEntity(
-            entity_type="Instruction", name="ADD", properties={"cycle_count": 1}
-        ),
+        GraphEntity(entity_type="Instruction", name="ADD", properties={"cycle_count": 1}),
         GraphEntity(entity_type="Register", name="ACC", properties={"width": 32}),
         GraphEntity(
             entity_type="PipelineStage", name="Execute", properties={"description": "执行阶段"}
@@ -1241,9 +1239,7 @@ def test_new_arch_rel_types(graph_store):
         GraphEntity(
             entity_type="Peripheral", name="ePWM1", properties={"description": "增强型 PWM"}
         ),
-        GraphEntity(
-            entity_type="CLA_Task", name="Task2", properties={"trigger_source": "ADC_INT"}
-        ),
+        GraphEntity(entity_type="CLA_Task", name="Task2", properties={"trigger_source": "ADC_INT"}),
     ]
     for ent in entities:
         graph_store.add_entity(ent)

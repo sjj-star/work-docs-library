@@ -67,7 +67,7 @@ def test_split_by_sentences_no_hard_truncate_fallback():
 
 def test_split_by_sentences_paragraph_boundary_split():
     """段落边界应在空行处切分，同一段落保持完整."""
-    text = ("A. " * 50 + "\n\n" + "B. " * 50 + "\n\n" + "C. " * 50)
+    text = "A. " * 50 + "\n\n" + "B. " * 50 + "\n\n" + "C. " * 50
     chunks = BatchBuilder._split_by_sentences(text, max_len=200)
     # 空行分隔的段落应被切分到不同 chunk
     assert len(chunks) >= 2
@@ -107,26 +107,35 @@ class TestBatchBuilderFiltersEmptyContent:
 
     def test_filters_empty_node_in_flat_list(self):
         """扁平节点列表中 content 为空的节点应被过滤."""
-        batches = BatchBuilder.build_batches([
-            ChapterNode(level=1, title="Empty Section", content=""),
-            ChapterNode(level=1, title="Real Section", content="Real content."),
-        ], max_chars=1000)
+        batches = BatchBuilder.build_batches(
+            [
+                ChapterNode(level=1, title="Empty Section", content=""),
+                ChapterNode(level=1, title="Real Section", content="Real content."),
+            ],
+            max_chars=1000,
+        )
         assert len(batches) == 1
         assert batches[0][0]["title"] == "Real Section"
 
     def test_filters_empty_chunk_in_flat_list(self):
         """扁平节点列表中 content 为空的 chunk 应被过滤，不影响后续 chunk."""
-        batches = BatchBuilder.build_batches([
-            ChapterNode(level=1, title="Empty Chunk", content=""),
-            ChapterNode(level=1, title="Real Chunk", content="Real content."),
-        ], max_chars=1000)
+        batches = BatchBuilder.build_batches(
+            [
+                ChapterNode(level=1, title="Empty Chunk", content=""),
+                ChapterNode(level=1, title="Real Chunk", content="Real content."),
+            ],
+            max_chars=1000,
+        )
         assert len(batches) == 1
         assert batches[0][0]["title"] == "Real Chunk"
 
     def test_all_empty_nodes_yield_empty_batches(self):
         """全部节点都为空时应返回空列表."""
-        batches = BatchBuilder.build_batches([
-            ChapterNode(level=1, title="Doc", content=""),
-            ChapterNode(level=1, title="Section", content=""),
-        ], max_chars=1000)
+        batches = BatchBuilder.build_batches(
+            [
+                ChapterNode(level=1, title="Doc", content=""),
+                ChapterNode(level=1, title="Section", content=""),
+            ],
+            max_chars=1000,
+        )
         assert batches == []

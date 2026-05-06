@@ -303,30 +303,27 @@ def test_plugin_json_valid_schema():
     names = [t["name"] for t in data["tools"]]
     expected = [
         "ingest",
-        "search",
+        "semantic_search",
         "query",
         "status",
         "toc",
-        "progress",
         "reprocess",
         "get_content",
         "graph_query",
-        "graph_neighbors",
         "graph_path",
-        "graph_subgraph",
-        "graph_add_entity",
-        "graph_update_entity",
+        "graph_upsert_entity",
         "graph_delete_entity",
-        "graph_add_relation",
+        "graph_upsert_relation",
         "graph_delete_relation",
-        "graph_verify_entity",
-        "graph_search_with_graph",
-        "graph_get_content_with_entities",
         "graph_feedback",
         "graph_conflicts",
+        "graph_provenance",
         "doc_parse",
         "doc_build_batches",
         "doc_submit_batches",
+        "doc_ingest_results",
+        "rebuild_global_graph",
+        "config",
     ]
     for name in expected:
         assert name in names, f"Missing tool: {name}"
@@ -533,30 +530,31 @@ def test_graph_query_by_type(monkeypatch):
     assert names == {"TOP", "SUB"}
 
 
-def test_graph_neighbors_out(monkeypatch):
-    """graph_neighbors out 方向."""
+def test_graph_query_neighbors(monkeypatch):
+    """graph_query depth=1 查询邻居节点."""
     svc = _make_graph_service()
     monkeypatch.setattr(plugin_router, "_get_service", lambda: svc)
 
-    result = plugin_router.tool_graph_neighbors(
-        {"entity_type": "Module", "name": "TOP", "direction": "out"}
+    result = plugin_router.tool_graph_query(
+        {"entity_type": "Module", "name": "TOP", "depth": 1, "direction": "out"}
     )
     assert result["success"] is True
-    assert result["count"] == 2
+    assert result["count"] == 1
+    assert result["neighbor_count"] == 2
     names = {n["entity"]["name"] for n in result["neighbors"]}
     assert names == {"SUB", "CLK"}
 
 
-def test_graph_neighbors_filtered_rel_type(monkeypatch):
-    """graph_neighbors 按关系类型过滤."""
+def test_graph_query_neighbors_filtered(monkeypatch):
+    """graph_query 按关系类型过滤邻居."""
     svc = _make_graph_service()
     monkeypatch.setattr(plugin_router, "_get_service", lambda: svc)
 
-    result = plugin_router.tool_graph_neighbors(
-        {"entity_type": "Module", "name": "TOP", "rel_type": "CONTAINS"}
+    result = plugin_router.tool_graph_query(
+        {"entity_type": "Module", "name": "TOP", "depth": 1, "rel_type": "CONTAINS"}
     )
     assert result["success"] is True
-    assert result["count"] == 1
+    assert result["neighbor_count"] == 1
     assert result["neighbors"][0]["entity"]["name"] == "SUB"
 
 
@@ -599,52 +597,54 @@ def test_graph_path_not_found(monkeypatch):
     assert result["path_count"] == 0
 
 
-def test_graph_subgraph(monkeypatch):
-    """graph_subgraph 提取子图."""
+def test_graph_query_subgraph(monkeypatch):
+    """graph_query depth>1 提取子图."""
     svc = _make_graph_service()
     monkeypatch.setattr(plugin_router, "_get_service", lambda: svc)
 
-    result = plugin_router.tool_graph_subgraph(
-        {"center_type": "Module", "center_name": "TOP", "depth": 2}
-    )
+    result = plugin_router.tool_graph_query({"entity_type": "Module", "name": "TOP", "depth": 2})
     assert result["success"] is True
-    assert result["node_count"] == 4
-    names = {e["name"] for e in result["entities"]}
+    assert result["count"] == 1
+    assert result["subgraph"]["node_count"] == 4
+    names = {e["name"] for e in result["subgraph"]["entities"]}
     assert names == {"TOP", "SUB", "CLK", "REG"}
 
 
 def test_graph_tools_missing_params():
     """图谱工具缺少必需参数时返回错误."""
-    assert plugin_router.tool_graph_neighbors({})["success"] is False
+    assert plugin_router.tool_graph_query({})["success"] is True  # 无参数返回全部实体
     assert plugin_router.tool_graph_path({})["success"] is False
-    assert plugin_router.tool_graph_subgraph({})["success"] is False
+    assert plugin_router.tool_graph_upsert_entity({})["success"] is False
 
 
-def test_graph_add_entity(monkeypatch):
-    """graph_add_entity 添加实体."""
+def test_graph_upsert_entity_create(monkeypatch):
+    """graph_upsert_entity 创建新实体."""
     svc = _make_graph_service()
     monkeypatch.setattr(plugin_router, "_get_service", lambda: svc)
 
-    result = plugin_router.tool_graph_add_entity(
+    result = plugin_router.tool_graph_upsert_entity(
         {"entity_type": "Module", "name": "NEW", "properties": {"desc": "test"}}
     )
     assert result["success"] is True
     assert result["entity"]["name"] == "NEW"
     assert result["conflicts"] == []
+    assert result["mode"] == "created"
 
 
-def test_graph_update_entity(monkeypatch):
-    """graph_update_entity 更新实体."""
+def test_graph_upsert_entity_update(monkeypatch):
+    """graph_upsert_entity 更新已有实体（含 verify 功能）."""
     svc = _make_graph_service()
     monkeypatch.setattr(plugin_router, "_get_service", lambda: svc)
 
-    plugin_router.tool_graph_add_entity({"entity_type": "Module", "name": "M1"})
-    result = plugin_router.tool_graph_update_entity(
+    # 先创建
+    plugin_router.tool_graph_upsert_entity({"entity_type": "Module", "name": "M1"})
+    # 再更新
+    result = plugin_router.tool_graph_upsert_entity(
         {"entity_type": "Module", "name": "M1", "properties": {"a": 1}, "verified": True}
     )
     assert result["success"] is True
+    assert result["mode"] == "updated"
 
-    # 验证更新生效
     e = svc.graph.get_entity("Module", "M1")
     assert e is not None
     assert e.properties == {"a": 1}
@@ -656,20 +656,20 @@ def test_graph_delete_entity(monkeypatch):
     svc = _make_graph_service()
     monkeypatch.setattr(plugin_router, "_get_service", lambda: svc)
 
-    plugin_router.tool_graph_add_entity({"entity_type": "Module", "name": "DEL"})
+    plugin_router.tool_graph_upsert_entity({"entity_type": "Module", "name": "DEL"})
     result = plugin_router.tool_graph_delete_entity({"entity_type": "Module", "name": "DEL"})
     assert result["success"] is True
     assert svc.graph.get_entity("Module", "DEL") is None
 
 
-def test_graph_add_relation(monkeypatch):
-    """graph_add_relation 添加关系."""
+def test_graph_upsert_relation(monkeypatch):
+    """graph_upsert_relation 添加关系."""
     svc = _make_graph_service()
     monkeypatch.setattr(plugin_router, "_get_service", lambda: svc)
 
-    plugin_router.tool_graph_add_entity({"entity_type": "Module", "name": "A"})
-    plugin_router.tool_graph_add_entity({"entity_type": "Module", "name": "B"})
-    result = plugin_router.tool_graph_add_relation(
+    plugin_router.tool_graph_upsert_entity({"entity_type": "Module", "name": "A"})
+    plugin_router.tool_graph_upsert_entity({"entity_type": "Module", "name": "B"})
+    result = plugin_router.tool_graph_upsert_relation(
         {
             "rel_type": "CONTAINS",
             "from_type": "Module",
@@ -687,9 +687,9 @@ def test_graph_delete_relation(monkeypatch):
     svc = _make_graph_service()
     monkeypatch.setattr(plugin_router, "_get_service", lambda: svc)
 
-    plugin_router.tool_graph_add_entity({"entity_type": "Module", "name": "A"})
-    plugin_router.tool_graph_add_entity({"entity_type": "Module", "name": "B"})
-    plugin_router.tool_graph_add_relation(
+    plugin_router.tool_graph_upsert_entity({"entity_type": "Module", "name": "A"})
+    plugin_router.tool_graph_upsert_entity({"entity_type": "Module", "name": "B"})
+    plugin_router.tool_graph_upsert_relation(
         {
             "rel_type": "CONTAINS",
             "from_type": "Module",
@@ -710,19 +710,6 @@ def test_graph_delete_relation(monkeypatch):
     assert result["success"] is True
 
 
-def test_graph_verify_entity(monkeypatch):
-    """graph_verify_entity 标记验证."""
-    svc = _make_graph_service()
-    monkeypatch.setattr(plugin_router, "_get_service", lambda: svc)
-
-    plugin_router.tool_graph_add_entity({"entity_type": "Module", "name": "V1"})
-    result = plugin_router.tool_graph_verify_entity(
-        {"entity_type": "Module", "name": "V1", "verified": True}
-    )
-    assert result["success"] is True
-    assert result["verified"] is True
-
-
 def test_graph_conflicts_empty(monkeypatch):
     """graph_conflicts 无冲突时返回空列表."""
     svc = _make_graph_service()
@@ -733,16 +720,55 @@ def test_graph_conflicts_empty(monkeypatch):
     assert result["count"] == 0
 
 
-def test_graph_feedback(monkeypatch):
-    """graph_feedback 提交反馈."""
+def test_graph_feedback_submit(monkeypatch):
+    """graph_feedback action=submit 提交反馈."""
     svc = _make_graph_service()
     monkeypatch.setattr(plugin_router, "_get_service", lambda: svc)
 
     result = plugin_router.tool_graph_feedback(
-        {"rating": 1, "entity_type": "Module", "entity_name": "M1", "comment": "Good"}
+        {
+            "action": "submit",
+            "rating": 1,
+            "entity_type": "Module",
+            "entity_name": "M1",
+            "comment": "Good",
+        }
     )
     assert result["success"] is True
     assert result["feedback_id"] > 0
+
+
+def test_graph_feedback_query(monkeypatch):
+    """graph_feedback action=query 查询反馈."""
+    svc = _make_graph_service()
+    monkeypatch.setattr(plugin_router, "_get_service", lambda: svc)
+
+    # 先提交一条
+    plugin_router.tool_graph_feedback(
+        {"action": "submit", "rating": 1, "entity_type": "Module", "entity_name": "M1"}
+    )
+    # 再查询
+    result = plugin_router.tool_graph_feedback(
+        {"action": "query", "entity_type": "Module", "entity_name": "M1"}
+    )
+    assert result["success"] is True
+    assert result["count"] >= 1
+    # 验证返回的 feedbacks 中包含目标实体
+    assert any(f.get("entity_name") == "M1" for f in result["feedbacks"])
+
+
+def test_graph_provenance(monkeypatch):
+    """graph_provenance 实体来源溯源."""
+    svc = _make_graph_service()
+    monkeypatch.setattr(plugin_router, "_get_service", lambda: svc)
+
+    result = plugin_router.tool_graph_provenance({"entity_type": "Module", "name": "TOP"})
+    assert result["success"] is True
+    assert result["entity_type"] == "Module"
+    assert result["name"] == "TOP"
+    # 测试图中 TOP 没有 source_doc_ids，所以 sources 为空
+    assert result["count"] == 0
+    assert result["sources"] == []
 
 
 # ---------------------------------------------------------------------------

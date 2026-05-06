@@ -31,9 +31,7 @@ def main() -> None:
     args = parser.parse_args()
 
     pipe = DocGraphPipeline()
-    jsonl_path, batches, requests = pipe.stage2_build_jsonl(
-        args.doc_id, max_chars=args.max_chars
-    )
+    jsonl_path, batches, requests = pipe.stage2_build_jsonl(args.doc_id, max_chars=args.max_chars)
 
     print(f"jsonl={jsonl_path}")
     print(f"batch_count={len(batches)}")
