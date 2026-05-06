@@ -719,8 +719,36 @@ def tool_graph_conflicts(params: dict) -> dict:
     return {"success": True, "count": len(logs), "logs": logs}
 
 
+def tool_get_feedback(params: dict) -> dict:
+    """查询对知识图谱实体或关系的反馈汇总.
+
+    参数:
+        entity_type: 实体类型过滤（可选）
+        entity_name: 实体名称过滤（可选）
+        limit: 最大返回数量（默认 100）
+    """
+    svc = _get_service()
+    feedbacks = svc.get_feedback(
+        entity_type=params.get("entity_type"),
+        entity_name=params.get("entity_name"),
+        limit=params.get("limit", Config.PLUGIN_DEFAULT_LIMIT),
+    )
+    return {"success": True, "count": len(feedbacks), "feedbacks": feedbacks}
+
+
+def tool_rebuild_global_graph(params: dict) -> dict:
+    """全量重建全局知识图谱（清空后从所有子图重新加载，用于修复不一致）."""
+    svc = _get_service()
+    stats = svc.rebuild_global_graph()
+    return {
+        "success": True,
+        "message": f"全局图谱已重建 | nodes={stats['nodes']} | edges={stats['edges']}",
+        "stats": stats,
+    }
+
+
 # ---------------------------------------------------------------------------
-# 三阶段 Pipeline 工具
+# 四阶段 Pipeline 工具
 # ---------------------------------------------------------------------------
 
 
@@ -775,7 +803,7 @@ def tool_doc_build_batches(params: dict) -> dict:
 
 
 def tool_doc_submit_batches(params: dict) -> dict:
-    """阶段3: JSONL → API → 入库."""
+    """阶段3: 提交 Batch API 并保存结果."""
     doc_id = params.get("doc_id")
     if not doc_id:
         return {"success": False, "error": "Missing required parameter: doc_id"}
@@ -798,22 +826,64 @@ def tool_doc_submit_batches(params: dict) -> dict:
                     "error": f"无法找到文档 {doc_id} 的源文件路径，请提供 file_path 参数",
                 }
 
-        parsed_output_dir = Path(Config.DB_PATH).parent / "parsed" / doc_id
-        result_md = parsed_output_dir / "result.md"
-        if not result_md.exists():
-            return {"success": False, "error": f"result.md 不存在 | path={result_md}"}
-
-        extracted_text = result_md.read_text(encoding="utf-8")
         jsonl_path_param = params.get("jsonl_path")
         jsonl_path = Path(jsonl_path_param) if jsonl_path_param else None
 
-        result_doc_id = pipe.stage3_ingest(
-            file_path=file_path,
+        results_path = pipe.stage3_submit_batches(
             doc_id=doc_id,
-            parsed_output_dir=parsed_output_dir,
-            extracted_text=extracted_text,
-            bigmodel_images=[],
+            file_path=file_path,
             jsonl_path=jsonl_path,
+            force=params.get("force", False),
+        )
+        return {
+            "success": True,
+            "doc_id": doc_id,
+            "results_path": str(results_path),
+            "message": (
+                f"Batch 已提交，结果已保存至 {results_path}，"
+                "执行 doc_ingest_results 完成入库"
+            ),
+        }
+    except Exception as e:
+        logger.exception("doc_submit_batches failed")
+        return {"success": False, "error": str(e)}
+
+
+def tool_doc_ingest_results(params: dict) -> dict:
+    """阶段4: 从 Batch 结果文件解析并入库."""
+    doc_id = params.get("doc_id")
+    if not doc_id:
+        return {"success": False, "error": "Missing required parameter: doc_id"}
+
+    from pathlib import Path
+
+    from core.doc_graph_pipeline import DocGraphPipeline
+
+    pipe = DocGraphPipeline()
+    try:
+        # 获取原始文件路径（从数据库或参数）
+        file_path = params.get("file_path")
+        if not file_path:
+            doc = pipe.db.get_document(doc_id)
+            if doc:
+                file_path = doc.source_path
+            else:
+                return {
+                    "success": False,
+                    "error": f"无法找到文档 {doc_id} 的源文件路径，请提供 file_path 参数",
+                }
+
+        results_path_param = params.get("results_path")
+        if results_path_param:
+            results_path = Path(results_path_param)
+        else:
+            # 默认路径
+            results_path = Path(Config.DB_PATH).parent / "batch" / f"{doc_id}_results.jsonl"
+
+        result_doc_id = pipe.stage4_ingest_results(
+            doc_id=doc_id,
+            file_path=file_path,
+            results_path=results_path,
             force=params.get("force", False),
         )
         return {
@@ -822,7 +892,7 @@ def tool_doc_submit_batches(params: dict) -> dict:
             "message": "文档已入库完成",
         }
     except Exception as e:
-        logger.exception("doc_submit_batches failed")
+        logger.exception("doc_ingest_results failed")
         return {"success": False, "error": str(e)}
 
 
@@ -918,6 +988,7 @@ TOOL_MAP = {
     "doc_parse": tool_doc_parse,
     "doc_build_batches": tool_doc_build_batches,
     "doc_submit_batches": tool_doc_submit_batches,
+    "doc_ingest_results": tool_doc_ingest_results,
     "search": tool_search,
     "query": tool_query,
     "status": tool_status,
@@ -939,6 +1010,8 @@ TOOL_MAP = {
     "graph_get_content_with_entities": tool_graph_get_content_with_entities,
     "graph_feedback": tool_graph_feedback,
     "graph_conflicts": tool_graph_conflicts,
+    "get_feedback": tool_get_feedback,
+    "rebuild_global_graph": tool_rebuild_global_graph,
 }
 
 

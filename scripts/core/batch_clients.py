@@ -132,6 +132,7 @@ class BaseBatchClient(ABC):
         requests: list[dict[str, Any]],
         timeout: int | None = None,
         poll_interval: int | None = None,
+        output_path: Path | None = None,
     ) -> list[dict[str, Any]]:
         """提交 batch 请求并等待完成.
 
@@ -139,6 +140,7 @@ class BaseBatchClient(ABC):
             requests: JSONL 请求列表
             timeout: 超时时间（秒），默认从 Config.LLM_BATCH_TIMEOUT 读取
             poll_interval: 轮询间隔（秒）
+            output_path: 结果文件保存路径（可选）
 
         Returns:
             结果列表，每个元素对应一个请求的结果
@@ -211,6 +213,11 @@ class BaseBatchClient(ABC):
             results = []
             if output_file_id:
                 output_text = self._download_file(output_file_id)
+                if output_path:
+                    output_path.parent.mkdir(parents=True, exist_ok=True)
+                    with open(output_path, "a", encoding="utf-8") as f:
+                        f.write(output_text)
+                    logger.info(f"Batch 结果已保存 | path={output_path}")
                 results = _parse_jsonl(output_text)
                 logger.info(f"Batch 结果下载完成 | results={len(results)}")
 
@@ -240,6 +247,7 @@ class BaseBatchClient(ABC):
         max_file_size_mb: int | None = None,
         timeout: int | None = None,
         poll_interval: int | None = None,
+        output_path: Path | None = None,
     ) -> list[dict[str, Any]]:
         """将大量请求按 JSONL 大小拆分为多个并行 batch 提交。.
 
@@ -278,7 +286,9 @@ class BaseBatchClient(ABC):
 
         if len(chunks) == 1:
             # 只有一个 chunk，直接走单 batch
-            return self.submit_and_wait(chunks[0], timeout=timeout, poll_interval=poll_interval)
+            return self.submit_and_wait(
+                chunks[0], timeout=timeout, poll_interval=poll_interval, output_path=output_path
+            )
 
         logger.info(f"并行 Batch 提交 | total_requests={len(requests)} | chunks={len(chunks)}")
 
@@ -297,6 +307,7 @@ class BaseBatchClient(ABC):
                     chunk,
                     timeout=timeout,
                     poll_interval=poll_interval,
+                    output_path=output_path,
                 )
                 future_to_idx[future] = idx
 

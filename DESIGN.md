@@ -426,6 +426,38 @@ graph_query(entity_type="Product", name="TMS320F28379D")
 
 ---
 
+## 18. 为什么 Pipeline 四阶段拆分？
+
+**选择**：将 `DocGraphPipeline._process_one` 从三阶段（`stage1_parse` / `stage2_build_jsonl` / `stage3_ingest`）拆分为四阶段（`stage1_parse` / `stage2_build_jsonl` / `stage3_submit_batches` / `stage4_ingest_results`），其中 `stage3` 提交 Batch API 后将**原始结果文件保存到磁盘**，`stage4` 从磁盘读取结果并解析入库。
+
+**原因**：
+- **中间产物可审计**：`knowledge_base/batch/{doc_id}_results.jsonl` 包含 LLM 的原始 JSON 返回，可用于调试提取质量、审计 LLM 行为
+- **阶段可独立执行**：stage3（API 调用，产生费用和延迟）与 stage4（本地解析入库，零成本）解耦。用户可以在 stage3 完成后审查结果，再决定是否执行 stage4
+- **失败可重试**：stage4 入库失败（如数据库锁定、向量化异常）时，无需重新调用 Batch API（避免重复付费和排队），直接重试 stage4 即可
+- **结果可编辑**：用户可手动修改 `results.jsonl` 后重新执行 stage4，修正 LLM 提取错误而无需重新调 API
+- **向后兼容**：`stage3_ingest()` 保留原签名，内部委托给 `stage3_submit_batches` + `stage4_ingest_results`，现有调用方无需修改
+
+**中间产物清单**：
+
+| 产物 | 路径 | 说明 |
+|------|------|------|
+| result.md | `parsed/{doc_id}/result.md` | 解析后的 Markdown（可人工编辑） |
+| requests.jsonl | `batch/{doc_id}.jsonl` | API 输入请求 |
+| batch_info.json | `batch/{doc_id}_batch_info.json` | request → chapter 映射 |
+| results.jsonl | `batch/{doc_id}_results.jsonl` | API 原始返回结果 |
+| 子图谱 | `graphs/{doc_id}.json` | 文档级图谱快照 |
+
+**状态管理**：
+- `PROCESSING` → stage3 提交中
+- `BATCH_SUBMITTED` → stage3 完成，等待 stage4
+- `DONE` → stage4 完成
+
+**权衡**：
+- 磁盘占用增加：每个文档额外保存一个 results.jsonl（通常几 KB 到几十 MB）
+- stage3 和 stage4 之间需要保持 `result.md` 不变，否则增量分析结果可能不一致（修改 result.md 后应重新走 stage2→stage3）
+
+---
+
 ## 技术栈速查
 
 | 层级 | 依赖 | 版本要求 |
