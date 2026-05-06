@@ -4,6 +4,7 @@
 为 Plugin 工具和上层应用提供一致的 API 入口。
 """
 
+import copy
 import logging
 
 from .config import Config
@@ -80,10 +81,21 @@ class KnowledgeBaseService:
             self.graph.add_relation(relation)
 
     def _save_global_graph(self) -> None:
-        """保存全局合并图谱."""
-        global_path = Config.DB_PATH.parent / "graphs" / "global.json"
+        """保存全局合并图谱.
+
+        保存前自动备份旧文件，失败时回滚到备份。
+        """
+        global_path = Config.DB_PATH.parent / Config.GRAPH_OUTPUT_DIR / "global.json"
         global_path.parent.mkdir(parents=True, exist_ok=True)
-        self.graph.save(global_path)
+        backup_path = global_path.with_suffix(".json.bak")
+        if global_path.exists():
+            global_path.replace(backup_path)
+        try:
+            self.graph.save(global_path)
+        except Exception:
+            if backup_path.exists():
+                backup_path.replace(global_path)
+            raise
 
     def rebuild_global_graph(self) -> dict[str, int]:
         """全量重建全局图：清空后从所有子图重新加载.
@@ -202,24 +214,46 @@ class KnowledgeBaseService:
         doc = self.db.get_document(doc_id)
         if not doc:
             raise ValueError(f"Document {doc_id} not found")
-        # 从全局图中精确移除旧文档贡献
-        self.graph.remove_document_contributions(doc_id)
-        # 使用独立的 graph_store 处理
-        pipe = DocGraphPipeline(db=self.db, vec=self.vec, graph_store=NetworkXGraphStore())
+
+        # 保存全局图快照，用于失败回滚
+        backup_g = copy.deepcopy(self.graph._g)
+        backup_index = {
+            k: set(v) for k, v in self.graph._property_index.items()
+        }
+
         try:
-            result = pipe._process_one(doc.source_path, dry_run=False, force=True)
-            if not result:
-                raise RuntimeError(f"Reprocess failed for {doc_id}")
-            # 将重新处理后的图谱合并到全局图
-            graph_path = Config.DB_PATH.parent / Config.GRAPH_OUTPUT_DIR / f"{doc_id}.json"
-            if graph_path.exists():
-                temp = NetworkXGraphStore()
-                temp.load(graph_path)
-                self._merge_graph(temp)
+            # 从全局图中精确移除旧文档贡献
+            self.graph.remove_document_contributions(doc_id)
+            # 使用独立的 graph_store 处理
+            pipe = DocGraphPipeline(
+                db=self.db, vec=self.vec, graph_store=NetworkXGraphStore()
+            )
+            try:
+                result = pipe._process_one(
+                    doc.source_path, dry_run=False, force=True
+                )
+                if not result:
+                    raise RuntimeError(f"Reprocess failed for {doc_id}")
+                # 将重新处理后的图谱合并到全局图
+                graph_path = (
+                    Config.DB_PATH.parent
+                    / Config.GRAPH_OUTPUT_DIR
+                    / f"{doc_id}.json"
+                )
+                if graph_path.exists():
+                    temp = NetworkXGraphStore()
+                    temp.load(graph_path)
+                    self._merge_graph(temp)
+                self._save_global_graph()
+                return result
+            finally:
+                pipe.close()
+        except Exception:
+            # 回滚全局图到处理前状态
+            self.graph._g = backup_g
+            self.graph._property_index = backup_index
             self._save_global_graph()
-            return result
-        finally:
-            pipe.close()
+            raise
 
     # ------------------------------------------------------------------
     # Chunk 查询
@@ -346,18 +380,26 @@ class KnowledgeBaseService:
 
     @staticmethod
     def _apply_doc_properties(entity: GraphEntity, doc_id: str | None) -> GraphEntity:
-        """如果指定了 doc_id，用 doc_properties 中的快照替换 properties."""
+        """如果指定了 doc_id，用 doc_properties 中的快照替换 properties.
+
+        返回深拷贝，避免修改内存中的全局图节点。
+        """
         if doc_id and entity.doc_properties and doc_id in entity.doc_properties:
-            entity.properties = entity.doc_properties[doc_id]
+            entity = copy.copy(entity)
+            entity.properties = dict(entity.doc_properties[doc_id])
         return entity
 
     @staticmethod
     def _apply_doc_properties_to_relation(
         relation: GraphRelation, doc_id: str | None
     ) -> GraphRelation:
-        """如果指定了 doc_id，用 doc_properties 中的快照替换 properties."""
+        """如果指定了 doc_id，用 doc_properties 中的快照替换 properties.
+
+        返回深拷贝，避免修改内存中的全局图边。
+        """
         if doc_id and relation.doc_properties and doc_id in relation.doc_properties:
-            relation.properties = relation.doc_properties[doc_id]
+            relation = copy.copy(relation)
+            relation.properties = dict(relation.doc_properties[doc_id])
         return relation
 
     def find_entities(

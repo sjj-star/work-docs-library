@@ -2,6 +2,7 @@
 
 import json
 import logging
+import os
 from pathlib import Path
 
 import faiss
@@ -63,9 +64,17 @@ class VectorIndex:
             self._id_map = []
 
     def _save(self) -> None:
-        faiss.write_index(self._index, str(self.index_path))
-        with open(self.id_map_path, "w", encoding="utf-8") as f:
+        """原子保存 FAISS 索引和 id_map（临时文件 + rename）。."""
+        # 原子写入索引
+        tmp_index = self.index_path.with_suffix(".faiss.tmp")
+        faiss.write_index(self._index, str(tmp_index))
+        os.replace(str(tmp_index), str(self.index_path))
+
+        # 原子写入 id_map
+        tmp_map = self.id_map_path.with_suffix(".json.tmp")
+        with open(tmp_map, "w", encoding="utf-8") as f:
             json.dump(self._id_map, f, ensure_ascii=False)
+        os.replace(str(tmp_map), str(self.id_map_path))
 
     def add(self, chunk_db_id: int, vector: list[float]) -> None:
         """Add 函数."""
