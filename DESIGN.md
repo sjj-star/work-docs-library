@@ -379,6 +379,29 @@
 
 ---
 
+## 19. 审计修复经验总结
+
+**背景**：2026-04 代码审计发现 21 项缺陷（9 个 P0 数据损坏风险、7 个 P1 可靠性缺陷、5 个 P2 代码质量问题），已全部修复并通过 283 个测试验证。
+
+**关键教训**：
+
+| 教训 | 来源缺陷 | 修复措施 |
+|------|---------|---------|
+| **JSON 修复正则必须验证** | `_safe_parse_json` 用 `\x01` 替代 `\1` | 单字符修复，新增边界测试 |
+| **返回全局对象前必须深拷贝** | `_apply_doc_properties` 修改原始节点 | `copy.copy` + `dict()` 深拷贝属性 |
+| **删除操作必须同步清理索引** | `remove_document_contributions` 遗漏索引 | 节点移除循环中调用 `_remove_from_property_index` |
+| **多存储系统操作必须原子化** | SQLite 已插入但 FAISS 向量化失败 | 统一批量写入，失败时 `remove_doc` 回滚 |
+| **全局状态修改前必须快照** | `reprocess_document` 失败后半空状态 | `copy.deepcopy` 备份 `_g` + `_property_index` |
+| **函数参数声明后必须使用** | `_merge_image_descriptions` 忽略 `chapter_title` | 按 `chapter_title` 过滤图片 |
+| **过滤逻辑必须用完整复合键** | `_build_metadata` 按名称过滤导致跨类型污染 | `(type, name)` 元组匹配 |
+| **文件写入必须原子化** | `_save_global_graph` 直接覆写 | 临时文件 + `os.replace`；失败时从 `.bak` 恢复 |
+| **跨阶段产物必须校验一致性** | Stage3/Stage4 增量分析结果不一致 | 持久化 `_incremental.json` + hash 校验 |
+| **配置路径加载/保存必须一致** | `_save_global_graph` 硬编码 `"graphs"` | 统一使用 `Config.GRAPH_OUTPUT_DIR` |
+
+**新增开发原则**：详见 `AGENTS.md`「防御性编程与状态安全原则」，包含副作用隔离、索引一致性、失败回滚、输入验证、跨阶段校验、配置统一、资源生命周期管理 7 条原则。
+
+---
+
 ## 已知限制与权衡汇总
 
 | 限制 | 原因 | 缓解措施 |
