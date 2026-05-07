@@ -33,7 +33,7 @@ def patched_config(monkeypatch, tmp_path):
     monkeypatch.setattr(Config, "FAISS_INDEX_PATH", kb / "faiss.index")
     monkeypatch.setattr(Config, "ID_MAP_PATH", kb / "id_map.json")
     monkeypatch.setattr(Config, "GRAPH_OUTPUT_DIR", "graphs")
-    monkeypatch.setattr(Config, "BATCH_SIZE", 2)
+    monkeypatch.setattr(Config, "EMBED_ARRAY_MAX_SIZE", 2)
     monkeypatch.setattr(Config, "EMBEDDING_DIMENSION", 4)
     monkeypatch.setattr(Config, "LLM_BATCH_MAX_CHARS", 500)
     monkeypatch.setattr(Config, "EMBEDDING_BASE_URL", "https://api.openai.com/v1")

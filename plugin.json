@@ -659,7 +659,7 @@
     },
     {
       "name": "doc_ingest_results",
-      "description": "从 Batch API 结果文件解析实体、构建图谱、向量化并入库",
+      "description": "从 Batch API 结果文件解析实体、构建图谱、保存 chunks（不含向量化，向量化由 doc_submit_embed_batches 完成）",
       "command": [
         "venv/bin/python3",
         "scripts/plugin_router.py",
@@ -684,6 +684,52 @@
             "type": "boolean",
             "description": "强制重新处理，忽略缓存",
             "default": false
+          }
+        },
+        "required": [
+          "doc_id"
+        ]
+      }
+    },
+    {
+      "name": "doc_build_embed_jsonl",
+      "description": "阶段5：从已入库的 chunks 构建 Embedding Batch JSONL 文件。本地生成，不调用 API，可审查后执行 doc_submit_embed_batches",
+      "command": [
+        "venv/bin/python3",
+        "scripts/plugin_router.py",
+        "doc_build_embed_jsonl"
+      ],
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "doc_id": {
+            "type": "string",
+            "description": "文档 ID"
+          }
+        },
+        "required": [
+          "doc_id"
+        ]
+      }
+    },
+    {
+      "name": "doc_submit_embed_batches",
+      "description": "阶段6：提交 Embedding Batch API 并解析结果入库，完成向量化",
+      "command": [
+        "venv/bin/python3",
+        "scripts/plugin_router.py",
+        "doc_submit_embed_batches"
+      ],
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "doc_id": {
+            "type": "string",
+            "description": "文档 ID"
+          },
+          "embed_jsonl_path": {
+            "type": "string",
+            "description": "可选，自定义 Embedding JSONL 路径（默认 knowledge_base/batch/{doc_id}_embed.jsonl）"
           }
         },
         "required": [

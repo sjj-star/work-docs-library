@@ -140,7 +140,9 @@ class Config:
     EMBED_MAX_RETRIES: int = 0  # 将在下方初始化
     EMBED_RETRY_BACKOFF: int = 0  # 将在下方初始化
     EMBED_TIMEOUT: int = 0  # 将在下方初始化
-    EMBED_MAX_BATCH_SIZE: int = 0  # 将在下方初始化
+    EMBED_ARRAY_MAX_SIZE: int = 0  # 将在下方初始化
+    EMBED_BATCH_MAX_CHARS: int = 0  # 将在下方初始化
+    EMBED_BATCH_TIMEOUT: int = 0  # 将在下方初始化
 
     # --- LLM 客户端参数 ---
     LLM_MAX_RETRIES: int = 0  # 将在下方初始化
@@ -180,7 +182,6 @@ class Config:
         cls.LLM_BATCH_TIMEOUT = int(
             _resolve_config("WORKDOCS_LLM_BATCH_TIMEOUT", "llm.batch_timeout", "3600")
         )
-        cls.BATCH_SIZE = int(_resolve_config("WORKDOCS_BATCH_SIZE", "batch_size", "4"))
         # Vision 图片配置（LLM multimodal batch）
         cls.LLM_VISION_MAX_EDGE = int(
             _resolve_config("WORKDOCS_LLM_VISION_MAX_EDGE", "llm.vision_max_edge", "1024")
@@ -213,8 +214,14 @@ class Config:
         cls.EMBED_TIMEOUT = int(
             _resolve_config("WORKDOCS_EMBED_TIMEOUT", "embedding.timeout", "120")
         )
-        cls.EMBED_MAX_BATCH_SIZE = int(
-            _resolve_config("WORKDOCS_EMBED_MAX_BATCH_SIZE", "embedding.max_batch_size", "100")
+        cls.EMBED_ARRAY_MAX_SIZE = int(
+            _resolve_config("WORKDOCS_EMBED_ARRAY_MAX_SIZE", "embedding.array_max_size", "64")
+        )
+        cls.EMBED_BATCH_MAX_CHARS = int(
+            _resolve_config("WORKDOCS_EMBED_BATCH_MAX_CHARS", "embedding.batch_max_chars", "4000")
+        )
+        cls.EMBED_BATCH_TIMEOUT = int(
+            _resolve_config("WORKDOCS_EMBED_BATCH_TIMEOUT", "embedding.batch_timeout", "3600")
         )
 
         # LLM 客户端

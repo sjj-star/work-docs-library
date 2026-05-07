@@ -34,7 +34,7 @@ def patched_config(monkeypatch, tmp_path):
     monkeypatch.setattr(Config, "DB_PATH", kb / "workdocs.db")
     monkeypatch.setattr(Config, "FAISS_INDEX_PATH", kb / "faiss.index")
     monkeypatch.setattr(Config, "ID_MAP_PATH", kb / "id_map.json")
-    monkeypatch.setattr(Config, "BATCH_SIZE", 2)
+    monkeypatch.setattr(Config, "EMBED_ARRAY_MAX_SIZE", 2)
     monkeypatch.setattr(Config, "EMBEDDING_DIMENSION", 4)
     monkeypatch.setattr(Config, "EMBEDDING_BASE_URL", "https://api.openai.com/v1")
     monkeypatch.setattr(Config, "LLM_BASE_URL", "https://api.openai.com/v1")
@@ -941,7 +941,7 @@ def test_tool_doc_ingest_results_success(patched_config, monkeypatch):
     chunks = db.query_by_doc(doc_id)
     assert len(chunks) > 0
     for ck in chunks:
-        assert ck.status == "done"
+        assert ck.status == "embedded"
 
 
 def test_tool_doc_submit_batches_missing_doc_id():

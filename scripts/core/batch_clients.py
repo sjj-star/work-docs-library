@@ -423,6 +423,7 @@ class BatchClient(BaseBatchClient):
         texts: list[str],
         model: str | None = None,
         timeout: int | None = None,
+        output_path: Path | None = None,
     ) -> list[list[float]]:
         """提交 Embedding batch 请求.
 
@@ -430,15 +431,20 @@ class BatchClient(BaseBatchClient):
             texts: 需要向量化的文本列表
             model: 模型名称，默认使用 Config.EMBEDDING_MODEL
             timeout: 超时时间
+            output_path: 结果文件保存路径（可选）
 
         Returns:
             embedding 列表，与 texts 一一对应
 
         """
+        if not texts:
+            return []
+
         model = model or Config.EMBEDDING_MODEL
         endpoint = Config.EMBEDDING_BATCH_ENDPOINT
         requests = []
-        for i, text in enumerate(texts):
+        for i in range(0, len(texts), Config.EMBED_ARRAY_MAX_SIZE):
+            batch_texts = texts[i : i + Config.EMBED_ARRAY_MAX_SIZE]
             requests.append(
                 {
                     "custom_id": f"embed_{i}",
@@ -446,25 +452,33 @@ class BatchClient(BaseBatchClient):
                     "url": endpoint,
                     "body": {
                         "model": model,
-                        "input": text,
+                        "input": batch_texts,
                     },
                 }
             )
 
-        results = self.submit_and_wait(requests, timeout=timeout)
+        results = self.submit_parallel_batches(
+            requests, timeout=timeout, output_path=output_path
+        )
 
-        # 解析 embedding 结果
-        embeddings = []
+        # 解析 embedding 结果（支持 body.data[*].index 排序）
+        embeddings: list[tuple[int, list[float]]] = []
         for r in results:
             custom_id = r.get("custom_id", "")
-            idx = int(custom_id.split("_")[1]) if "_" in custom_id else len(embeddings)
-            body = r.get("response", {}).get("body", {})
-            data = body.get("data", [])
-            if data:
-                embeddings.append((idx, data[0].get("embedding", [])))
-            else:
-                embeddings.append((idx, []))
+            idx_str = custom_id.split("_")[1] if "_" in custom_id else "0"
+            try:
+                start_idx = int(idx_str)
+            except ValueError:
+                start_idx = 0
 
-        # 按索引排序
+            body = r.get("response", {}).get("body", {})
+            for item in body.get("data", []):
+                arr_idx = item.get("index", 0)
+                embedding = item.get("embedding", [])
+                global_idx = start_idx + arr_idx
+                embeddings.append((global_idx, embedding))
+
+        # 按索引排序，并补充缺失项
         embeddings.sort(key=lambda x: x[0])
-        return [emb for _, emb in embeddings]
+        result_map = {idx: emb for idx, emb in embeddings}
+        return [result_map.get(i, []) for i in range(len(texts))]

@@ -19,7 +19,7 @@ class EmbeddingClient:
     MAX_RETRY_ATTEMPTS = Config.EMBED_MAX_RETRIES
     RETRY_BACKOFF_BASE = Config.EMBED_RETRY_BACKOFF
     DEFAULT_TIMEOUT = Config.EMBED_TIMEOUT
-    MAX_BATCH_SIZE_LIMIT = Config.EMBED_MAX_BATCH_SIZE
+    MAX_ARRAY_SIZE = Config.EMBED_ARRAY_MAX_SIZE
 
     def __init__(
         self,
@@ -77,7 +77,7 @@ class EmbeddingClient:
             return []
 
         # 分批处理避免 API 限制
-        batch_size = min(Config.BATCH_SIZE, self.MAX_BATCH_SIZE_LIMIT)
+        batch_size = self.MAX_ARRAY_SIZE
         all_embeddings = []
 
         for i in range(0, len(texts), batch_size):
