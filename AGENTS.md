@@ -79,7 +79,7 @@
 - **人为干预**：任意阶段完成后，开发人员可直接审查、修改磁盘上的中间产物，再重新触发后续阶段，无需从头执行。
 - **质量检查**：通过对比上下游产物（如 `result.md` 与 `results.jsonl` 中的提取结果）快速定位数据质量问题，明确是解析器失真、LLM 提取偏差还是图谱合并错误。
 - **数据重建**：任一阶段失败后，基于已持久化的上游产物重新执行该阶段即可，无需回到源文件重新开始。
-- **成本保护**：API 调用阶段（`stage3_submit_batches`）与本地处理阶段（`stage4_ingest_results`）解耦。若入库失败，无需重新付费调用 Batch API，直接重试 stage4 即可。
+- **成本保护**：API 调用阶段（`stage3_submit_batches`、`stage6_submit_embed_batches`）与本地处理阶段（`stage4_ingest_results`）解耦。若入库失败，无需重新付费调用 Batch API，直接重试 stage4/stage6 即可。
 
 ### 当前 Pipeline 的持久化映射
 
@@ -225,7 +225,7 @@
 - ✅ **多文档类型图谱扩展**：新增 `Document`/`Pin`/`Package`/`ElectricalSpec`/`ApplicationDomain`/`OrderingInfo`/`Advisory`/`Workaround`/`SiliconRevision`/`UsageNote`/`Protocol`/`ProtocolLayer`/`TransactionType`/`Channel`/`MessageField`/`StateMachine`/`State`/`Transition`/`Function`/`DataStructure`/`Section`/`CodeExample` 等实体类型，以及 `SUPERSEDES`/`EXTENDS`/`AFFECTS`/`HAS_WORKAROUND`/`CORRECTS`/`DEFINES_TRANSACTION`/`USES_CHANNEL`/`HAS_STATE`/`TRANSITIONS_FROM`/`TRANSITIONS_TO`/`TRIGGERED_BY` 等关系类型，覆盖 Datasheet/Errata/Protocol Spec/ISA Manual/App Note/SW Dev Manual 六种文档类型的核心结构
 - ✅ **跨产品外设变体建模**：`GraphEntity`/`GraphRelation` 新增 `doc_properties` 字段，保存每个文档的原始属性快照；引入 `Product` 实体类型，文档解析时自动提取产品型号并建立 `Product --[HAS_MODULE]--> Module` 关系；查询接口支持 `doc_id` 参数以获取指定文档的原始属性
 - ✅ **属性索引优化**：`NetworkXGraphStore` 内部维护 `property_index`，`find_by_property()` 从 O(N) 降至 O(1)
-- ✅ **Pipeline 四阶段拆分**（中间产物持久化原则的具体实践）：`_process_one` 拆分为 `stage1_parse` / `stage2_build_jsonl` / `stage3_submit_batches` / `stage4_ingest_results`，每个中间产物（result.md / requests.jsonl / batch_info.json / results.jsonl / 子图谱 JSON）均可独立执行、人为干预、重新执行
+- ✅ **Pipeline 六阶段拆分**（中间产物持久化原则的具体实践）：`_process_one` 拆分为 `stage1_parse` / `stage2_build_jsonl` / `stage3_submit_batches` / `stage4_ingest_results` / `stage5_build_embed_jsonl` / `stage6_submit_embed_batches`，每个中间产物（result.md / requests.jsonl / batch_info.json / results.jsonl / 子图谱 JSON / embed.jsonl / embed_results.jsonl）均可独立执行、人为干预、重新执行
 - ✅ 283 个测试全部通过
 
 ### 下一阶段（精确到下一步）
@@ -326,25 +326,58 @@ config.json（用户持久化配置，项目根目录）
 
 ### 关键配置项速查
 
-完整配置列表见 `scripts/core/config.py`。以下为常用配置项：
+完整配置列表见 `scripts/core/config.py`。以下为全部活跃配置项：
 
-| 变量名 | 默认值 | 说明 |
-|--------|--------|------|
-| `WORKDOCS_LLM_API_KEY` | 空 | LLM Batch API Key（实体提取） |
-| `WORKDOCS_LLM_BASE_URL` | `https://api.moonshot.cn/v1` | LLM Base URL |
-| `WORKDOCS_LLM_MODEL` | `kimi-k2.5` | 对话模型 |
-| `WORKDOCS_EMBEDDING_API_KEY` | 空 | Embedding API Key（向量化） |
-| `WORKDOCS_EMBEDDING_BASE_URL` | `https://open.bigmodel.cn/api/paas/v4` | Embedding Base URL |
-| `WORKDOCS_EMBEDDING_MODEL` | `embedding-3` | 向量化模型 |
-| `WORKDOCS_EMBEDDING_DIMENSION` | `1024` | 向量维度 |
-| `WORKDOCS_PARSER_API_KEY` | 空 | PDF 解析 API Key（BigModel 专用） |
-| `WORKDOCS_LLM_BATCH_MAX_CHARS` | `10000` | 每个 batch 最大文本字符数 |
-| `WORKDOCS_LLM_BATCH_TIMEOUT` | `3600` | Batch API 轮询超时（秒） |
-| `WORKDOCS_LLM_VISION_MAX_EDGE` | `1024` | 图片压缩最长边（px） |
-| `WORKDOCS_LLM_VISION_QUALITY` | `85` | JPEG 压缩质量 1-100 |
-| `WORKDOCS_BATCH_MAX_FILE_SIZE_MB` | `100` | 单个 JSONL 文件大小上限 |
-| `WORKDOCS_BATCH_PARALLEL_WORKERS` | `4` | 并行 batch 提交线程数 |
-| `WORKDOCS_GRAPH_MAX_PATH_DEPTH` | `6` | 图谱路径搜索最大深度 |
+| 环境变量 | config.json 路径 | 默认值 | 说明 |
+|---------|-----------------|--------|------|
+| **LLM 配置** | | | |
+| `WORKDOCS_LLM_API_KEY` | `llm.api_key` | 空 | LLM Batch API Key（实体提取） |
+| `WORKDOCS_LLM_BASE_URL` | `llm.endpoint` | `https://api.moonshot.cn/v1` | LLM Base URL |
+| `WORKDOCS_LLM_MODEL` | `llm.model` | `kimi-k2.5` | 对话模型 |
+| `WORKDOCS_LLM_THINKING_ENABLED` | `llm.thinking_enabled` | `0` | 是否启用 thinking 模式（`1` 开启） |
+| `WORKDOCS_LLM_BATCH_ENDPOINT` | `llm.batch_endpoint` | `/v1/chat/completions` | LLM Batch API endpoint |
+| `WORKDOCS_LLM_BATCH_COMPLETION_WINDOW` | `llm.completion_window` | `24h` | Batch 完成窗口 |
+| `WORKDOCS_LLM_BATCH_MAX_CHARS` | `llm.batch_max_chars` | `10000` | 每个 LLM batch 最大文本字符数 |
+| `WORKDOCS_LLM_BATCH_TIMEOUT` | `llm.batch_timeout` | `3600` | LLM Batch API 轮询超时（秒） |
+| `WORKDOCS_LLM_MAX_RETRIES` | `llm.max_retries` | `3` | LLM 同步请求最大重试次数 |
+| `WORKDOCS_LLM_RETRY_BACKOFF` | `llm.retry_backoff` | `2` | LLM 重试退避系数（秒） |
+| `WORKDOCS_LLM_TIMEOUT` | `llm.timeout` | `120` | LLM 同步请求超时（秒） |
+| `WORKDOCS_LLM_VISION_MAX_EDGE` | `llm.vision_max_edge` | `1024` | 图片压缩最长边（px） |
+| `WORKDOCS_LLM_VISION_QUALITY` | `llm.vision_quality` | `85` | JPEG 压缩质量 1-100 |
+| **Embedding 配置** | | | |
+| `WORKDOCS_EMBEDDING_API_KEY` | `embedding.api_key` | 空 | Embedding API Key（向量化） |
+| `WORKDOCS_EMBEDDING_BASE_URL` | `embedding.endpoint` | `https://open.bigmodel.cn/api/paas/v4` | Embedding Base URL |
+| `WORKDOCS_EMBEDDING_MODEL` | `embedding.model` | `embedding-3` | 向量化模型 |
+| `WORKDOCS_EMBEDDING_DIMENSION` | `embedding.dimension` | `1024` | 向量维度 |
+| `WORKDOCS_EMBEDDING_BATCH_ENDPOINT` | `embedding.batch_endpoint` | `/v4/embeddings` | Embedding Batch API endpoint |
+| `WORKDOCS_EMBED_BATCH_MAX_CHARS` | `embedding.batch_max_chars` | `4000` | 每个 Embedding 请求单条最大字符数 |
+| `WORKDOCS_EMBED_BATCH_TIMEOUT` | `embedding.batch_timeout` | `3600` | Embedding Batch API 轮询超时（秒） |
+| `WORKDOCS_EMBED_MAX_RETRIES` | `embedding.max_retries` | `3` | Embedding 同步请求最大重试次数 |
+| `WORKDOCS_EMBED_RETRY_BACKOFF` | `embedding.retry_backoff` | `2` | Embedding 重试退避系数（秒） |
+| `WORKDOCS_EMBED_TIMEOUT` | `embedding.timeout` | `120` | Embedding 同步请求超时（秒） |
+| `WORKDOCS_EMBED_ARRAY_MAX_SIZE` | `embedding.array_max_size` | `64` | 每个 Embedding 请求 `input` 数组最大文本数 |
+| **Parser 配置** | | | |
+| `WORKDOCS_PARSER_API_KEY` | `parser.api_key` | 空 | PDF 解析 API Key（BigModel 专用） |
+| `WORKDOCS_PARSER_TIMEOUT` | `parser.timeout` | `60` | 解析请求超时（秒） |
+| `WORKDOCS_PARSER_MAX_RETRIES` | `parser.max_retries` | `60` | 解析轮询最大重试次数 |
+| `WORKDOCS_PARSER_POLL_INTERVAL` | `parser.poll_interval` | `3` | 解析轮询间隔（秒） |
+| **Batch 通用配置** | | | |
+| `WORKDOCS_BATCH_POLL_INTERVAL` | `batch.poll_interval` | `10` | Batch 状态轮询间隔（秒） |
+| `WORKDOCS_BATCH_MAX_POLL_RETRIES` | `batch.max_poll_retries` | `360` | Batch 状态轮询最大次数 |
+| `WORKDOCS_BATCH_MAX_FILE_SIZE_MB` | `batch.max_file_size_mb` | `100` | 单个 JSONL 文件大小上限（MB） |
+| `WORKDOCS_BATCH_PARALLEL_WORKERS` | `batch.parallel_workers` | `4` | 并行 batch 提交线程数 |
+| `WORKDOCS_BATCH_TEMP_DIR` | `batch.temp_dir` | `batch_temp` | Batch 临时文件目录 |
+| `WORKDOCS_BATCH_FILE_DOWNLOAD_TEMPLATE` | `batch.download_template` | `{base_url}/files/{file_id}/content` | Batch 结果下载 URL 模板 |
+| **Plugin 默认值** | | | |
+| `WORKDOCS_PLUGIN_SEARCH_TOP_K` | `plugin.search_top_k` | `5` | 语义搜索默认返回条数 |
+| `WORKDOCS_PLUGIN_QUERY_TOP_K` | `plugin.query_top_k` | `10` | 查询默认返回条数 |
+| `WORKDOCS_PLUGIN_GRAPH_MAX_DEPTH` | `plugin.graph_max_depth` | `3` | 图谱查询默认最大深度 |
+| `WORKDOCS_PLUGIN_SUBGRAPH_DEPTH` | `plugin.subgraph_depth` | `1` | 子图扩展默认深度 |
+| `WORKDOCS_PLUGIN_DEFAULT_LIMIT` | `plugin.default_limit` | `100` | 默认分页限制 |
+| **Pipeline / Graph** | | | |
+| `WORKDOCS_DEFAULT_SUMMARY_LENGTH` | `pipeline.summary_length` | `200` | 默认摘要长度（字符） |
+| `WORKDOCS_GRAPH_MAX_PATH_DEPTH` | `graph.max_path_depth` | `6` | 图谱路径搜索最大深度 |
+| `WORKDOCS_GRAPH_OUTPUT_DIR` | `graph.output_dir` | `graphs` | 图谱 JSON 输出目录 |
 
 > 注：`config.json` 的 `config_file` 由 `plugin.json` 指定，Kimi CLI 可自动管理。`.env` 文件支持双路径加载：项目根目录和 `scripts/` 目录下的 `.env` 均会被读取（后者优先级更高）。
 

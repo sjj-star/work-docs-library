@@ -274,6 +274,61 @@ class ChapterParser:
 # ---------------------------------------------------------------------------
 
 
+def split_text_by_paragraphs(text: str, max_len: int) -> list[str]:
+    """按句子/段落边界切分文本，保护结构化块不被截断.
+
+    提取为模块级函数，供 LLM Batch 和 Embedding Batch 共用。
+    """
+    blocks: list[str] = []
+
+    def _protect(pattern: re.Pattern, t: str) -> str:
+        matches = [m for m in pattern.finditer(t) if m.group(0)]
+        if not matches:
+            return t
+        result = t
+        for m in reversed(matches):
+            idx = len(blocks)
+            blocks.append(m.group(0))
+            result = result[: m.start()] + f"\x00BLOCK{idx}\x00" + result[m.end() :]
+        return result
+
+    protected = _protect(re.compile(r"```[\s\S]*?```|~~~[\s\S]*?~~~", re.DOTALL), text)
+    protected = _protect(
+        re.compile(r"<table\b[^>]*>.*?</table>", re.DOTALL | re.IGNORECASE),
+        protected,
+    )
+    protected = _protect(
+        re.compile(r"(?:^[ \t]*\|.*(?:\r?\n|$))+", re.MULTILINE),
+        protected,
+    )
+
+    sentences = re.split(r"\n\n+", protected)
+    chunks: list[str] = []
+    current = ""
+    for s in sentences:
+        s = s.strip()
+        if not s:
+            continue
+        for i, block in enumerate(blocks):
+            s = s.replace(f"\x00BLOCK{i}\x00", block)
+        if len(current) + len(s) + 2 > max_len:
+            if current:
+                chunks.append(current)
+            if len(s) > max_len:
+                chunks.append(s)
+                current = ""
+            else:
+                current = s
+        else:
+            current = (current + "\n\n" + s).strip() if current else s
+    if current:
+        chunks.append(current)
+
+    if not chunks:
+        return [text]
+    return chunks
+
+
 class BatchBuilder:
     """按 # / ## 层级构建 LLM batch 请求."""
 
@@ -317,62 +372,11 @@ class BatchBuilder:
 
     @classmethod
     def _split_by_sentences(cls, text: str, max_len: int) -> list[str]:
-        """按句子/段落边界切分文本，保护结构化块不被截断."""
-        blocks: list[str] = []
+        """按句子/段落边界切分文本，保护结构化块不被截断.
 
-        def _protect(pattern: re.Pattern, t: str) -> str:
-            # 过滤空匹配（Python re.finditer 对 *? 可能产生零宽度匹配）
-            matches = [m for m in pattern.finditer(t) if m.group(0)]
-            if not matches:
-                return t
-            result = t
-            for m in reversed(matches):
-                idx = len(blocks)
-                blocks.append(m.group(0))
-                result = result[: m.start()] + f"\x00BLOCK{idx}\x00" + result[m.end() :]
-            return result
-
-        # 1. 保护代码块（最外层，避免内部内容被其他 pattern 匹配）
-        protected = _protect(re.compile(r"```[\s\S]*?```|~~~[\s\S]*?~~~", re.DOTALL), text)
-        # 2. 保护 HTML 表格
-        protected = _protect(
-            re.compile(r"<table\b[^>]*>.*?</table>", re.DOTALL | re.IGNORECASE),
-            protected,
-        )
-        # 3. 保护 Markdown 表格：连续以 | 开头的行
-        protected = _protect(
-            re.compile(r"(?:^[ \t]*\|.*(?:\r?\n|$))+", re.MULTILINE),
-            protected,
-        )
-
-        sentences = re.split(r"\n\n+", protected)
-        chunks: list[str] = []
-        current = ""
-        for s in sentences:
-            s = s.strip()
-            if not s:
-                continue
-            # 还原所有占位符
-            for i, block in enumerate(blocks):
-                s = s.replace(f"\x00BLOCK{i}\x00", block)
-            if len(current) + len(s) + 2 > max_len:
-                if current:
-                    chunks.append(current)
-                if len(s) > max_len:
-                    # 单个段落/保护块超过限制，作为独立 chunk
-                    chunks.append(s)
-                    current = ""
-                else:
-                    current = s
-            else:
-                current = (current + "\n\n" + s).strip() if current else s
-        if current:
-            chunks.append(current)
-
-        # 安全 fallback：不再硬截断，保留完整文本
-        if not chunks:
-            return [text]
-        return chunks
+        委托给模块级 `split_text_by_paragraphs` 以统一逻辑。
+        """
+        return split_text_by_paragraphs(text, max_len)
 
 
 # ---------------------------------------------------------------------------
@@ -1340,6 +1344,179 @@ class DocGraphPipeline:
         logger.info(f"文档入库完成 | doc_id={doc_id}")
         return doc_id
 
+    def stage5_build_embed_jsonl(self, doc_id: str) -> Path:
+        """阶段5: 从 SQLite chunks 构建 Embedding Batch JSONL（本地，不调用 API）.
+
+        Returns:
+            embed_jsonl_path: `knowledge_base/batch/{doc_id}_embed.jsonl`
+        """
+        batch_dir = Config.DB_PATH.parent / "batch"
+        batch_dir.mkdir(parents=True, exist_ok=True)
+        embed_jsonl_path = batch_dir / f"{doc_id}_embed.jsonl"
+        embed_map_path = batch_dir / f"{doc_id}_embed_map.json"
+
+        db_chunks = self.db.query_by_doc(doc_id)
+        reembed_pairs: list[tuple[str, int]] = []
+
+        for ck in db_chunks:
+            if not ck.content.strip():
+                continue
+            if ck.metadata.get("embedding"):
+                continue
+            reembed_pairs.append((ck.content, ck.id))
+
+        if not reembed_pairs:
+            embed_jsonl_path.write_text("", encoding="utf-8")
+            embed_map_path.write_text("[]", encoding="utf-8")
+            logger.info(f"所有 chunk 已有 embedding，生成空 JSONL | path={embed_jsonl_path}")
+            return embed_jsonl_path
+
+        texts, db_ids = zip(*reembed_pairs)
+
+        # 对超长 content 按段落边界切分
+        max_chars = Config.EMBED_BATCH_MAX_CHARS
+        split_texts: list[str] = []
+        split_id_map: list[int] = []
+        for text, db_id in zip(texts, db_ids):
+            if len(text) <= max_chars:
+                split_texts.append(text)
+                split_id_map.append(db_id)
+            else:
+                parts = split_text_by_paragraphs(text, max_chars)
+                for part in parts:
+                    split_texts.append(part)
+                    split_id_map.append(db_id)
+
+        # 构建 requests，每行 body.input 为字符串数组
+        requests: list[dict[str, Any]] = []
+        for i in range(0, len(split_texts), Config.EMBED_ARRAY_MAX_SIZE):
+            batch_texts = split_texts[i : i + Config.EMBED_ARRAY_MAX_SIZE]
+            requests.append(
+                {
+                    "custom_id": f"embed_{i}",
+                    "method": "POST",
+                    "url": Config.EMBEDDING_BATCH_ENDPOINT,
+                    "body": {
+                        "model": Config.EMBEDDING_MODEL,
+                        "input": batch_texts,
+                    },
+                }
+            )
+
+        from core.batch_clients import _build_jsonl
+
+        _build_jsonl(requests, embed_jsonl_path)
+        embed_map_path.write_text(json.dumps(split_id_map), encoding="utf-8")
+        logger.info(
+            f"Embedding JSONL 已生成 | path={embed_jsonl_path} | "
+            f"chunks={len(split_texts)} | requests={len(requests)}"
+        )
+        return embed_jsonl_path
+
+    def stage6_submit_embed_batches(
+        self,
+        doc_id: str,
+        embed_jsonl_path: Path | None = None,
+    ) -> str:
+        """阶段6: 提交 Embedding Batch API 并解析结果入库.
+
+        Args:
+            doc_id: 文档 ID
+            embed_jsonl_path: Embedding JSONL 路径，默认从 batch 目录读取
+
+        Returns:
+            doc_id
+        """
+        batch_dir = Config.DB_PATH.parent / "batch"
+        if embed_jsonl_path is None:
+            embed_jsonl_path = batch_dir / f"{doc_id}_embed.jsonl"
+
+        results_path = batch_dir / f"{doc_id}_embed_results.jsonl"
+        embed_map_path = batch_dir / f"{doc_id}_embed_map.json"
+
+        # 1. 收集复用 embedding
+        db_chunks = self.db.query_by_doc(doc_id)
+        all_items: list[tuple[int, list[float]]] = []
+        reembed_db_ids: set[int] = set()
+
+        for ck in db_chunks:
+            emb = ck.metadata.get("embedding")
+            if emb:
+                all_items.append((ck.id, emb))
+            else:
+                reembed_db_ids.add(ck.id)
+
+        if not reembed_db_ids:
+            logger.info(f"所有 chunk 已有 embedding，跳过 stage6 | doc_id={doc_id}")
+            for ck in db_chunks:
+                self.db.update_chunk_status(ck.id, "done")
+            return doc_id
+
+        # 2. 提交 Batch API 或降级到同步 API
+        if not embed_jsonl_path.exists() or embed_jsonl_path.stat().st_size == 0:
+            logger.warning(f"Embedding JSONL 为空，跳过 API 提交 | path={embed_jsonl_path}")
+        elif self.embedding_batch_client:
+            from core.batch_clients import _parse_jsonl
+
+            requests = _parse_jsonl(embed_jsonl_path.read_text(encoding="utf-8"))
+            if requests:
+                logger.info(f"提交 Embedding Batch | requests={len(requests)}")
+                if results_path.exists():
+                    results_path.unlink()
+                results = self.embedding_batch_client.submit_parallel_batches(
+                    requests,
+                    output_path=results_path,
+                    timeout=Config.EMBED_BATCH_TIMEOUT,
+                )
+                logger.info(f"Embedding Batch 完成 | results={len(results)}")
+
+                # 3. 解析结果
+                if embed_map_path.exists():
+                    split_id_map = json.loads(embed_map_path.read_text(encoding="utf-8"))
+                else:
+                    split_id_map = list(reembed_db_ids)
+
+                for result in results:
+                    custom_id = result.get("custom_id", "")
+                    idx_str = custom_id.split("_")[1] if "_" in custom_id else "0"
+                    try:
+                        start_idx = int(idx_str)
+                    except ValueError:
+                        start_idx = 0
+
+                    body = result.get("response", {}).get("body", {})
+                    data_list = body.get("data", [])
+                    for item in data_list:
+                        arr_idx = item.get("index", 0)
+                        embedding = item.get("embedding", [])
+                        global_idx = start_idx + arr_idx
+                        if 0 <= global_idx < len(split_id_map):
+                            db_id = split_id_map[global_idx]
+                            all_items.append((db_id, embedding))
+        else:
+            # fallback: 同步 EmbeddingClient
+            logger.info(
+                f"Embedding BatchClient 不可用，降级到同步 EmbeddingClient | doc_id={doc_id}"
+            )
+            embedder = EmbeddingClient()
+            for ck in db_chunks:
+                if ck.id not in reembed_db_ids:
+                    continue
+                emb = embedder.embed_single(ck.content)
+                all_items.append((ck.id, emb))
+            embedder.close()
+
+        # 4. 统一写入 SQLite 和 FAISS
+        if all_items:
+            self.db.update_chunks_embedded_batch(all_items)
+            self.vec.add_batch(all_items)
+
+        # 5. 更新状态为 done
+        for ck in db_chunks:
+            self.db.update_chunk_status(ck.id, "done")
+
+        return doc_id
+
     def stage3_ingest(
         self,
         file_path: str,
@@ -1361,12 +1538,14 @@ class DocGraphPipeline:
             jsonl_path=jsonl_path,
             force=force,
         )
-        return self.stage4_ingest_results(
+        self.stage4_ingest_results(
             doc_id=doc_id,
             file_path=file_path,
             results_path=results_path,
             force=force,
         )
+        embed_jsonl_path = self.stage5_build_embed_jsonl(doc_id)
+        return self.stage6_submit_embed_batches(doc_id, embed_jsonl_path)
 
     def _process_one(
         self,
@@ -1400,12 +1579,18 @@ class DocGraphPipeline:
             )
 
             # 阶段4: 从结果文件解析并入库
-            return self.stage4_ingest_results(
+            self.stage4_ingest_results(
                 doc_id=doc_id,
                 file_path=file_path,
                 results_path=results_path,
                 force=force,
             )
+
+            # 阶段5: 构建 Embedding Batch JSONL
+            embed_jsonl_path = self.stage5_build_embed_jsonl(doc_id)
+
+            # 阶段6: 提交 Embedding Batch API 并解析入库
+            return self.stage6_submit_embed_batches(doc_id, embed_jsonl_path)
         except Exception as e:
             logger.error(f"文档处理失败 | file={file_path} | doc_id={doc_id} | error={e}")
             try:
@@ -1518,58 +1703,9 @@ class DocGraphPipeline:
             db_id = self.db.insert_chunk(ck)
             chunk_db_ids.append(db_id)
 
-        # 4. 向量化（复用未变章节的 embedding，重新向量化的变更/新增章节）
-        try:
-            db_chunks = self.db.query_by_doc(doc_id)
-            reuse_pairs: list[tuple[int, list[float]]] = []
-            reembed_pairs: list[tuple[str, int]] = []
-
-            for ck in db_chunks:
-                if not ck.content.strip():
-                    continue
-                emb = ck.metadata.get("embedding")
-                if emb:
-                    reuse_pairs.append((ck.id, emb))
-                else:
-                    reembed_pairs.append((ck.content, ck.id))
-
-            all_items: list[tuple[int, list[float]]] = []
-            if reuse_pairs:
-                all_items.extend(reuse_pairs)
-
-            if reembed_pairs:
-                texts, valid_ids = zip(*reembed_pairs)
-                if self.embedding_batch_client:
-                    logger.info(f"开始批量向量化 | chunks={len(texts)} | client=BigModelBatch")
-                    embeddings = self.embedding_batch_client.submit_embedding_batch(
-                        texts=list(texts),
-                        timeout=Config.LLM_BATCH_TIMEOUT,
-                    )
-                    all_items.extend(list(zip(valid_ids, embeddings)))
-                else:
-                    embedder = EmbeddingClient()
-                    for i in range(0, len(texts), Config.BATCH_SIZE):
-                        batch_texts = list(texts[i : i + Config.BATCH_SIZE])
-                        batch_ids = list(valid_ids[i : i + Config.BATCH_SIZE])
-                        embeddings = embedder.embed(batch_texts)
-                        all_items.extend(list(zip(batch_ids, embeddings)))
-                    embedder.close()
-
-            # 统一写入 SQLite 和 FAISS，确保原子性
-            if all_items:
-                self.db.update_chunks_embedded_batch(all_items)
-                self.vec.add_batch(all_items)
-        except Exception as e:
-            logger.error(f"向量化失败 | doc_id={doc_id} | error={e}")
-            # 清理该文档在 FAISS 中可能已添加的向量
-            self.vec.remove_doc(chunk_db_ids)
-            for db_id in chunk_db_ids:
-                self.db.update_chunk_status(db_id, "failed")
-            raise
-
-        # 5. 更新 chunk 状态为 done
+        # 4. 更新 chunk 状态为 embedded（向量化由独立 stage6 完成）
         for db_id in chunk_db_ids:
-            self.db.update_chunk_status(db_id, "done")
+            self.db.update_chunk_status(db_id, "embedded")
 
     def _merge_image_descriptions(
         self,

@@ -168,7 +168,7 @@ cp scripts/.env.example scripts/.env
 
 ### 2. 分阶段导入（支持人工干预）
 
-当 PDF 解析后的 Markdown 需要手动调整时，可使用四阶段流程：
+当 PDF 解析后的 Markdown 需要手动调整时，可使用六阶段流程：
 
 ```bash
 # 阶段1: PDF → Markdown
@@ -176,7 +176,7 @@ cp scripts/.env.example scripts/.env
 # 输出: doc_id=xxx, parsed_dir=knowledge_base/parsed/xxx/
 # 用户可手动编辑 knowledge_base/parsed/xxx/result.md
 
-# 阶段2: Markdown → Batch JSONL
+# 阶段2: Markdown → LLM Batch JSONL
 /doc_build_batches xxx
 # 输出: jsonl=knowledge_base/batch/xxx.jsonl, batch_count=23
 # 可审查 JSONL 和 batch_info.json 内容
@@ -186,9 +186,18 @@ cp scripts/.env.example scripts/.env
 # 输出: results_path=knowledge_base/batch/xxx_results.jsonl
 # 可审查 API 原始返回结果
 
-# 阶段4: 结果文件 → 解析入库
+# 阶段4: 结果文件 → 解析入库（不含向量化）
 /doc_ingest_results xxx
-# 输出: 文档已入库完成
+# 输出: 文档已入库完成，chunks 状态为 embedded
+
+# 阶段5: chunks → Embedding Batch JSONL
+/doc_build_embed_jsonl xxx
+# 输出: embed_jsonl=knowledge_base/batch/xxx_embed.jsonl
+# 可审查 Embedding JSONL 内容
+
+# 阶段6: Embedding JSONL → API → 向量化入库
+/doc_submit_embed_batches xxx
+# 输出: Embedding 向量化入库完成，chunks 状态为 done
 ```
 
 ### 3. 语义搜索
@@ -238,7 +247,9 @@ Kimi CLI 通过 `plugin.json` 注册以下工具：
 | `doc_parse` | 阶段1：PDF → Markdown + 图片（可手动调整） |
 | `doc_build_batches` | 阶段2：Markdown → Batch JSONL（本地生成，不调用 API） |
 | `doc_submit_batches` | 阶段3：提交 Batch API 并保存原始结果文件 |
-| `doc_ingest_results` | 阶段4：从结果文件解析实体、构建图谱、向量化并入库 |
+| `doc_build_embed_jsonl` | 阶段5：从已入库 chunks 构建 Embedding Batch JSONL（本地，可审查） |
+| `doc_submit_embed_batches` | 阶段6：提交 Embedding Batch API 并解析结果入库（完成向量化） |
+| `doc_ingest_results` | 阶段4：从结果文件解析实体、构建图谱、保存 chunks（不含向量化） |
 | `semantic_search` | 语义向量搜索（`graph_depth=0`）+ 可选关联图谱扩展（`graph_depth>0`） |
 | `query` | 按章节、关键词、概念查询 chunk |
 | `status` | 列出所有已导入文档，或查看指定文档的详细状态与进度 |
@@ -278,22 +289,58 @@ Kimi CLI 通过 `plugin.json` 注册以下工具：
 - **`.env`**：适合存放 API Key 等凭证，gitignored，不进入版本控制
 - **环境变量**：Kimi CLI 运行时注入，优先级最高
 
-### 关键配置项
+### 完整配置参考
 
-| 变量名 | 默认值 | 说明 |
-|--------|--------|------|
-| `WORKDOCS_LLM_API_KEY` | 空 | Kimi API Key（Batch API 用） |
-| `WORKDOCS_LLM_BASE_URL` | `https://api.moonshot.cn/v1` | Kimi Base URL |
-| `WORKDOCS_LLM_MODEL` | `kimi-k2.5` | 对话模型 |
-| `WORKDOCS_EMBEDDING_API_KEY` | 空 | BigModel API Key（向量化用） |
-| `WORKDOCS_EMBEDDING_BASE_URL` | `https://open.bigmodel.cn/api/paas/v4` | BigModel Base URL |
-| `WORKDOCS_EMBEDDING_MODEL` | `embedding-3` | 向量化模型 |
-| `WORKDOCS_EMBEDDING_DIMENSION` | `1024` | 向量维度 |
-| `WORKDOCS_PARSER_API_KEY` | 空 | BigModel Expert 解析 API Key（⚠️ 仅用于 PDF 解析，为 BigModel 专有接口，非 OpenAI-compatible） |
-| `WORKDOCS_LLM_BATCH_MAX_CHARS` | `10000` | 每个 batch 最大文本字符数 |
-| `WORKDOCS_LLM_BATCH_TIMEOUT` | `3600` | Batch API 轮询超时（秒） |
-| `WORKDOCS_LLM_VISION_MAX_EDGE` | `1024` | 图片压缩最长边（px） |
-| `WORKDOCS_LLM_VISION_QUALITY` | `85` | JPEG 压缩质量 1-100 |
+| 环境变量 | config.json 路径 | 默认值 | 说明 |
+|---------|-----------------|--------|------|
+| **LLM 配置** | | | |
+| `WORKDOCS_LLM_API_KEY` | `llm.api_key` | 空 | Kimi API Key（Batch API 实体提取用） |
+| `WORKDOCS_LLM_BASE_URL` | `llm.endpoint` | `https://api.moonshot.cn/v1` | Kimi Base URL |
+| `WORKDOCS_LLM_MODEL` | `llm.model` | `kimi-k2.5` | 对话模型 |
+| `WORKDOCS_LLM_THINKING_ENABLED` | `llm.thinking_enabled` | `0` | 是否启用 thinking 模式（`1` 开启） |
+| `WORKDOCS_LLM_BATCH_ENDPOINT` | `llm.batch_endpoint` | `/v1/chat/completions` | LLM Batch API endpoint |
+| `WORKDOCS_LLM_BATCH_COMPLETION_WINDOW` | `llm.completion_window` | `24h` | Batch 完成窗口（如 `24h`） |
+| `WORKDOCS_LLM_BATCH_MAX_CHARS` | `llm.batch_max_chars` | `10000` | 每个 LLM batch 最大文本字符数 |
+| `WORKDOCS_LLM_BATCH_TIMEOUT` | `llm.batch_timeout` | `3600` | LLM Batch API 轮询超时（秒） |
+| `WORKDOCS_LLM_MAX_RETRIES` | `llm.max_retries` | `3` | LLM 同步请求最大重试次数 |
+| `WORKDOCS_LLM_RETRY_BACKOFF` | `llm.retry_backoff` | `2` | LLM 重试退避系数（秒） |
+| `WORKDOCS_LLM_TIMEOUT` | `llm.timeout` | `120` | LLM 同步请求超时（秒） |
+| `WORKDOCS_LLM_VISION_MAX_EDGE` | `llm.vision_max_edge` | `1024` | 图片压缩最长边（px） |
+| `WORKDOCS_LLM_VISION_QUALITY` | `llm.vision_quality` | `85` | JPEG 压缩质量 1-100 |
+| **Embedding 配置** | | | |
+| `WORKDOCS_EMBEDDING_API_KEY` | `embedding.api_key` | 空 | BigModel API Key（向量化用） |
+| `WORKDOCS_EMBEDDING_BASE_URL` | `embedding.endpoint` | `https://open.bigmodel.cn/api/paas/v4` | BigModel Base URL |
+| `WORKDOCS_EMBEDDING_MODEL` | `embedding.model` | `embedding-3` | 向量化模型 |
+| `WORKDOCS_EMBEDDING_DIMENSION` | `embedding.dimension` | `1024` | 向量维度 |
+| `WORKDOCS_EMBEDDING_BATCH_ENDPOINT` | `embedding.batch_endpoint` | `/v4/embeddings` | Embedding Batch API endpoint |
+| `WORKDOCS_EMBED_BATCH_MAX_CHARS` | `embedding.batch_max_chars` | `4000` | 每个 Embedding 请求单条最大字符数 |
+| `WORKDOCS_EMBED_BATCH_TIMEOUT` | `embedding.batch_timeout` | `3600` | Embedding Batch API 轮询超时（秒） |
+| `WORKDOCS_EMBED_MAX_RETRIES` | `embedding.max_retries` | `3` | Embedding 同步请求最大重试次数 |
+| `WORKDOCS_EMBED_RETRY_BACKOFF` | `embedding.retry_backoff` | `2` | Embedding 重试退避系数（秒） |
+| `WORKDOCS_EMBED_TIMEOUT` | `embedding.timeout` | `120` | Embedding 同步请求超时（秒） |
+| `WORKDOCS_EMBED_ARRAY_MAX_SIZE` | `embedding.array_max_size` | `64` | 每个 Embedding 请求 `input` 数组最大文本数 |
+| **Parser 配置** | | | |
+| `WORKDOCS_PARSER_API_KEY` | `parser.api_key` | 空 | BigModel Expert 解析 API Key（⚠️ 仅用于 PDF 解析，为 BigModel 专有接口） |
+| `WORKDOCS_PARSER_TIMEOUT` | `parser.timeout` | `60` | 解析请求超时（秒） |
+| `WORKDOCS_PARSER_MAX_RETRIES` | `parser.max_retries` | `60` | 解析轮询最大重试次数 |
+| `WORKDOCS_PARSER_POLL_INTERVAL` | `parser.poll_interval` | `3` | 解析轮询间隔（秒） |
+| **Batch 通用配置** | | | |
+| `WORKDOCS_BATCH_POLL_INTERVAL` | `batch.poll_interval` | `10` | Batch 状态轮询间隔（秒） |
+| `WORKDOCS_BATCH_MAX_POLL_RETRIES` | `batch.max_poll_retries` | `360` | Batch 状态轮询最大次数 |
+| `WORKDOCS_BATCH_MAX_FILE_SIZE_MB` | `batch.max_file_size_mb` | `100` | 单个 JSONL 文件大小上限（MB） |
+| `WORKDOCS_BATCH_PARALLEL_WORKERS` | `batch.parallel_workers` | `4` | 并行 batch 提交线程数 |
+| `WORKDOCS_BATCH_TEMP_DIR` | `batch.temp_dir` | `batch_temp` | Batch 临时文件目录 |
+| `WORKDOCS_BATCH_FILE_DOWNLOAD_TEMPLATE` | `batch.download_template` | `{base_url}/files/{file_id}/content` | Batch 结果下载 URL 模板 |
+| **Plugin 默认值** | | | |
+| `WORKDOCS_PLUGIN_SEARCH_TOP_K` | `plugin.search_top_k` | `5` | 语义搜索默认返回条数 |
+| `WORKDOCS_PLUGIN_QUERY_TOP_K` | `plugin.query_top_k` | `10` | 查询默认返回条数 |
+| `WORKDOCS_PLUGIN_GRAPH_MAX_DEPTH` | `plugin.graph_max_depth` | `3` | 图谱查询默认最大深度 |
+| `WORKDOCS_PLUGIN_SUBGRAPH_DEPTH` | `plugin.subgraph_depth` | `1` | 子图扩展默认深度 |
+| `WORKDOCS_PLUGIN_DEFAULT_LIMIT` | `plugin.default_limit` | `100` | 默认分页限制 |
+| **Pipeline / Graph** | | | |
+| `WORKDOCS_DEFAULT_SUMMARY_LENGTH` | `pipeline.summary_length` | `200` | 默认摘要长度（字符） |
+| `WORKDOCS_GRAPH_MAX_PATH_DEPTH` | `graph.max_path_depth` | `6` | 图谱路径搜索最大深度 |
+| `WORKDOCS_GRAPH_OUTPUT_DIR` | `graph.output_dir` | `graphs` | 图谱 JSON 输出目录 |
 
 ---
 

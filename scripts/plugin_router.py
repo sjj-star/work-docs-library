@@ -264,6 +264,59 @@ def tool_doc_ingest_results(params: dict) -> dict:
         return {"success": False, "error": str(e)}
 
 
+def tool_doc_build_embed_jsonl(params: dict) -> dict:
+    """阶段5: 从 SQLite chunks 构建 Embedding Batch JSONL（本地，不调用 API）."""
+    doc_id = params.get("doc_id")
+    if not doc_id:
+        return {"success": False, "error": "Missing required parameter: doc_id"}
+
+    from core.doc_graph_pipeline import DocGraphPipeline
+
+    pipe = DocGraphPipeline()
+    try:
+        embed_jsonl_path = pipe.stage5_build_embed_jsonl(doc_id)
+        return {
+            "success": True,
+            "doc_id": doc_id,
+            "embed_jsonl_path": str(embed_jsonl_path),
+            "message": (
+                f"Embedding JSONL 已生成，可审查后执行 doc_submit_embed_batches | "
+                f"path={embed_jsonl_path}"
+            ),
+        }
+    except Exception as e:
+        logger.exception("doc_build_embed_jsonl failed")
+        return {"success": False, "error": str(e)}
+
+
+def tool_doc_submit_embed_batches(params: dict) -> dict:
+    """阶段6: 提交 Embedding Batch API 并解析结果入库."""
+    doc_id = params.get("doc_id")
+    if not doc_id:
+        return {"success": False, "error": "Missing required parameter: doc_id"}
+
+    from pathlib import Path
+
+    from core.doc_graph_pipeline import DocGraphPipeline
+
+    pipe = DocGraphPipeline()
+    try:
+        embed_jsonl_path_param = params.get("embed_jsonl_path")
+        embed_jsonl_path = (
+            Path(embed_jsonl_path_param) if embed_jsonl_path_param else None
+        )
+
+        result_doc_id = pipe.stage6_submit_embed_batches(doc_id, embed_jsonl_path)
+        return {
+            "success": True,
+            "doc_id": result_doc_id,
+            "message": "Embedding 向量化入库完成",
+        }
+    except Exception as e:
+        logger.exception("doc_submit_embed_batches failed")
+        return {"success": False, "error": str(e)}
+
+
 def tool_reprocess(params: dict) -> dict:
     """强制重新处理文档."""
     doc_id = params.get("doc_id")
@@ -955,12 +1008,11 @@ def tool_config(params: dict) -> dict:
         "EMBED_MAX_RETRIES": "Embedding 配置",
         "EMBED_RETRY_BACKOFF": "Embedding 配置",
         "EMBED_TIMEOUT": "Embedding 配置",
-        "EMBED_MAX_BATCH_SIZE": "Embedding 配置",
+        "EMBED_ARRAY_MAX_SIZE": "Embedding 配置",
         "PARSER_API_KEY": "解析器配置",
         "PARSER_TIMEOUT": "解析器配置",
         "PARSER_MAX_RETRIES": "解析器配置",
         "PARSER_POLL_INTERVAL": "解析器配置",
-        "BATCH_SIZE": "Batch 配置",
         "BATCH_POLL_INTERVAL": "Batch 配置",
         "BATCH_MAX_POLL_RETRIES": "Batch 配置",
         "BATCH_MAX_FILE_SIZE_MB": "Batch 配置",
@@ -1006,6 +1058,8 @@ TOOL_MAP = {
     "doc_build_batches": tool_doc_build_batches,
     "doc_submit_batches": tool_doc_submit_batches,
     "doc_ingest_results": tool_doc_ingest_results,
+    "doc_build_embed_jsonl": tool_doc_build_embed_jsonl,
+    "doc_submit_embed_batches": tool_doc_submit_embed_batches,
     "semantic_search": tool_semantic_search,
     "query": tool_query,
     "status": tool_status,

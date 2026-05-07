@@ -21,10 +21,11 @@
     "dimension": null,
     "batch_endpoint": "",
     "batch_max_chars": "",
+    "batch_timeout": "",
     "max_retries": "",
     "retry_backoff": "",
     "timeout": "",
-    "max_batch_size": ""
+    "array_max_size": ""
   },
   "parser": {
     "api_key": "",
@@ -48,14 +49,10 @@
     "default_limit": ""
   },
   "pipeline": {
-    "chunk_level": "",
-    "summary_length": "",
-    "title_max_len": "",
-    "title_min_len": ""
+    "summary_length": ""
   },
   "graph": {
     "max_path_depth": "",
     "output_dir": ""
-  },
-  "batch_size": null
+  }
 }
