@@ -1385,3 +1385,145 @@ def test_arch_cross_level_subgraph(graph_store):
     filtered_names = {e.name for e in sg_filtered.entities()}
     assert filtered_names == {"MOV", "XT", "ST0", "Write"}
     assert sg_filtered.edge_count == 3
+
+
+# ---------------------------------------------------------------------------
+# 17. 文档类型分类与跨文档实体（Datasheet/Errata/Protocol/SW）
+# ---------------------------------------------------------------------------
+
+
+def test_document_type_entities_in_all_node_types():
+    """新增文档类型相关实体应存在于 ALL_NODE_TYPES."""
+    from core.graph_store import ALL_NODE_TYPES
+
+    doc_types = {
+        "Document",
+        "Pin",
+        "Package",
+        "ElectricalSpec",
+        "ApplicationDomain",
+        "OrderingInfo",
+        "Advisory",
+        "Workaround",
+        "SiliconRevision",
+        "UsageNote",
+        "Protocol",
+        "ProtocolLayer",
+        "TransactionType",
+        "Channel",
+        "MessageField",
+        "StateMachine",
+        "State",
+        "Transition",
+        "Function",
+        "DataStructure",
+        "Section",
+        "BuildConfig",
+        "CodeExample",
+    }
+    for t in doc_types:
+        assert t in ALL_NODE_TYPES, f"{t} should be in ALL_NODE_TYPES"
+
+
+def test_document_type_rels_in_all_rel_types():
+    """新增文档类型相关关系应存在于 ALL_REL_TYPES."""
+    from core.graph_store import ALL_REL_TYPES
+
+    doc_rels = {
+        "SUPERSEDES",
+        "EXTENDS",
+        "DEPENDS_ON",
+        "CITES",
+        "HAS_DOCUMENT",
+        "HAS_PIN",
+        "SIGNAL_ON_PIN",
+        "HAS_SPEC",
+        "TARGETS_APPLICATION",
+        "HAS_PACKAGE",
+        "HAS_ORDERING_INFO",
+        "AFFECTS",
+        "HAS_WORKAROUND",
+        "CORRECTS",
+        "APPLIES_TO_REVISION",
+        "SUPERSEDED_BY",
+        "DEFINES_TRANSACTION",
+        "USES_CHANNEL",
+        "CONTAINS_FIELD",
+        "HAS_STATE",
+        "TRANSITIONS_FROM",
+        "TRANSITIONS_TO",
+        "TRIGGERED_BY",
+        "IMPLEMENTS_PROTOCOL",
+        "LAYER_PART_OF",
+        "DEFINED_IN_SECTION",
+        "USES_CALLING_CONVENTION",
+        "HAS_CODE_EXAMPLE",
+        "REQUIRES_BUILD_CONFIG",
+    }
+    for r in doc_rels:
+        assert r in ALL_REL_TYPES, f"{r} should be in ALL_REL_TYPES"
+
+
+def test_errata_entity_crud(graph_store):
+    """勘误实体 Advisory / Workaround 的 CRUD."""
+    adv = GraphEntity(
+        entity_type="Advisory",
+        name="ADC_TEMP_SENSOR_MIN_WINDOW",
+        properties={
+            "advisory_id": "1",
+            "title": "ADC: Temperature Sensor Minimum Sample Window Requirement",
+            "severity": "high",
+            "affected_revisions": ["Rev 0", "Rev A"],
+        },
+    )
+    graph_store.add_entity(adv)
+    fetched = graph_store.get_entity("Advisory", "ADC_TEMP_SENSOR_MIN_WINDOW")
+    assert fetched is not None
+    assert fetched.properties["severity"] == "high"
+
+
+def test_protocol_entity_crud(graph_store):
+    """协议实体 Protocol / TransactionType / State 的 CRUD."""
+    proto = GraphEntity(
+        entity_type="Protocol",
+        name="AMBA_CHI",
+        properties={"version": "G", "standard_body": "ARM"},
+    )
+    txn = GraphEntity(
+        entity_type="TransactionType",
+        name="ReadNoSnp",
+        properties={"cacheable": False, "coherent": False},
+    )
+    graph_store.add_entity(proto)
+    graph_store.add_entity(txn)
+    graph_store.add_relation(
+        GraphRelation(
+            rel_type="DEFINES_TRANSACTION",
+            from_type="Protocol",
+            from_name="AMBA_CHI",
+            to_type="TransactionType",
+            to_name="ReadNoSnp",
+        )
+    )
+    neighbors = graph_store.get_neighbors("Protocol", "AMBA_CHI")
+    assert any(
+        n.entity_type == "TransactionType" and n.name == "ReadNoSnp" for n, _, _ in neighbors
+    )
+
+
+def test_datasheet_entity_crud(graph_store):
+    """数据手册实体 Pin / ElectricalSpec 的 CRUD."""
+    pin = GraphEntity(
+        entity_type="Pin",
+        name="GPIO0",
+        properties={"pin_number": "1", "pin_type": "Bidirectional", "voltage_level": "3.3V"},
+    )
+    spec = GraphEntity(
+        entity_type="ElectricalSpec",
+        name="VCC Supply Voltage",
+        properties={"min_value": 1.8, "max_value": 3.6, "unit": "V"},
+    )
+    graph_store.add_entity(pin)
+    graph_store.add_entity(spec)
+    assert graph_store.get_entity("Pin", "GPIO0") is not None
+    assert graph_store.get_entity("ElectricalSpec", "VCC Supply Voltage") is not None

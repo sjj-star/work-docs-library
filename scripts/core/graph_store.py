@@ -64,6 +64,34 @@ NODE_SHADOW_REGISTER = "ShadowRegister"
 NODE_CPU_MODE = "CPU_Mode"
 NODE_CLA_TASK = "CLA_Task"
 NODE_PERIPHERAL = "Peripheral"
+# 文档元数据
+NODE_DOCUMENT = "Document"
+# Datasheet 专用
+NODE_PIN = "Pin"
+NODE_PACKAGE = "Package"
+NODE_ELECTRICAL_SPEC = "ElectricalSpec"
+NODE_APPLICATION_DOMAIN = "ApplicationDomain"
+NODE_ORDERING_INFO = "OrderingInfo"
+# Errata 专用
+NODE_ADVISORY = "Advisory"
+NODE_WORKAROUND = "Workaround"
+NODE_SILICON_REVISION = "SiliconRevision"
+NODE_USAGE_NOTE = "UsageNote"
+# 协议规范专用
+NODE_PROTOCOL = "Protocol"
+NODE_PROTOCOL_LAYER = "ProtocolLayer"
+NODE_TRANSACTION_TYPE = "TransactionType"
+NODE_CHANNEL = "Channel"
+NODE_MESSAGE_FIELD = "MessageField"
+NODE_STATE_MACHINE = "StateMachine"
+NODE_STATE = "State"
+NODE_TRANSITION = "Transition"
+# 软件/ABI 专用
+NODE_FUNCTION = "Function"
+NODE_DATA_STRUCTURE = "DataStructure"
+NODE_SECTION = "Section"
+NODE_BUILD_CONFIG = "BuildConfig"
+NODE_CODE_EXAMPLE = "CodeExample"
 
 ALL_NODE_TYPES = {
     NODE_FEATURE,
@@ -93,6 +121,29 @@ ALL_NODE_TYPES = {
     NODE_CPU_MODE,
     NODE_CLA_TASK,
     NODE_PERIPHERAL,
+    NODE_DOCUMENT,
+    NODE_PIN,
+    NODE_PACKAGE,
+    NODE_ELECTRICAL_SPEC,
+    NODE_APPLICATION_DOMAIN,
+    NODE_ORDERING_INFO,
+    NODE_ADVISORY,
+    NODE_WORKAROUND,
+    NODE_SILICON_REVISION,
+    NODE_USAGE_NOTE,
+    NODE_PROTOCOL,
+    NODE_PROTOCOL_LAYER,
+    NODE_TRANSACTION_TYPE,
+    NODE_CHANNEL,
+    NODE_MESSAGE_FIELD,
+    NODE_STATE_MACHINE,
+    NODE_STATE,
+    NODE_TRANSITION,
+    NODE_FUNCTION,
+    NODE_DATA_STRUCTURE,
+    NODE_SECTION,
+    NODE_BUILD_CONFIG,
+    NODE_CODE_EXAMPLE,
 }
 
 # 关系类型
@@ -136,6 +187,40 @@ REL_TASK_USES_INSTRUCTION = "TASK_USES_INSTRUCTION"
 REL_MEMORY_MAPS_TO = "MEMORY_MAPS_TO"
 REL_UNIT_EXECUTES = "UNIT_EXECUTES"
 REL_STAGE_PRODUCES = "STAGE_PRODUCES"
+# 跨文档关系
+REL_SUPERSEDES = "SUPERSEDES"
+REL_EXTENDS = "EXTENDS"
+REL_DEPENDS_ON = "DEPENDS_ON"
+REL_CITES = "CITES"
+REL_HAS_DOCUMENT = "HAS_DOCUMENT"
+# Datasheet 关系
+REL_HAS_PIN = "HAS_PIN"
+REL_SIGNAL_ON_PIN = "SIGNAL_ON_PIN"
+REL_HAS_SPEC = "HAS_SPEC"
+REL_TARGETS_APPLICATION = "TARGETS_APPLICATION"
+REL_HAS_PACKAGE = "HAS_PACKAGE"
+REL_HAS_ORDERING_INFO = "HAS_ORDERING_INFO"
+# 勘误关系
+REL_AFFECTS = "AFFECTS"
+REL_HAS_WORKAROUND = "HAS_WORKAROUND"
+REL_CORRECTS = "CORRECTS"
+REL_APPLIES_TO_REVISION = "APPLIES_TO_REVISION"
+REL_SUPERSEDED_BY = "SUPERSEDED_BY"
+# 协议关系
+REL_DEFINES_TRANSACTION = "DEFINES_TRANSACTION"
+REL_USES_CHANNEL = "USES_CHANNEL"
+REL_CONTAINS_FIELD = "CONTAINS_FIELD"
+REL_HAS_STATE = "HAS_STATE"
+REL_TRANSITIONS_FROM = "TRANSITIONS_FROM"
+REL_TRANSITIONS_TO = "TRANSITIONS_TO"
+REL_TRIGGERED_BY = "TRIGGERED_BY"
+REL_IMPLEMENTS_PROTOCOL = "IMPLEMENTS_PROTOCOL"
+REL_LAYER_PART_OF = "LAYER_PART_OF"
+# 软件关系
+REL_DEFINED_IN_SECTION = "DEFINED_IN_SECTION"
+REL_USES_CALLING_CONVENTION = "USES_CALLING_CONVENTION"
+REL_HAS_CODE_EXAMPLE = "HAS_CODE_EXAMPLE"
+REL_REQUIRES_BUILD_CONFIG = "REQUIRES_BUILD_CONFIG"
 
 ALL_REL_TYPES = {
     REL_IMPLEMENTS,
@@ -176,6 +261,35 @@ ALL_REL_TYPES = {
     REL_MEMORY_MAPS_TO,
     REL_UNIT_EXECUTES,
     REL_STAGE_PRODUCES,
+    REL_SUPERSEDES,
+    REL_EXTENDS,
+    REL_DEPENDS_ON,
+    REL_CITES,
+    REL_HAS_DOCUMENT,
+    REL_HAS_PIN,
+    REL_SIGNAL_ON_PIN,
+    REL_HAS_SPEC,
+    REL_TARGETS_APPLICATION,
+    REL_HAS_PACKAGE,
+    REL_HAS_ORDERING_INFO,
+    REL_AFFECTS,
+    REL_HAS_WORKAROUND,
+    REL_CORRECTS,
+    REL_APPLIES_TO_REVISION,
+    REL_SUPERSEDED_BY,
+    REL_DEFINES_TRANSACTION,
+    REL_USES_CHANNEL,
+    REL_CONTAINS_FIELD,
+    REL_HAS_STATE,
+    REL_TRANSITIONS_FROM,
+    REL_TRANSITIONS_TO,
+    REL_TRIGGERED_BY,
+    REL_IMPLEMENTS_PROTOCOL,
+    REL_LAYER_PART_OF,
+    REL_DEFINED_IN_SECTION,
+    REL_USES_CALLING_CONVENTION,
+    REL_HAS_CODE_EXAMPLE,
+    REL_REQUIRES_BUILD_CONFIG,
 }
 
 
@@ -566,31 +680,34 @@ class NetworkXGraphStore(GraphStore):
 
     # -- 实体操作 --
 
+    @staticmethod
+    def _hashable_key(entity_type: str, key: str, value: Any) -> tuple:
+        """构建可哈希的索引 key，对 list/dict 自动序列化为 JSON."""
+        try:
+            hash(value)
+            return (entity_type, key, value)
+        except TypeError:
+            return (entity_type, key, json.dumps(value, sort_keys=True))
+
     def _add_to_property_index(self, nid: str, entity_type: str, properties: dict) -> None:
         """将实体属性加入索引.
 
         对不可哈希值（list/dict）自动序列化为 JSON 字符串作为索引 key。
         """
         for k, v in properties.items():
-            try:
-                key = (entity_type, k, v)
-            except TypeError:
-                key = (entity_type, k, json.dumps(v, sort_keys=True))
-            if key not in self._property_index:
-                self._property_index[key] = set()
-            self._property_index[key].add(nid)
+            idx_key = self._hashable_key(entity_type, k, v)
+            if idx_key not in self._property_index:
+                self._property_index[idx_key] = set()
+            self._property_index[idx_key].add(nid)
 
     def _remove_from_property_index(self, nid: str, entity_type: str, properties: dict) -> None:
         """从索引中移除实体属性."""
         for k, v in properties.items():
-            try:
-                key = (entity_type, k, v)
-            except TypeError:
-                key = (entity_type, k, json.dumps(v, sort_keys=True))
-            if key in self._property_index:
-                self._property_index[key].discard(nid)
-                if not self._property_index[key]:
-                    del self._property_index[key]
+            idx_key = self._hashable_key(entity_type, k, v)
+            if idx_key in self._property_index:
+                self._property_index[idx_key].discard(nid)
+                if not self._property_index[idx_key]:
+                    del self._property_index[idx_key]
 
     def add_entity(self, entity: GraphEntity) -> list[dict]:
         """add_entity 函数. 返回冲突日志列表."""
