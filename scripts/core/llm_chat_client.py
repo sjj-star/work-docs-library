@@ -80,9 +80,10 @@ class BaseLLMClient:
         """基础对话功能."""
         data = {"model": self.model, "messages": messages, "temperature": temperature}
 
-        # 添加思考模式支持（OpenAI 兼容格式）
-        if self.thinking_enabled and "extra_body" not in kwargs:
-            kwargs["extra_body"] = {"thinking": {"type": "enabled"}}
+        # 添加思考模式支持（OpenAI 兼容格式，始终传递确保模型行为可控）
+        if "extra_body" not in kwargs:
+            thinking_type = "enabled" if self.thinking_enabled else "disabled"
+            kwargs["extra_body"] = {"thinking": {"type": thinking_type}}
 
         # 合并额外参数
         data.update(kwargs)

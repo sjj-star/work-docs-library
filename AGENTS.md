@@ -86,11 +86,16 @@
 | 阶段 | 产物路径 | 说明 |
 |------|----------|------|
 | Stage 1 (Parse) | `knowledge_base/parsed/{doc_id}/result.md` | 解析后的 Markdown（可人工编辑后重新触发 stage2） |
-| Stage 2 (Build JSONL) | `knowledge_base/batch/{doc_id}.jsonl` | Batch API 输入请求 |
+| Stage 2 (Build JSONL) | `knowledge_base/batch/{doc_id}.jsonl` | LLM Batch API 输入请求 |
 | Stage 2 (Build JSONL) | `knowledge_base/batch/{doc_id}_batch_info.json` | request → chapter 映射，用于结果回填 |
-| Stage 3 (Submit) | `knowledge_base/batch/{doc_id}_results.jsonl` | API 原始返回结果（可审查、可编辑后重新触发 stage4） |
+| Stage 3 (Submit) | `knowledge_base/batch/{doc_id}_results.jsonl` | LLM Batch API 原始返回结果（可审查、可编辑后重新触发 stage4） |
+| Stage 3 (Submit) | `knowledge_base/batch/{doc_id}_incremental.json` | 增量分析摘要 + result.md hash 校验（供 stage4 一致性校验） |
 | Stage 4 (Ingest) | `knowledge_base/graphs/{doc_id}.json` | 文档级子图快照（可从任意子图重建全局图） |
-| Stage 4 (Ingest) | `knowledge_base/workdocs.db` + `knowledge_base/faiss.index` | SQLite 元数据与 FAISS 向量索引 |
+| Stage 4 (Ingest) | `knowledge_base/workdocs.db` | SQLite 元数据（chunks、documents、conflict_logs、feedback） |
+| Stage 5 (Build Embed JSONL) | `knowledge_base/batch/{doc_id}_embed.jsonl` | Embedding Batch API 输入请求（数组 input 格式） |
+| Stage 5 (Build Embed JSONL) | `knowledge_base/batch/{doc_id}_embed_map.json` | index → chunk_db_id 映射（供 stage6 结果回填） |
+| Stage 6 (Submit Embed) | `knowledge_base/batch/{doc_id}_embed_results.jsonl` | Embedding Batch API 原始返回结果 |
+| Stage 6 (Submit Embed) | `knowledge_base/faiss.index` + `knowledge_base/id_map.json` | FAISS 向量索引与 ID 映射 |
 
 ### 开发约束
 
@@ -297,7 +302,7 @@
 | `test_entity_extractor.py` | EntityExtractor multimodal batch 请求构建测试 |
 | `test_batch_builder.py` | BatchBuilder 切分保护与空 content 过滤测试 |
 | `test_parsed_docs_jsonl.py` | 真实文档端到端 JSONL 生成测试 |
-| `test_pipeline_stages.py` | 四阶段 pipeline 拆分测试 |
+| `test_pipeline_stages.py` | 六阶段 pipeline 拆分测试 |
 
 ### Mock 方法
 使用 `monkeypatch.setattr` 替换客户端类方法：
@@ -334,7 +339,7 @@ config.json（用户持久化配置，项目根目录）
 | `WORKDOCS_LLM_API_KEY` | `llm.api_key` | 空 | LLM Batch API Key（实体提取） |
 | `WORKDOCS_LLM_BASE_URL` | `llm.endpoint` | `https://api.moonshot.cn/v1` | LLM Base URL |
 | `WORKDOCS_LLM_MODEL` | `llm.model` | `kimi-k2.5` | 对话模型 |
-| `WORKDOCS_LLM_THINKING_ENABLED` | `llm.thinking_enabled` | `0` | 是否启用 thinking 模式（`1` 开启） |
+| `WORKDOCS_LLM_THINKING_ENABLED` | `llm.thinking_enabled` | `0` | 是否启用 thinking 模式（`1`=`enabled`，`0`=`disabled`）。Kimi K2.6 等模型 thinking 默认开启，必须显式传递才能可靠关闭 |
 | `WORKDOCS_LLM_BATCH_ENDPOINT` | `llm.batch_endpoint` | `/v1/chat/completions` | LLM Batch API endpoint |
 | `WORKDOCS_LLM_BATCH_COMPLETION_WINDOW` | `llm.completion_window` | `24h` | Batch 完成窗口 |
 | `WORKDOCS_LLM_BATCH_MAX_CHARS` | `llm.batch_max_chars` | `10000` | 每个 LLM batch 最大文本字符数 |
