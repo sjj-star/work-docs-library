@@ -62,24 +62,18 @@ def _extract_product_name(markdown_text: str, file_path: str) -> str | None:
     """从产品文档中提取产品型号.
 
     策略（按优先级）：
-    1. 用户配置 WORKDOCS_PRODUCT_NAME
-    2. Markdown 标题/正文前 50 行中匹配型号格式
-    3. 文件名中匹配型号格式
+    1. Markdown 标题/正文前 50 行中匹配型号格式
+    2. 文件名中匹配型号格式
 
     """
-    # 1. 用户配置
-    product_name = getattr(Config, "PRODUCT_NAME", "")
-    if product_name:
-        return product_name
-
-    # 2. 从 Markdown 文本提取
+    # 1. 从 Markdown 文本提取
     for line in markdown_text.split("\n")[:50]:
         for pattern in _PRODUCT_NAME_PATTERNS:
             match = re.search(pattern, line)
             if match:
                 return match.group(0)
 
-    # 3. 从文件名提取
+    # 2. 从文件名提取
     file_name = Path(file_path).stem
     for pattern in _PRODUCT_NAME_PATTERNS:
         match = re.search(pattern, file_name)
@@ -511,16 +505,20 @@ class EntityExtractor:
                 {"role": "system", "content": self._system_prompt},
                 {"role": "user", "content": content},
             ]
+            body = {
+                "model": Config.LLM_MODEL,
+                "messages": messages,
+                "response_format": {"type": "json_object"},
+            }
+            # Kimi K2.6 等模型 thinking 默认开启，必须显式传递以可控
+            thinking_type = "enabled" if Config.LLM_THINKING_ENABLED else "disabled"
+            body["extra_body"] = {"thinking": {"type": thinking_type}}
             requests.append(
                 {
                     "custom_id": f"batch_{i}",
                     "method": "POST",
                     "url": Config.LLM_BATCH_ENDPOINT,
-                    "body": {
-                        "model": Config.LLM_MODEL,
-                        "messages": messages,
-                        "response_format": {"type": "json_object"},
-                    },
+                    "body": body,
                 }
             )
             logger.info(f"Batch {i} 构建完成 | images={len(image_meta)}")
@@ -1039,43 +1037,85 @@ class DocGraphPipeline:
             self._incremental_analysis(file_path, extracted_text, force)
         )
 
-        # 构建变更/新增章节的 batches
-        process_nodes: list[ChapterNode] = []
-        for ch in changed + added:
-            process_nodes.append(ChapterNode(level=1, title=ch["title"], content=ch["content"]))
-        batches = (
-            BatchBuilder.build_batches(process_nodes, Config.LLM_BATCH_MAX_CHARS)
-            if process_nodes
-            else []
-        )
+        # 尝试从持久化 JSONL 读取 requests（支持用户编辑后重新提交）
+        requests: list[dict[str, Any]] = []
+        if jsonl_path and jsonl_path.exists() and jsonl_path.stat().st_size > 0:
+            from core.batch_clients import _parse_jsonl
 
-        if not batches or not self.llm_batch:
-            logger.info("无变更章节或 BatchClient 不可用，跳过 API 提交")
-            # 创建空结果文件
-            results_path.write_text("", encoding="utf-8")
-            return results_path
+            all_requests = _parse_jsonl(jsonl_path.read_text(encoding="utf-8"))
+            # 通过 batch_info 做增量过滤：只保留对应变更/新增章节的 requests
+            batch_info_path = jsonl_path.parent / f"{doc_id}_batch_info.json"
+            if batch_info_path.exists() and (changed or added):
+                batch_info = json.loads(batch_info_path.read_text(encoding="utf-8"))
+                changed_titles = {ch["title"] for ch in changed + added}
+                changed_custom_ids: set[str] = set()
+                for info in batch_info:
+                    titles = set(info.get("chapter_titles", []))
+                    if titles & changed_titles:
+                        changed_custom_ids.add(info.get("custom_id", ""))
+                requests = [
+                    req for req in all_requests if req.get("custom_id") in changed_custom_ids
+                ]
+                logger.info(
+                    f"从 JSONL 增量过滤 | path={jsonl_path} | "
+                    f"total={len(all_requests)} | filtered={len(requests)}"
+                )
+            else:
+                requests = all_requests
+                logger.info(
+                    f"从 JSONL 读取全部 requests | path={jsonl_path} | count={len(requests)}"
+                )
 
-        # 构建 requests
-        parsed_output_dir = Config.DB_PATH.parent / "parsed" / doc_id
-        doc_title = ""
-        tree_chapters = self.chapter_parser.parse_tree(extracted_text)
-        if tree_chapters:
-            doc_title = tree_chapters[0].title
-        product_name = _extract_product_name(extracted_text, file_path) or ""
-        doc_context_parts = []
-        if doc_title:
-            doc_context_parts.append(f"文档《{doc_title}》")
-        if product_name:
-            doc_context_parts.append(f"产品型号 {product_name}")
-        doc_context = ""
-        if doc_context_parts:
-            doc_context = "以下章节来自 " + "，".join(doc_context_parts) + "。\n\n---\n"
+            # 确保每个 request 的 body 中都有 thinking 参数（如用户编辑删除了则补充）
+            thinking_type = "enabled" if Config.LLM_THINKING_ENABLED else "disabled"
+            for req in requests:
+                body = req.get("body", {})
+                if "extra_body" not in body:
+                    body["extra_body"] = {"thinking": {"type": thinking_type}}
+                elif "thinking" not in body.get("extra_body", {}):
+                    body.setdefault("extra_body", {})["thinking"] = {"type": thinking_type}
 
-        requests = self.entity_extractor._build_batch_requests(
-            batches=batches,
-            image_base_dir=parsed_output_dir,
-            doc_context=doc_context,
-        )
+            if not self.llm_batch:
+                logger.info("BatchClient 不可用，跳过 API 提交")
+                results_path.write_text("", encoding="utf-8")
+                return results_path
+
+        # 回退：重新构建 requests（JSONL 不存在或为空时）
+        if not requests:
+            process_nodes: list[ChapterNode] = []
+            for ch in changed + added:
+                process_nodes.append(ChapterNode(level=1, title=ch["title"], content=ch["content"]))
+            batches = (
+                BatchBuilder.build_batches(process_nodes, Config.LLM_BATCH_MAX_CHARS)
+                if process_nodes
+                else []
+            )
+
+            if not batches or not self.llm_batch:
+                logger.info("无变更章节或 BatchClient 不可用，跳过 API 提交")
+                results_path.write_text("", encoding="utf-8")
+                return results_path
+
+            parsed_output_dir = Config.DB_PATH.parent / "parsed" / doc_id
+            doc_title = ""
+            tree_chapters = self.chapter_parser.parse_tree(extracted_text)
+            if tree_chapters:
+                doc_title = tree_chapters[0].title
+            product_name = _extract_product_name(extracted_text, file_path) or ""
+            doc_context_parts = []
+            if doc_title:
+                doc_context_parts.append(f"文档《{doc_title}》")
+            if product_name:
+                doc_context_parts.append(f"产品型号 {product_name}")
+            doc_context = ""
+            if doc_context_parts:
+                doc_context = "以下章节来自 " + "，".join(doc_context_parts) + "。\n\n---\n"
+
+            requests = self.entity_extractor._build_batch_requests(
+                batches=batches,
+                image_base_dir=parsed_output_dir,
+                doc_context=doc_context,
+            )
 
         # 删除旧结果文件（如果存在）
         if results_path.exists():

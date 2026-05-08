@@ -33,36 +33,90 @@
 
 ## 架构概览
 
-### DocGraphPipeline 架构
+### DocGraphPipeline 六阶段架构
 
 ```mermaid
 flowchart TB
-    A[PDF] --> B[BigModel Expert 解析]
-    B --> C[Markdown 文本 + 图片]
-    C --> D[ChapterParser 树形解析]
-    D --> E[BatchBuilder 构建 batch]
-    E --> F[EntityExtractor multimodal batch]
-    F --> G[LLM Batch API]
-    G --> H[results.jsonl 原始结果]
-    H --> I[stage4_ingest_results 解析入库]
-    I --> J[GraphStore 图谱]
-    I --> K[_save_chunks_to_db]
-    K --> L[BatchClient 向量化]
-    L --> M[SQLite + FAISS]
-    J --> N[图谱 JSON 持久化]
-    E --> O[requests.jsonl + batch_info.json]
+    subgraph Stage1["阶段1: 文档解析"]
+        S1A[PDF] --> S1B["BigModel Expert API\n(非 OpenAI-compatible)"]
+        S1B -->|失败 fallback| S1C["本地 PDFParser\n(PyMuPDF + TOC 驱动)"]
+        S1B --> S1D["result.md\n+ images/"]
+        S1C --> S1D
+    end
+
+    subgraph Stage2["阶段2: 构建 LLM Batch JSONL"]
+        S2A[result.md] --> S2B["ChapterParser\nparse_tree() → 多级树"]
+        S2B --> S2C["collect_all_nodes()\n扁平化 + 标题路径前缀"]
+        S2C --> S2D["BatchBuilder\nbuild_batches()"]
+        S2D -->|段落边界切分\n保护代码块/表格| S2E["chunk 列表"]
+        S2E --> S2F["EntityExtractor\n_build_multimodal_content()\n流式嵌入图片 base64"]
+        S2F --> S2G["{doc_id}.jsonl"]
+        S2D --> S2H["{doc_id}_batch_info.json\nrequest → chapter 映射"]
+    end
+
+    subgraph Stage3["阶段3: 提交 LLM Batch API"]
+        S3A["{doc_id}.jsonl\n(支持用户编辑后读取)"] --> S3B["读取 JSONL + _incremental_analysis()\ncontent_hash 指纹比对 + 增量过滤"]
+        S3B -->|仅变更/新增章节| S3C["submit_parallel_batches()\n自动拆分 >100MB"]
+        S3C --> S3D["LLM Batch API\n(Kimi / BigModel)"]
+        S3D --> S3E["{doc_id}_results.jsonl\n原始 JSON 返回"]
+        S3B --> S3F["{doc_id}_incremental.json\n增量摘要 + hash 校验"]
+    end
+
+    subgraph Stage4["阶段4: 解析入库（不含向量化）"]
+        S4A["{doc_id}_results.jsonl"] --> S4B["extract_from_results_file()\n解析 entities/relations/image_descriptions"]
+        S4B -->|复用未变章节缓存| S4C["GraphStore.add_entity()\n.add_relation()"]
+        S4C --> S4D["同名同类型去重合并\ndoc_properties[doc_id] 快照"]
+        S4D --> S4E["文档子图\n{doc_id}.json"]
+        S4C --> S4F["Product 实体提取\nHAS_MODULE 关系建立"]
+        S4B --> S4G["_save_chunks_to_db()\n增量清理 + 插入 SQLite"]
+        S4G --> S4H["chunk status: embedded"]
+    end
+
+    subgraph Stage5["阶段5: 构建 Embedding Batch JSONL"]
+        S5A["SQLite chunks\n(status=embedded)"] --> S5B["查询无 embedding 的 chunks"]
+        S5B -->|段落边界切分\n超长 content| S5C["split_text_by_paragraphs()"]
+        S5C --> S5D["按 EMBED_ARRAY_MAX_SIZE\n分组构建数组 input"]
+        S5D --> S5E["{doc_id}_embed.jsonl"]
+        S5D --> S5F["{doc_id}_embed_map.json\nindex → chunk_db_id 映射"]
+    end
+
+    subgraph Stage6["阶段6: 提交 Embedding Batch API"]
+        S6A["{doc_id}_embed.jsonl"] --> S6B["Embedding Batch API\n(BigModel embedding-3)"]
+        S6B -->|失败 fallback| S6C["同步 EmbeddingClient"]
+        S6B --> S6D["{doc_id}_embed_results.jsonl"]
+        S6C --> S6E["解析 embeddings"]
+        S6D --> S6E
+        S6E --> S6F["update_chunks_embedded_batch()\nSQLite metadata.embedding"]
+        S6F --> S6G["FAISS IndexFlatIP\nadd_batch()"]
+        S6G --> S6H["chunk status: done"]
+    end
+
+    subgraph Global["全局图谱重建"]
+        G1["所有 {doc_id}.json"] --> G2["clear() + 遍历加载\nNetworkX DiGraph"]
+        G2 --> G3["global.json\n跨文档实体对齐"]
+    end
+
+    S1D --> S2A
+    S2G --> S3A
+    S2H -.-> S4A
+    S3E --> S4A
+    S3F -.->|hash 校验| S4A
+    S4E --> G1
+    S4H --> S5A
+    S5E --> S6A
+    S5F -.-> S6E
+    S6H --> G1
 ```
 
 **数据流说明：**
 
-1. `BigModelParserClient` 调用 **BigModel 专用** Expert API 解析 PDF，输出 Markdown 文本（含 `![alt](images/xxx.jpg)` 图片引用）+ `images/` 目录（⚠️ 该 API 非 OpenAI-compatible，仅支持 BigModel 厂商；失败时自动 fallback 到本地 `PDFParser`）
-2. `ChapterParser.parse_tree()` 将 Markdown 文本解析为树形章节结构（`#` 为文档标题/书名，`##` 为章节，`###` 为子章节）
-3. `BatchBuilder.build_batches()` 接收 `ChapterParser.collect_all_nodes()` 扁平化的节点列表，按 `max_chars` 切分，超长内容按段落边界（`\n\n+`）切分为 sub-batch。每个 chunk 包含完整标题路径前缀（如 `# Title\n## Section\n### Sub\n\ncontent`）
-4. `EntityExtractor` 对每个 batch 的文本流式解析 Markdown 图片引用，按原文出现顺序构建 multimodal content（文本 → `[image_id: alt]` → base64 图片），提交到 Kimi Batch API
-5. LLM 返回 JSON，包含 `entities`、`relationships`、`image_descriptions`
-6. `GraphStore`（NetworkX）构建实体关系图谱，**同名同类型实体自动去重合并**。每个文档保存独立子图 `graphs/{doc_id}.json`；`KnowledgeBaseService.ingest_document()` 完成后**全量重建**全局图 `graphs/global.json`（`clear()` + 遍历所有子图重新加载），确保无幽灵残留，实现**跨文档知识互通**。合并时同时保存每个文档的原始属性快照到 `doc_properties[doc_id]`，支持按文档精确查询
-7. 增量更新：以 `chapter_title` 为键比对 `content_hash`，未变章节直接复用缓存的 `extracted_entities`/`extracted_relations`/`embedding`，仅对变更/新增章节重新提取和向量化
-8. `_save_chunks_to_db()` 清理旧 chunks/向量、插入新 chunks、合并 `image_descriptions` 到 content，通过 `BatchClient` 批量向量化（未配置时降级到同步 `EmbeddingClient`），写入 SQLite + FAISS
+1. **阶段1（解析）**：`BigModelParserClient` 调用 **BigModel 专用** Expert API 解析 PDF，输出 Markdown 文本（含 `![alt](images/xxx.jpg)` 图片引用）+ `images/` 目录（⚠️ 该 API 非 OpenAI-compatible，仅支持 BigModel 厂商；失败时自动 fallback 到本地 `PDFParser`，输出格式完全一致）
+2. **阶段2（构建 LLM Batch）**：`ChapterParser.parse_tree()` 将 Markdown 解析为树形章节结构（`#` 文档标题，`##` 章节，`###+` 子章节），`collect_all_nodes()` 递归收集所有有 content 的节点并附加完整标题路径前缀。`BatchBuilder.build_batches()` 按 `max_chars` 切分，超长内容按段落边界（`\n\n+`）切分为 sub-batch，同时保护代码块/表格不被截断。`EntityExtractor` 流式解析图片引用，按原文顺序构建 multimodal content（文本 → `[image_id: alt]` → base64 图片），生成 `{doc_id}.jsonl` + `{doc_id}_batch_info.json`
+3. **阶段3（提交 LLM Batch）**：**优先读取** `batch/{doc_id}.jsonl`（支持用户编辑后重新提交），结合 `batch/{doc_id}_batch_info.json` 做增量过滤，仅对变更/新增章节的 requests 提交 Batch API。超大 JSONL 自动按 100MB 拆分并行提交。结果保存为 `{doc_id}_results.jsonl`，增量摘要保存为 `{doc_id}_incremental.json` 供阶段4校验一致性
+4. **阶段4（解析入库，不含向量化）**：从 `results.jsonl` 解析 `entities`/`relationships`/`image_descriptions`，复用未变章节的缓存实体/关系。`GraphStore`（NetworkX）构建图谱，**同名同类型实体自动去重合并**，每个文档保存独立子图 `graphs/{doc_id}.json`。同时保存每个文档的原始属性快照到 `doc_properties[doc_id]`，支持按文档精确查询。提取产品型号建立 `Product --[HAS_MODULE]--> Module` 关系。chunks 写入 SQLite，状态设为 `embedded`
+5. **阶段5（构建 Embedding Batch）**：从 SQLite 查询状态为 `embedded` 且暂无 `metadata.embedding` 的 chunks，超长 content 按段落边界切分后，按 `EMBED_ARRAY_MAX_SIZE` 分组构建数组 input，生成 `{doc_id}_embed.jsonl` + `{doc_id}_embed_map.json`
+6. **阶段6（提交 Embedding Batch）**：提交 Embedding Batch API（默认 BigModel `embedding-3`），失败时降级到同步 `EmbeddingClient`。解析结果后统一写入 SQLite `metadata.embedding` + FAISS `IndexFlatIP`，chunk 状态更新为 `done`
+7. **全局图谱重建**：`KnowledgeBaseService.ingest_document()` 完成后**全量重建**全局图 `graphs/global.json`（`clear()` + 遍历所有子图重新加载），确保无幽灵残留，实现**跨文档知识互通**
 
 ### 输入文档约束
 
@@ -107,12 +161,14 @@ work-docs-library/
 │   │   ├── pdf_parser.py         # PDF 本地解析器（fallback，输出与 BigModel 一致）
 │   │   ├── office_parser.py      # DOCX / XLSX 解析器（代码存在，尚未接入 pipeline）
 │   │   └── image_utils.py        # 图片压缩工具
-│   └── tests/                    # pytest 测试集（216 个用例）
-├── knowledge_base/               # 运行时自动生成：数据库、FAISS 索引、解析输出
-│   ├── workdocs.db
-│   ├── faiss.index
-│   ├── id_map.json
-│   └── parsed/<doc_id>/          # BigModel Expert 解析输出
+│   └── tests/                    # pytest 测试集（289 个用例）
+├── knowledge_base/               # 运行时自动生成
+│   ├── workdocs.db               # SQLite 元数据
+│   ├── faiss.index               # FAISS 向量索引
+│   ├── id_map.json               # FAISS ID 映射
+│   ├── parsed/<doc_id>/          # Stage1 解析输出（result.md + images/）
+│   ├── batch/                    # Stage2/3/5/6 中间产物（*.jsonl, *_info.json）
+│   └── graphs/                   # Stage4 子图快照（{doc_id}.json, global.json）
 ├── venv/                         # Python 虚拟环境
 └── .gitignore
 ```
@@ -168,37 +224,95 @@ cp scripts/.env.example scripts/.env
 
 ### 2. 分阶段导入（支持人工干预）
 
-当 PDF 解析后的 Markdown 需要手动调整时，可使用六阶段流程：
+当需要审查或修正中间产物时，可使用六阶段流程。每个阶段的产物均持久化到磁盘，支持人工编辑后重新触发下游阶段。
+
+#### 阶段1: 解析（PDF → Markdown）
 
 ```bash
-# 阶段1: PDF → Markdown
 /doc_parse path/to/document.pdf
-# 输出: doc_id=xxx, parsed_dir=knowledge_base/parsed/xxx/
-# 用户可手动编辑 knowledge_base/parsed/xxx/result.md
-
-# 阶段2: Markdown → LLM Batch JSONL
-/doc_build_batches xxx
-# 输出: jsonl=knowledge_base/batch/xxx.jsonl, batch_count=23
-# 可审查 JSONL 和 batch_info.json 内容
-
-# 阶段3: JSONL → API → 保存结果
-/doc_submit_batches xxx
-# 输出: results_path=knowledge_base/batch/xxx_results.jsonl
-# 可审查 API 原始返回结果
-
-# 阶段4: 结果文件 → 解析入库（不含向量化）
-/doc_ingest_results xxx
-# 输出: 文档已入库完成，chunks 状态为 embedded
-
-# 阶段5: chunks → Embedding Batch JSONL
-/doc_build_embed_jsonl xxx
-# 输出: embed_jsonl=knowledge_base/batch/xxx_embed.jsonl
-# 可审查 Embedding JSONL 内容
-
-# 阶段6: Embedding JSONL → API → 向量化入库
-/doc_submit_embed_batches xxx
-# 输出: Embedding 向量化入库完成，chunks 状态为 done
 ```
+
+- **输入**: PDF 文件
+- **输出**: `knowledge_base/parsed/{doc_id}/result.md` + `images/`
+- **干预**: 直接编辑 `result.md`（修正文本、调整标题层级、补充内容）
+- **触发下一阶段**: `/doc_build_batches {doc_id}`
+- **注意**: 编辑后 content_hash 会变化，阶段3 的增量分析将识别为全部变更
+
+#### 阶段2: 构建 Batch JSONL
+
+```bash
+/doc_build_batches {doc_id}
+# 可选参数: --max-chars 10000（每个 batch 最大字符数）
+```
+
+- **输入**: `parsed/{doc_id}/result.md`
+- **输出**: `batch/{doc_id}.jsonl` + `batch/{doc_id}_batch_info.json`
+- **产物格式**: `jsonl` 每行是一个 JSON request，body 包含 `model`/`messages`/`response_format`/`extra_body`（含 thinking 参数）
+- **干预**: 编辑 `jsonl`（修改 prompt、删除不想提交的 request、调整 messages）
+- **⚠️ 关键限制**:
+  - 删除 requests：无需同步修改 `batch_info.json`（代码会安全忽略多余的映射条目）
+  - 修改 `custom_id`：无需同步修改 `batch_info.json`（不会报错，但该 request 在增量过滤时可能不会被选中）
+  - **新增 requests：必须在 `batch_info.json` 中同步添加对应的 `custom_id` → `chapter_titles` 映射**，否则 stage4 的 `chapter_map` 无法回填，导致新增实体的 `source_chapter` 为空
+  - `extra_body.thinking` 会被 stage3 自动补充（无需手动添加）
+- **触发下一阶段**: `/doc_submit_batches {doc_id}`
+
+#### 阶段3: 提交 LLM Batch API
+
+```bash
+/doc_submit_batches {doc_id}
+# 可选参数: --file-path PATH（原始 PDF 路径，数据库无记录时必填）
+#            --jsonl-path PATH（自定义 JSONL 路径）
+#            --force（强制重新处理，忽略缓存）
+```
+
+- **输入**: 优先读取 `batch/{doc_id}.jsonl`（支持用户编辑后重新提交），结合 `batch_info.json` 做增量过滤
+- **输出**: `batch/{doc_id}_results.jsonl` + `batch/{doc_id}_incremental.json`
+- **产物格式**: `results.jsonl` 每行是一个 JSON response，`response.body.choices[0].message.content` 是 LLM 提取的 entities/relations/image_descriptions
+- **干预**: 编辑 `results.jsonl`（修正 LLM 提取错误：修改 entity 名称、添加遗漏的关系、修正图片描述）
+- **注意**: `incremental.json` 是机器生成的 hash 校验文件，**不要手动编辑**
+- **触发下一阶段**: `/doc_ingest_results {doc_id}`
+
+#### 阶段4: 解析入库（不含向量化）
+
+```bash
+/doc_ingest_results {doc_id}
+# 可选参数: --file-path PATH（原始 PDF 路径）
+#            --results-path PATH（自定义 results.jsonl 路径）
+#            --force（强制重新处理）
+```
+
+- **输入**: `batch/{doc_id}_results.jsonl` + `batch/{doc_id}_batch_info.json` + `batch/{doc_id}_incremental.json`
+- **输出**: SQLite chunks（状态 `embedded`）+ `graphs/{doc_id}.json`
+- **干预**: 直接编辑 `graphs/{doc_id}.json`（但推荐通过 `graph_upsert_entity`/`graph_upsert_relation` 等 Plugin 工具修改，自动维护索引一致性）
+- **注意**: 直接编辑子图后，必须调用 `/rebuild_global_graph` 才能同步全局图 `global.json`
+- **触发下一阶段**: `/doc_build_embed_jsonl {doc_id}`
+
+#### 阶段5: 构建 Embedding Batch JSONL
+
+```bash
+/doc_build_embed_jsonl {doc_id}
+```
+
+- **输入**: SQLite chunks（状态 `embedded` 且暂无 `metadata.embedding`）
+- **输出**: `batch/{doc_id}_embed.jsonl` + `batch/{doc_id}_embed_map.json`
+- **产物格式**: `embed.jsonl` 每行 body.input 是字符串数组（chunk content 列表）
+- **干预**: 编辑 `embed.jsonl`（删除不想向量化的 chunks）
+- **⚠️ 关键限制**:
+  - 删除行：无需修改 `embed_map.json`，**但不可修改剩余行的 `custom_id`**（stage6 通过 `custom_id` 中的 `start_idx` 偏移量定位 split_id_map，修改 custom_id 会导致 embedding 与 chunk 映射错位）
+  - **新增行：不可随意新增**（custom_id 的 `start_idx` 必须与 split_id_map 的数组索引严格对齐，新增会破坏映射关系）
+- **触发下一阶段**: `/doc_submit_embed_batches {doc_id}`
+
+#### 阶段6: 提交 Embedding Batch API
+
+```bash
+/doc_submit_embed_batches {doc_id}
+# 可选参数: --embed-jsonl-path PATH（自定义 Embedding JSONL 路径）
+```
+
+- **输入**: `batch/{doc_id}_embed.jsonl` + `batch/{doc_id}_embed_map.json`
+- **输出**: SQLite `metadata.embedding` + FAISS 向量索引
+- **干预**: 无（此阶段纯 API 调用与结果入库）
+- **chunk 状态**: `embedded` → `done`
 
 ### 3. 语义搜索
 
@@ -246,7 +360,7 @@ Kimi CLI 通过 `plugin.json` 注册以下工具：
 | `ingest` | 提取并存储文档（PDF），完整流程一次性执行 |
 | `doc_parse` | 阶段1：PDF → Markdown + 图片（可手动调整） |
 | `doc_build_batches` | 阶段2：Markdown → Batch JSONL（本地生成，不调用 API） |
-| `doc_submit_batches` | 阶段3：提交 Batch API 并保存原始结果文件 |
+| `doc_submit_batches` | 阶段3：读取 `batch/{doc_id}.jsonl`（支持用户编辑后重新提交），提交 Batch API 并保存原始结果文件 |
 | `doc_build_embed_jsonl` | 阶段5：从已入库 chunks 构建 Embedding Batch JSONL（本地，可审查） |
 | `doc_submit_embed_batches` | 阶段6：提交 Embedding Batch API 并解析结果入库（完成向量化） |
 | `doc_ingest_results` | 阶段4：从结果文件解析实体、构建图谱、保存 chunks（不含向量化） |
@@ -297,7 +411,7 @@ Kimi CLI 通过 `plugin.json` 注册以下工具：
 | `WORKDOCS_LLM_API_KEY` | `llm.api_key` | 空 | Kimi API Key（Batch API 实体提取用） |
 | `WORKDOCS_LLM_BASE_URL` | `llm.endpoint` | `https://api.moonshot.cn/v1` | Kimi Base URL |
 | `WORKDOCS_LLM_MODEL` | `llm.model` | `kimi-k2.5` | 对话模型 |
-| `WORKDOCS_LLM_THINKING_ENABLED` | `llm.thinking_enabled` | `0` | 是否启用 thinking 模式（`1` 开启） |
+| `WORKDOCS_LLM_THINKING_ENABLED` | `llm.thinking_enabled` | `0` | 是否启用 thinking 模式（`1`=`enabled`，`0`=`disabled`）。Kimi K2.6 等模型 thinking 默认开启，**必须显式传递**才能可靠关闭 |
 | `WORKDOCS_LLM_BATCH_ENDPOINT` | `llm.batch_endpoint` | `/v1/chat/completions` | LLM Batch API endpoint |
 | `WORKDOCS_LLM_BATCH_COMPLETION_WINDOW` | `llm.completion_window` | `24h` | Batch 完成窗口（如 `24h`） |
 | `WORKDOCS_LLM_BATCH_MAX_CHARS` | `llm.batch_max_chars` | `10000` | 每个 LLM batch 最大文本字符数 |
@@ -430,7 +544,7 @@ cd /path/to/work-docs-library
 PYTHONPATH=scripts ./venv/bin/python -m pytest scripts/tests/ -v
 ```
 
-**当前状态：283 个测试全部通过。**
+**当前状态：289 个测试全部通过。**
 
 ### 常用测试文档
 
@@ -491,7 +605,7 @@ WORKDOCS_PARSER_API_KEY=your-api-key
 7. **NetworkX 内存上限**：全局图为内存存储，数百个文档 × 万页级时可能达到 GB 级。当前单机目标规模可接受，预留 Neo4j 迁移接口
 8. **输入文档约束**：Markdown 图片引用 `![name](images/path.jpg)` 中的 `name` 将作为 `image_id`，建议填写有意义的名称
 9. **PDF 解析依赖 BigModel 专用 API**：文档提取主路径使用 BigModel 专有 Expert API（`/files/parser/create`），非 OpenAI-compatible，无法直接切换至其他厂商。若 BigModel 不可用，可依赖本地 `PDFParser`（PyMuPDF）作为 fallback，输出格式与 BigModel 完全一致，但解析质量可能略有差异
-10. **跨产品外设变体**：同一个外设/寄存器出现在多个产品手册中时，`doc_properties` 保存每个文档的原始属性快照，全局图的 `properties` 仍为合并后值。查询时通过 `doc_id` 参数获取指定产品的精确属性。产品型号通过启发式正则从文档标题/文件名自动提取，支持 `WORKDOCS_PRODUCT_NAME` 手动覆盖
+10. **跨产品外设变体**：同一个外设/寄存器出现在多个产品手册中时，`doc_properties` 保存每个文档的原始属性快照，全局图的 `properties` 仍为合并后值。查询时通过 `doc_id` 参数获取指定产品的精确属性。产品型号通过启发式正则从文档标题/文件名自动提取
 
 ---
 

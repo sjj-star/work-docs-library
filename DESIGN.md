@@ -445,39 +445,61 @@ graph_query(entity_type="Product", name="TMS320F28379D")
 
 **权衡**：
 - 存储量增加：每个文档的每个实体多保存一份属性（通常 < 10K 实体，可接受）
-- 产品型号提取依赖启发式正则，可能误识别或漏识别，支持 `WORKDOCS_PRODUCT_NAME` 手动覆盖
+- 产品型号提取依赖启发式正则，可能误识别或漏识别
 
 ---
 
-## 18. 为什么 Pipeline 四阶段拆分？
+## 18. 为什么 Pipeline 六阶段拆分？
 
-**选择**：将 `DocGraphPipeline._process_one` 从三阶段（`stage1_parse` / `stage2_build_jsonl` / `stage3_ingest`）拆分为四阶段（`stage1_parse` / `stage2_build_jsonl` / `stage3_submit_batches` / `stage4_ingest_results`），其中 `stage3` 提交 Batch API 后将**原始结果文件保存到磁盘**，`stage4` 从磁盘读取结果并解析入库。
+**选择**：将 `DocGraphPipeline._process_one` 从三阶段（`stage1_parse` / `stage2_build_jsonl` / `stage3_ingest`）拆分为六阶段（`stage1_parse` / `stage2_build_jsonl` / `stage3_submit_batches` / `stage4_ingest_results` / `stage5_build_embed_jsonl` / `stage6_submit_embed_batches`），其中 `stage3` 提交 LLM Batch API 后将**原始结果文件保存到磁盘**，`stage4` 从磁盘读取结果并解析入库（**不含向量化**），`stage5` 本地构建 Embedding Batch JSONL，`stage6` 提交 Embedding Batch API 完成向量化。
 
 **原因**：
 - **中间产物可审计**：`knowledge_base/batch/{doc_id}_results.jsonl` 包含 LLM 的原始 JSON 返回，可用于调试提取质量、审计 LLM 行为
-- **阶段可独立执行**：stage3（API 调用，产生费用和延迟）与 stage4（本地解析入库，零成本）解耦。用户可以在 stage3 完成后审查结果，再决定是否执行 stage4
-- **失败可重试**：stage4 入库失败（如数据库锁定、向量化异常）时，无需重新调用 Batch API（避免重复付费和排队），直接重试 stage4 即可
-- **结果可编辑**：用户可手动修改 `results.jsonl` 后重新执行 stage4，修正 LLM 提取错误而无需重新调 API
-- **向后兼容**：`stage3_ingest()` 保留原签名，内部委托给 `stage3_submit_batches` + `stage4_ingest_results`，现有调用方无需修改
+- **阶段可独立执行**：stage3（API 调用，产生费用和延迟）与 stage4/5/6（本地处理，零成本）解耦。用户可以在 stage3 完成后审查结果，再决定是否执行 stage4
+- **失败可重试**：stage4 入库失败（如数据库锁定）时，无需重新调用 Batch API（避免重复付费和排队），直接重试 stage4 即可；同理 stage6 向量化失败仅需重试 stage6
+- **结果可编辑**：用户可手动修改 `batch/{doc_id}.jsonl` 后重新执行 stage3（增量过滤仍会生效），或修改 `results.jsonl` 后重新执行 stage4，修正 LLM 提取错误而无需重新调 API
+- **向量化解耦**：stage4 完成后 chunks 状态为 `embedded`，知识图谱已可查询；stage5/stage6 独立执行向量化，不阻塞图谱使用
+- **向后兼容**：`stage3_ingest()` 保留原签名，内部委托给 `stage3_submit_batches` + `stage4_ingest_results` + `stage5_build_embed_jsonl` + `stage6_submit_embed_batches`，现有调用方无需修改
 
 **中间产物清单**：
 
-| 产物 | 路径 | 说明 |
-|------|------|------|
-| result.md | `parsed/{doc_id}/result.md` | 解析后的 Markdown（可人工编辑） |
-| requests.jsonl | `batch/{doc_id}.jsonl` | API 输入请求 |
-| batch_info.json | `batch/{doc_id}_batch_info.json` | request → chapter 映射 |
-| results.jsonl | `batch/{doc_id}_results.jsonl` | API 原始返回结果 |
-| 子图谱 | `graphs/{doc_id}.json` | 文档级图谱快照 |
+| 阶段 | 产物 | 路径 | 说明 |
+|------|------|------|------|
+| Stage 1 | result.md | `parsed/{doc_id}/result.md` | 解析后的 Markdown（可人工编辑） |
+| Stage 2 | requests.jsonl | `batch/{doc_id}.jsonl` | LLM Batch API 输入请求 |
+| Stage 2 | batch_info.json | `batch/{doc_id}_batch_info.json` | request → chapter 映射 |
+| Stage 3 | results.jsonl | `batch/{doc_id}_results.jsonl` | LLM Batch API 原始返回结果 |
+| Stage 3 | incremental.json | `batch/{doc_id}_incremental.json` | 增量分析摘要 + result.md hash |
+| Stage 4 | 子图谱 | `graphs/{doc_id}.json` | 文档级图谱快照 |
+| Stage 5 | embed.jsonl | `batch/{doc_id}_embed.jsonl` | Embedding Batch API 输入请求 |
+| Stage 5 | embed_map.json | `batch/{doc_id}_embed_map.json` | index → chunk_db_id 映射 |
+| Stage 6 | embed_results.jsonl | `batch/{doc_id}_embed_results.jsonl` | Embedding Batch API 原始返回 |
 
 **状态管理**：
 - `PROCESSING` → stage3 提交中
 - `BATCH_SUBMITTED` → stage3 完成，等待 stage4
-- `DONE` → stage4 完成
+- `embedded` → stage4 完成（chunks 已入库，图谱已构建，但未向量化）
+- `DONE` → stage6 完成（向量化已入库）
 
 **权衡**：
-- 磁盘占用增加：每个文档额外保存一个 results.jsonl（通常几 KB 到几十 MB）
-- stage3 和 stage4 之间需要保持 `result.md` 不变，否则增量分析结果可能不一致（修改 result.md 后应重新走 stage2→stage3）
+- 磁盘占用增加：每个文档额外保存 results.jsonl、incremental.json、embed.jsonl、embed_results.jsonl 等（通常总计几十 KB 到几十 MB）
+- stage3/stage4 之间需要保持 `result.md` 不变，否则增量分析结果可能不一致（修改 result.md 后应重新走 stage2→stage3）
+
+---
+
+## 20. 为什么 thinking 参数必须始终传递？
+
+**选择**：LLM Batch API 请求中无论 `LLM_THINKING_ENABLED` 配置为 `0` 还是 `1`，都在 body 中显式传递 `extra_body={"thinking": {"type": "enabled"/"disabled"}}`。
+
+**原因**：
+- **Kimi K2.6 等模型 thinking 默认开启**：如果不传递参数，模型始终使用 thinking 模式，用户配置 `thinking_enabled=0` 将无效
+- **显式控制**：`{"type": "disabled"}` 可可靠关闭 thinking，`{"type": "enabled"}` 可确保开启（配合 `keep: "all"` 可实现多轮推理连贯）
+- **Batch API 一致性**：同步对话客户端（`LLMChatClient`）和 Batch API 请求（`EntityExtractor._build_batch_requests()`）使用相同的参数传递逻辑
+
+**实现**：
+- `llm_chat_client.py`：`extra_body={"thinking": {"type": "enabled" if self.thinking_enabled else "disabled"}}`
+- `doc_graph_pipeline.py`：在 `_build_batch_requests()` 的 request body 中同样添加 `extra_body`
+- 用户编辑 `batch/{doc_id}.jsonl` 时若删除了 `extra_body`，stage3 读取后会自动补充
 
 ---
 
