@@ -26,6 +26,13 @@ import fitz
 from parsers.pdf_parser import PDFParser
 from PIL import Image
 
+try:
+    import tiktoken
+
+    _TIKTOKEN_ENC = tiktoken.get_encoding("cl100k_base")
+except Exception:
+    _TIKTOKEN_ENC = None
+
 from .batch_clients import BatchClient
 from .bigmodel_parser_client import BigModelParserClient
 from .config import Config
@@ -321,6 +328,62 @@ def split_text_by_paragraphs(text: str, max_len: int) -> list[str]:
     if not chunks:
         return [text]
     return chunks
+
+
+def _estimate_tokens(text: str) -> int:
+    """估算文本的 token 数.
+
+    优先使用 tiktoken（cl100k_base）本地计算；
+    未安装时回退到字符数 // 2（保守估计，对中文安全）.
+    """
+    if _TIKTOKEN_ENC is not None:
+        return len(_TIKTOKEN_ENC.encode(text))
+    return len(text) // 2
+
+
+def _split_for_embedding(text: str, max_tokens: int) -> list[str]:
+    """按语义边界切分文本，确保每段不超过 max_tokens.
+
+    切分策略（按优先级）：
+    1. 段落边界（保护代码块、HTML table、Markdown table）
+    2. 句子边界（标点 [.!?。！？] 后空格）
+    3. 若句子仍超长，记录 warning 并保留原样（由 API 错误处理）
+    """
+    # 第一步：段落切分，给 split_text_by_paragraphs 足够的字符空间
+    parts = split_text_by_paragraphs(text, max_tokens * 2)
+
+    result: list[str] = []
+    for part in parts:
+        if _estimate_tokens(part) <= max_tokens:
+            result.append(part)
+            continue
+
+        # 第二步：段落仍超长，按句子边界切分
+        sentences = re.split(r"(?<=[.!?。！？])\s+", part)
+        current = ""
+        current_tokens = 0
+        for s in sentences:
+            s = s.strip()
+            if not s:
+                continue
+            s_tokens = _estimate_tokens(s)
+            if current_tokens + s_tokens > max_tokens and current:
+                result.append(current)
+                current = s
+                current_tokens = s_tokens
+            else:
+                current = (current + " " + s).strip() if current else s
+                current_tokens += s_tokens
+
+        if current:
+            if _estimate_tokens(current) > max_tokens:
+                logger.warning(
+                    f"Embedding 文本仍超长，保留原样 | chars={len(current)} | "
+                    f"tokens={_estimate_tokens(current)} | max={max_tokens}"
+                )
+            result.append(current)
+
+    return result if result else [text]
 
 
 class BatchBuilder:
@@ -1413,32 +1476,59 @@ class DocGraphPipeline:
 
         texts, db_ids = zip(*reembed_pairs)
 
-        # 对超长 content 按段落边界切分
-        max_chars = Config.EMBED_BATCH_MAX_CHARS
+        # 对超长 content 按语义边界切分（token 驱动）
+        max_tokens = Config.EMBED_MAX_TOKENS_PER_REQUEST
         split_texts: list[str] = []
         split_id_map: list[int] = []
         for text, db_id in zip(texts, db_ids):
-            if len(text) <= max_chars:
+            if _estimate_tokens(text) <= max_tokens:
                 split_texts.append(text)
                 split_id_map.append(db_id)
             else:
-                parts = split_text_by_paragraphs(text, max_chars)
+                parts = _split_for_embedding(text, max_tokens)
                 for part in parts:
                     split_texts.append(part)
                     split_id_map.append(db_id)
 
-        # 构建 requests，每行 body.input 为字符串数组
+        # 构建 requests，按 token 数动态分组，同时受 EMBED_ARRAY_MAX_SIZE 硬上限约束
         requests: list[dict[str, Any]] = []
-        for i in range(0, len(split_texts), Config.EMBED_ARRAY_MAX_SIZE):
-            batch_texts = split_texts[i : i + Config.EMBED_ARRAY_MAX_SIZE]
+        current_batch: list[str] = []
+        current_tokens = 0
+        max_tokens = Config.EMBED_MAX_TOKENS_PER_REQUEST
+        max_array = Config.EMBED_ARRAY_MAX_SIZE
+        start_idx = 0
+
+        for text in split_texts:
+            tokens = _estimate_tokens(text)
+            if (current_tokens + tokens > max_tokens and current_batch) or len(
+                current_batch
+            ) >= max_array:
+                requests.append(
+                    {
+                        "custom_id": f"embed_{start_idx}",
+                        "method": "POST",
+                        "url": Config.EMBEDDING_BATCH_ENDPOINT,
+                        "body": {
+                            "model": Config.EMBEDDING_MODEL,
+                            "input": current_batch,
+                        },
+                    }
+                )
+                start_idx += len(current_batch)
+                current_batch = []
+                current_tokens = 0
+            current_batch.append(text)
+            current_tokens += tokens
+
+        if current_batch:
             requests.append(
                 {
-                    "custom_id": f"embed_{i}",
+                    "custom_id": f"embed_{start_idx}",
                     "method": "POST",
                     "url": Config.EMBEDDING_BATCH_ENDPOINT,
                     "body": {
                         "model": Config.EMBEDDING_MODEL,
-                        "input": batch_texts,
+                        "input": current_batch,
                     },
                 }
             )
@@ -1539,11 +1629,20 @@ class DocGraphPipeline:
                 f"Embedding BatchClient 不可用，降级到同步 EmbeddingClient | doc_id={doc_id}"
             )
             embedder = EmbeddingClient()
+            max_tokens = Config.EMBED_MAX_TOKENS_PER_REQUEST
             for ck in db_chunks:
                 if ck.id not in reembed_db_ids:
                     continue
-                emb = embedder.embed_single(ck.content)
-                all_items.append((ck.id, emb))
+                text = ck.content
+                if _estimate_tokens(text) > max_tokens:
+                    parts = _split_for_embedding(text, max_tokens)
+                    embeddings = embedder.embed(parts)
+                    dim = len(embeddings[0])
+                    avg_emb = [sum(e[i] for e in embeddings) / len(embeddings) for i in range(dim)]
+                    all_items.append((ck.id, avg_emb))
+                else:
+                    emb = embedder.embed_single(text)
+                    all_items.append((ck.id, emb))
             embedder.close()
 
         # 4. 统一写入 SQLite 和 FAISS
@@ -1755,7 +1854,9 @@ class DocGraphPipeline:
     ) -> str:
         """将图片文字化结果合并到 chunk 内容中.
 
-        按 chapter_title 过滤，只追加当前章节相关的图片描述。
+        按 chapter_title 过滤，将 content 中的 Markdown 图片引用
+        ``![img_id](path)`` 原位替换为 ``[img_id] description``；
+        对于没有 Markdown 引用但有 description 的图片，在末尾追加兜底。
         """
         if not image_descriptions:
             return content
@@ -1766,12 +1867,32 @@ class DocGraphPipeline:
         if not chapter_images:
             return content
 
-        parts = [content, "\n\n【图片内容】"]
+        # 1. 原位替换 Markdown 图片引用
         for d in chapter_images:
             img_id = d.get("image_id", "unknown")
             img_desc = d.get("description", "")
-            parts.append(f"[{img_id}] {img_desc}")
-        return "\n".join(parts)
+            content = re.sub(
+                rf"!\[{re.escape(img_id)}\]\([^)]*\)",
+                f"[{img_id}] {img_desc}",
+                content,
+            )
+
+        # 2. 兜底：未匹配到 Markdown 引用的图片在末尾追加
+        unmatched: list[dict[str, Any]] = []
+        for d in chapter_images:
+            img_id = d.get("image_id", "unknown")
+            if not re.search(rf"\[{re.escape(img_id)}\] ", content):
+                unmatched.append(d)
+
+        if unmatched:
+            parts = [content, "\n\n【图片内容】"]
+            for d in unmatched:
+                img_id = d.get("image_id", "unknown")
+                img_desc = d.get("description", "")
+                parts.append(f"[{img_id}] {img_desc}")
+            content = "\n".join(parts)
+
+        return content
 
     def close(self) -> None:
         """关闭资源."""

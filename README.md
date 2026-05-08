@@ -76,8 +76,8 @@ flowchart TB
 
     subgraph Stage5["阶段5: 构建 Embedding Batch JSONL"]
         S5A["SQLite chunks\n(status=embedded)"] --> S5B["查询无 embedding 的 chunks"]
-        S5B -->|段落边界切分\n超长 content| S5C["split_text_by_paragraphs()"]
-        S5C --> S5D["按 EMBED_ARRAY_MAX_SIZE\n分组构建数组 input"]
+        S5B -->|token 估算| S5C["_split_for_embedding()\n段落边界 → 句子 fallback"]
+        S5C --> S5D["按 token 数动态分组\n+ EMBED_ARRAY_MAX_SIZE 硬上限"]
         S5D --> S5E["{doc_id}_embed.jsonl"]
         S5D --> S5F["{doc_id}_embed_map.json\nindex → chunk_db_id 映射"]
     end
@@ -298,6 +298,11 @@ cp scripts/.env.example scripts/.env
 
 - **输入**: SQLite chunks（状态 `embedded` 且暂无 `metadata.embedding`）
 - **输出**: `batch/{doc_id}_embed.jsonl` + `batch/{doc_id}_embed_map.json`
+- **切分逻辑**: `_split_for_embedding()` 三级语义保护切分
+  1. **段落边界**：`split_text_by_paragraphs()` 保护代码块、HTML/Markdown 表格
+  2. **句子 fallback**：段落仍超长时按 `[.!?。！？]` 后空格切分
+  3. **兜底保留**：单句仍超长则记录 warning 后原样保留（宁可 API 报错也不破坏语义）
+- **分组逻辑**: `tiktoken` 本地估算 token 数，按 `EMBED_MAX_TOKENS_PER_REQUEST`（默认 3000）动态分组，同时受 `EMBED_ARRAY_MAX_SIZE`（默认 64）硬上限约束
 - **产物格式**: `embed.jsonl` 每行 body.input 是字符串数组（chunk content 列表）
 - **干预**: 编辑 `embed.jsonl`（删除不想向量化的 chunks）
 - **⚠️ 关键限制**:
@@ -430,8 +435,8 @@ Kimi CLI 通过 `plugin.json` 注册以下工具：
 | `WORKDOCS_EMBEDDING_MODEL` | `embedding.model` | `embedding-3` | 向量化模型 |
 | `WORKDOCS_EMBEDDING_DIMENSION` | `embedding.dimension` | `1024` | 向量维度 |
 | `WORKDOCS_EMBEDDING_BATCH_ENDPOINT` | `embedding.batch_endpoint` | `/v4/embeddings` | Embedding Batch API endpoint |
-| `WORKDOCS_EMBED_BATCH_MAX_CHARS` | `embedding.batch_max_chars` | `4000` | 每个 Embedding 请求单条最大字符数 |
 | `WORKDOCS_EMBED_BATCH_TIMEOUT` | `embedding.batch_timeout` | `3600` | Embedding Batch API 轮询超时（秒） |
+| `WORKDOCS_EMBED_MAX_TOKENS_PER_REQUEST` | `embedding.max_tokens_per_request` | `3000` | 单个 Embedding 请求总 token 上限（含数组内所有文本）。使用 tiktoken 本地估算，未安装时回退到字符数 // 2 |
 | `WORKDOCS_EMBED_MAX_RETRIES` | `embedding.max_retries` | `3` | Embedding 同步请求最大重试次数 |
 | `WORKDOCS_EMBED_RETRY_BACKOFF` | `embedding.retry_backoff` | `2` | Embedding 重试退避系数（秒） |
 | `WORKDOCS_EMBED_TIMEOUT` | `embedding.timeout` | `120` | Embedding 同步请求超时（秒） |

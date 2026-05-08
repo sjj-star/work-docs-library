@@ -388,8 +388,16 @@ class BatchClient(BaseBatchClient):
                 files = {"file": (file_path.name, f, self.upload_mime_type)}
             else:
                 files = {"file": (file_path.name, f)}
-            resp = self._post(self.files_url, files=files)
-        return resp["id"]
+            headers = {k: v for k, v in self.headers.items() if k.lower() != "content-type"}
+            resp = self._session.post(
+                self.files_url,
+                headers=headers,
+                files=files,
+                data={"purpose": "batch"},
+                timeout=120,
+            )
+            resp.raise_for_status()
+        return resp.json()["id"]
 
     def _create_batch(self, file_id: str) -> str:
         payload: dict[str, Any] = {
