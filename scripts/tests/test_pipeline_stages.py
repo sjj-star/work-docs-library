@@ -672,3 +672,126 @@ def test_stage3_ingest_all_nodes(patched_config, monkeypatch):
 
     sec2 = next(ck for ck in chunks if ck.chapter_title == "Section 2")
     assert "Section 2 content." in sec2.content
+
+
+# ---------------------------------------------------------------------------
+# tiktoken 与动态 token 分组测试
+# ---------------------------------------------------------------------------
+
+
+def test_estimate_tokens():
+    """_estimate_tokens 应正确估算 token 数（tiktoken 可用时）."""
+    from core.doc_graph_pipeline import _estimate_tokens
+
+    # "hello world" = 2 tokens in cl100k_base
+    assert _estimate_tokens("hello world") == 2
+    # 中文每个字约 1~2 tokens
+    assert _estimate_tokens("你好世界") >= 2
+
+
+def test_merge_image_descriptions_inline_replace(patched_config, monkeypatch):
+    """Markdown 图片引用应被原位替换为文字描述."""
+    _mock_external_clients(monkeypatch)
+    pipe = DocGraphPipeline()
+
+    content = "Some text.\n\n![img_001](images/page1.jpg)\n\nMore text."
+    descs = [
+        {
+            "image_id": "img_001",
+            "description": "A diagram",
+            "chapter_title": "Ch1",
+        }
+    ]
+    result = pipe._merge_image_descriptions(content, "Ch1", descs)
+    assert "![img_001](images/page1.jpg)" not in result
+    assert "[img_001] A diagram" in result
+    assert "More text." in result
+
+
+def test_merge_image_descriptions_fallback_append(patched_config, monkeypatch):
+    """没有 Markdown 引用的图片应在末尾追加."""
+    _mock_external_clients(monkeypatch)
+    pipe = DocGraphPipeline()
+
+    content = "Some text without image refs."
+    descs = [
+        {
+            "image_id": "img_002",
+            "description": "A chart",
+            "chapter_title": "Ch1",
+        }
+    ]
+    result = pipe._merge_image_descriptions(content, "Ch1", descs)
+    assert "【图片内容】" in result
+    assert "[img_002] A chart" in result
+
+
+def test_stage5_token_based_grouping(patched_config, monkeypatch):
+    """stage5_build_embed_jsonl 应按 token 数动态分组."""
+    _mock_external_clients(monkeypatch)
+    monkeypatch.setattr(Config, "EMBED_MAX_TOKENS_PER_REQUEST", 3)
+    monkeypatch.setattr(Config, "EMBED_ARRAY_MAX_SIZE", 100)
+
+    pipe = DocGraphPipeline()
+
+    # 直接插入测试 chunks（不触发字符切分）
+    from core.models import Chunk
+
+    chunks = [
+        Chunk(
+            doc_id="test_doc",
+            chunk_id="c1",
+            content="hello world",
+            chunk_type="text",
+            chapter_title="A",
+            metadata={},
+        ),
+        Chunk(
+            doc_id="test_doc",
+            chunk_id="c2",
+            content="foo bar",
+            chunk_type="text",
+            chapter_title="B",
+            metadata={},
+        ),
+    ]
+    for c in chunks:
+        pipe.db.insert_chunk(c)
+
+    embed_jsonl_path = pipe.stage5_build_embed_jsonl("test_doc")
+    lines = embed_jsonl_path.read_text(encoding="utf-8").strip().split("\n")
+    requests = [json.loads(line) for line in lines if line.strip()]
+
+    # 每个文本约 2 tokens，limit=3，应分成 2 个 requests
+    assert len(requests) == 2
+    assert requests[0]["custom_id"] == "embed_0"
+    assert requests[1]["custom_id"] == "embed_1"
+    # 验证 body.input 为数组
+    assert isinstance(requests[0]["body"]["input"], list)
+    assert len(requests[0]["body"]["input"]) == 1
+
+
+def test_split_for_embedding_paragraph_boundary():
+    """_split_for_embedding 应按段落边界切分超长文本."""
+    from core.doc_graph_pipeline import _split_for_embedding
+
+    text = "First paragraph here.\n\nSecond paragraph here."
+    parts = _split_for_embedding(text, max_tokens=3)
+    # 两个段落应被分开
+    assert len(parts) == 2
+    assert "First paragraph" in parts[0]
+    assert "Second paragraph" in parts[1]
+
+
+def test_split_for_embedding_sentence_fallback():
+    """单个段落超长时应按句子边界 fallback 切分."""
+    from core.doc_graph_pipeline import _estimate_tokens, _split_for_embedding
+
+    # 一个段落，两个句子。第一句 3 tokens，第二句 4 tokens
+    text = "Hello world. Foo bar baz."
+    parts = _split_for_embedding(text, max_tokens=4)
+    # 应切成至少 2 部分（句子级 fallback）
+    assert len(parts) >= 2
+    # 每部分不超过 4 tokens
+    for p in parts:
+        assert _estimate_tokens(p) <= 4

@@ -233,7 +233,8 @@
 - ✅ **属性索引优化**：`NetworkXGraphStore` 内部维护 `property_index`，`find_by_property()` 从 O(N) 降至 O(1)
 - ✅ **跨粒度桥接索引**：`_EntityChunkBridge` 机制层实现 `chunk_db_id ↔ (entity_type, entity_name)` 双向映射。`graph_provenance` 从 O(N) 暴力扫描优化为 O(1) 反向查询。`search_with_graph` / `get_content_with_entities` 重构为原子操作组合
 - ✅ **Pipeline 六阶段拆分**（中间产物持久化原则的具体实践）：`_process_one` 拆分为 `stage1_parse` / `stage2_build_jsonl` / `stage3_submit_batches` / `stage4_ingest_results` / `stage5_build_embed_jsonl` / `stage6_submit_embed_batches`，每个中间产物（result.md / requests.jsonl / batch_info.json / results.jsonl / 子图谱 JSON / embed.jsonl / embed_results.jsonl）均可独立执行、人为干预、重新执行
-- ✅ 296 个测试全部通过
+- ✅ **Embedding token-based 动态分组**：引入 `tiktoken` 为可选依赖，`stage5_build_embed_jsonl` 按 token 数动态分组（上限 3000），`_split_for_embedding` 实现段落→句子三级语义保护切分，彻底解决 BigModel Embedding-3 的 3072 tokens/request 超限问题
+- ✅ 302 个测试全部通过
 
 ### 下一阶段（精确到下一步）
 1. **可视化**：图谱可视化导出（Graphviz / D3.js）
@@ -283,7 +284,7 @@
 ### 核心原则
 - **Mock 优先**：所有涉及外部 API 的测试使用 Fake 客户端，**禁止调用真实 API**
 - **回归即修复**：任何导致测试失败的变更必须当场修复
-- **283 个测试用例必须全部通过**
+- **302 个测试用例必须全部通过**
 
 ### 测试文件清单
 | 测试文件 | 说明 |
@@ -357,8 +358,8 @@ config.json（用户持久化配置，项目根目录）
 | `WORKDOCS_EMBEDDING_MODEL` | `embedding.model` | `embedding-3` | 向量化模型 |
 | `WORKDOCS_EMBEDDING_DIMENSION` | `embedding.dimension` | `1024` | 向量维度 |
 | `WORKDOCS_EMBEDDING_BATCH_ENDPOINT` | `embedding.batch_endpoint` | `/v4/embeddings` | Embedding Batch API endpoint |
-| `WORKDOCS_EMBED_BATCH_MAX_CHARS` | `embedding.batch_max_chars` | `4000` | 每个 Embedding 请求单条最大字符数 |
 | `WORKDOCS_EMBED_BATCH_TIMEOUT` | `embedding.batch_timeout` | `3600` | Embedding Batch API 轮询超时（秒） |
+| `WORKDOCS_EMBED_MAX_TOKENS_PER_REQUEST` | `embedding.max_tokens_per_request` | `3000` | 单个 Embedding 请求总 token 上限（含数组内所有文本）。使用 tiktoken 本地估算，未安装时回退到字符数 // 2 |
 | `WORKDOCS_EMBED_MAX_RETRIES` | `embedding.max_retries` | `3` | Embedding 同步请求最大重试次数 |
 | `WORKDOCS_EMBED_RETRY_BACKOFF` | `embedding.retry_backoff` | `2` | Embedding 重试退避系数（秒） |
 | `WORKDOCS_EMBED_TIMEOUT` | `embedding.timeout` | `120` | Embedding 同步请求超时（秒） |
