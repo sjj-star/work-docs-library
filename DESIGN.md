@@ -306,21 +306,75 @@
 
 ---
 
+## 为什么需要 EntityChunkBridge 双向桥接索引？
+
+**选择**：在 `KnowledgeBaseService` 内部维护一个纯内存的 `_EntityChunkBridge`，建立 `chunk_db_id ↔ (entity_type, entity_name)` 的双向多对多映射。零 schema 变更、零数据模型变更，从 SQLite `chunk.metadata["extracted_entities"]` 构建。
+
+**原因**：
+- **补齐单向关联的缺失**：原有架构中 chunk → entity 的关联已存在（通过 `metadata.extracted_entities`），但 entity → chunk 的反向查询缺失。`graph_provenance` 此前通过逐文档遍历所有 chunks 做暴力扫描（O(N)），不可扩展
+- **打通不同粒度空间**：FAISS 向量索引操作的是 chunk 粒度（文本片段 + embedding），NetworkX 图谱操作的是 entity 粒度（结构化实体 + 关系）。桥接索引使两者可以双向导航
+- **支持策略层灵活组合**：机制层只提供原子操作（`_chunk_to_entities` / `_entity_to_chunks` / `_get_chunk` / `_semantic_hits` / `_get_subgraph`），策略层可自由组合出任意跨粒度查询（语义→图谱→语义闭环、路径文本证据链等）
+
+**实现**：
+```python
+_forward:  dict[int, set[_EntityRef]]     # chunk_id → {EntityRef}
+_reverse:  dict[_EntityRef, set[int]]     # EntityRef → {chunk_id}
+```
+
+**生命周期**：
+- `KnowledgeBaseService.__init__` → `bridge.rebuild()` 全量构建
+- `ingest_document` / `reprocess_document` 完成后 → `_sync_bridge_for_doc()` 增量同步
+- `attach()` 幂等设计：同一 chunk 重复 attach 会先 detach 旧绑定，避免索引累积
+- `detach()` 双向清理：同时清除 `_forward` 和 `_reverse`，空集合自动删除
+
+**不同粒度关联矩阵**：
+
+| 方向 | 粒度 | 已有/新增 | 机制 |
+|------|------|----------|------|
+| chunk → entity | 向量→图谱 | 已有 | `metadata.extracted_entities` |
+| entity → chunk | 图谱→向量 | **新增** | `_entity_to_chunks()` O(1) |
+| document → entity | 文档→图谱 | 已有 | `GraphEntity.source_doc_ids` |
+| entity → document | 图谱→文档 | 已有 | `GraphEntity.source_doc_ids` |
+| chapter → entity | 章节→图谱 | 已有 | `GraphEntity.source_chapter` |
+| chunk → subgraph | 向量→子图 | 已有 | `search_with_graph()` |
+| subgraph → chunk | 子图→向量 | **可组合** | 子图实体 → `_entity_to_chunks()` |
+
+**权衡**：
+- 内存索引，重启需重建（但 `KnowledgeBaseService` 为长生命周期单例，初始化成本可忽略：几百文档 × 几十实体）
+- 不解决"实体级语义搜索"（如搜索 "GPIO" 也匹配 "General Purpose Input Output"），那是实体 embedding 的范畴，不在本次机制设计范围内
+
+---
+
 ## 联合查询与 Agent 自主推理
 
-**设计**：`search_with_graph()` 实现语义搜索与图谱查询的联合。
+**设计**：`search_with_graph()` 使用原子操作组合实现语义搜索与图谱查询的联合。
 
-**流程**：
-1. FAISS 语义搜索 → top_k 个最相关 chunk
-2. 读取 chunk `metadata` 中缓存的 `extracted_entities`
-3. 对每个实体在全局图上做 `get_subgraph(center, graph_depth)` 扩展
-4. 返回 `{chunks, related_entities, subgraphs}`
+**原子操作层（机制，无策略参数）**：
+- `_semantic_hits(query, top_k)` → FAISS 搜索，返回 `[(chunk_db_id, score), ...]`
+- `_get_chunk(chunk_db_id)` → 深拷贝获取 Chunk 对象
+- `_chunk_to_entities(chunk_db_id)` → 桥接索引正向查询，返回 `set[_EntityRef]`
+- `_entity_to_chunks(entity_type, name)` → 桥接索引反向查询，返回 `set[chunk_db_id]`
+- `get_entity(type, name)` / `get_subgraph(type, name, depth)` → 图谱空间查询
 
-**chunk+实体联合返回**：`get_content_with_entities(chunk_db_id)` 返回 chunk 内容 + 全局图中最新状态的关联实体/关系（而非 metadata 中的处理时快照）。
+**策略组合示例**：
+
+```
+search_with_graph（语义→图谱）:
+  _semantic_hits → _get_chunk → _chunk_to_entities → get_subgraph
+
+graph_provenance 优化（图谱→向量）:
+  _entity_to_chunks → _get_chunk（替换原有 O(N) 扫描）
+
+语义→图谱→语义闭环（可扩展策略）:
+  _semantic_hits → _chunk_to_entities → get_subgraph → 子图实体 _entity_to_chunks → _get_chunk
+```
+
+**chunk+实体联合返回**：`get_content_with_entities(chunk_db_id)` 使用 `_get_chunk` + `_chunk_to_entities` + `get_entity` + `get_entity_relations`，返回 chunk 内容 + 全局图中最新状态的关联实体/关系（深拷贝隔离）。
 
 **Agent 自主推理能力**：
 - Agent 可先用 `search_with_graph` 找到相关文本和图谱实体
 - 再用 `graph_neighbors`/`graph_path`/`graph_subgraph` 做多跳推理
+- 通过 `find_chunks_by_entity` 从任意实体反向查找支撑它的原始文本 chunks
 - 发现错误时用 `graph_feedback` 标记，`feedback_score` 实时汇总到实体属性
 - 发现缺失/错误关联时用 `graph_add_entity`/`graph_add_relation`/`graph_update_entity` 动态修正
 
