@@ -927,11 +927,10 @@ def tool_graph_provenance(params: dict) -> dict:
         doc = svc.get_document(src_doc_id)
         doc_title = doc.title if doc else src_doc_id
 
-        # 从 chunk metadata 查找提取该实体的 chunk
-        chunks = svc.db.query_by_doc(src_doc_id)
+        # 通过桥接索引反向查找包含该实体的 chunks（O(1) 而非 O(N) 扫描）
+        chunks = svc.find_chunks_by_entity(entity_type, name, doc_id=src_doc_id)
         for ck in chunks:
-            meta_entities = ck.metadata.get("extracted_entities", [])
-            for me in meta_entities:
+            for me in ck.metadata.get("extracted_entities", []):
                 if me.get("type") == entity_type and me.get("name") == name:
                     props_snapshot: dict[str, Any] = {}
                     if entity.doc_properties and src_doc_id in entity.doc_properties:

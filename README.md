@@ -70,6 +70,8 @@ flowchart TB
         S4C --> S4F["Product 实体提取\nHAS_MODULE 关系建立"]
         S4B --> S4G["_save_chunks_to_db()\n增量清理 + 插入 SQLite"]
         S4G --> S4H["chunk status: embedded"]
+        S4G --> S4I["metadata.extracted_entities
+缓存实体引用"]
     end
 
     subgraph Stage5["阶段5: 构建 Embedding Batch JSONL"]
@@ -113,10 +115,11 @@ flowchart TB
 1. **阶段1（解析）**：`BigModelParserClient` 调用 **BigModel 专用** Expert API 解析 PDF，输出 Markdown 文本（含 `![alt](images/xxx.jpg)` 图片引用）+ `images/` 目录（⚠️ 该 API 非 OpenAI-compatible，仅支持 BigModel 厂商；失败时自动 fallback 到本地 `PDFParser`，输出格式完全一致）
 2. **阶段2（构建 LLM Batch）**：`ChapterParser.parse_tree()` 将 Markdown 解析为树形章节结构（`#` 文档标题，`##` 章节，`###+` 子章节），`collect_all_nodes()` 递归收集所有有 content 的节点并附加完整标题路径前缀。`BatchBuilder.build_batches()` 按 `max_chars` 切分，超长内容按段落边界（`\n\n+`）切分为 sub-batch，同时保护代码块/表格不被截断。`EntityExtractor` 流式解析图片引用，按原文顺序构建 multimodal content（文本 → `[image_id: alt]` → base64 图片），生成 `{doc_id}.jsonl` + `{doc_id}_batch_info.json`
 3. **阶段3（提交 LLM Batch）**：**优先读取** `batch/{doc_id}.jsonl`（支持用户编辑后重新提交），结合 `batch/{doc_id}_batch_info.json` 做增量过滤，仅对变更/新增章节的 requests 提交 Batch API。超大 JSONL 自动按 100MB 拆分并行提交。结果保存为 `{doc_id}_results.jsonl`，增量摘要保存为 `{doc_id}_incremental.json` 供阶段4校验一致性
-4. **阶段4（解析入库，不含向量化）**：从 `results.jsonl` 解析 `entities`/`relationships`/`image_descriptions`，复用未变章节的缓存实体/关系。`GraphStore`（NetworkX）构建图谱，**同名同类型实体自动去重合并**，每个文档保存独立子图 `graphs/{doc_id}.json`。同时保存每个文档的原始属性快照到 `doc_properties[doc_id]`，支持按文档精确查询。提取产品型号建立 `Product --[HAS_MODULE]--> Module` 关系。chunks 写入 SQLite，状态设为 `embedded`
+4. **阶段4（解析入库，不含向量化）**：从 `results.jsonl` 解析 `entities`/`relationships`/`image_descriptions`，复用未变章节的缓存实体/关系。`GraphStore`（NetworkX）构建图谱，**同名同类型实体自动去重合并**，每个文档保存独立子图 `graphs/{doc_id}.json`。同时保存每个文档的原始属性快照到 `doc_properties[doc_id]`，支持按文档精确查询。提取产品型号建立 `Product --[HAS_MODULE]--> Module` 关系。chunks 写入 SQLite，状态设为 `embedded`；每个 chunk 的 `metadata.extracted_entities` 缓存该 chunk 中提及的实体引用，作为后续跨粒度桥接索引的唯一数据源
 5. **阶段5（构建 Embedding Batch）**：从 SQLite 查询状态为 `embedded` 且暂无 `metadata.embedding` 的 chunks，超长 content 按段落边界切分后，按 `EMBED_ARRAY_MAX_SIZE` 分组构建数组 input，生成 `{doc_id}_embed.jsonl` + `{doc_id}_embed_map.json`
 6. **阶段6（提交 Embedding Batch）**：提交 Embedding Batch API（默认 BigModel `embedding-3`），失败时降级到同步 `EmbeddingClient`。解析结果后统一写入 SQLite `metadata.embedding` + FAISS `IndexFlatIP`，chunk 状态更新为 `done`
-7. **全局图谱重建**：`KnowledgeBaseService.ingest_document()` 完成后**全量重建**全局图 `graphs/global.json`（`clear()` + 遍历所有子图重新加载），确保无幽灵残留，实现**跨文档知识互通**
+7. **跨粒度桥接索引**：`KnowledgeBaseService` 内部维护 `_EntityChunkBridge`，在 `__init__` 时从所有 chunks 的 `metadata.extracted_entities` 全量构建 `chunk_db_id ↔ (entity_type, entity_name)` 双向映射。`ingest_document` / `reprocess_document` 完成后自动同步。提供 O(1) 的正向查询（chunk→entities）和反向查询（entity→chunks），打通向量空间与图谱空间
+8. **全局图谱重建**：`KnowledgeBaseService.ingest_document()` 完成后**全量重建**全局图 `graphs/global.json`（`clear()` + 遍历所有子图重新加载），确保无幽灵残留，实现**跨文档知识互通**
 
 ### 输入文档约束
 
@@ -378,7 +381,7 @@ Kimi CLI 通过 `plugin.json` 注册以下工具：
 | `graph_delete_relation` | 删除关系 |
 | `graph_feedback` | 提交（`action=submit`）或查询（`action=query`）对实体/关系的反馈 |
 | `graph_conflicts` | 查询冲突日志 |
-| `graph_provenance` | 实体来源溯源：从图谱实体追溯到原始文档 chunk（调试与验证） |
+| `graph_provenance` | 实体来源溯源：从图谱实体通过桥接索引 O(1) 反向查找原始文档 chunk（调试与验证） |
 | `rebuild_global_graph` | 全量重建全局图谱（修复不一致） |
 | `config` | 打印当前生效配置（支持脱敏） |
 
@@ -467,7 +470,7 @@ Kimi CLI 通过 `plugin.json` 注册以下工具：
 | `core/bigmodel_parser_client.py` | BigModel Expert 文件解析客户端（⚠️ BigModel 专用 API） |
 | `core/batch_clients.py` | BaseBatchClient + BatchClient（通用 OpenAI-compatible Batch API，含并行批处理与结果保存） |
 | `core/llm_chat_client.py` | LLM 对话客户端（辅助用途） |
-| `core/knowledge_base_service.py` | 统一服务层封装（DB + VectorIndex + GraphStore + Pipeline） |
+| `core/knowledge_base_service.py` | 统一服务层封装（DB + VectorIndex + GraphStore + Pipeline + `_EntityChunkBridge` 跨粒度桥接索引） |
 
 ### 数据模型与存储
 | 模块 | 职责 |
@@ -514,7 +517,7 @@ Kimi CLI 通过 `plugin.json` 注册以下工具：
 | `chapter_title` | 所属章节 |
 | `keywords` | JSON 列表：提取的关键词 |
 | `summary` | 章节摘要 |
-| `metadata` | JSON：嵌入向量、图片信息、content_hash、缓存的实体/关系等 |
+| `metadata` | JSON：嵌入向量、图片信息、content_hash、**`extracted_entities`**（chunk→实体映射，桥接索引唯一数据源）、缓存的关系等 |
 | `created_at` | 创建时间戳 |
 | `status` | `pending` → `embedded` → `done`（`ChunkStatus` StrEnum） |
 
@@ -544,7 +547,7 @@ cd /path/to/work-docs-library
 PYTHONPATH=scripts ./venv/bin/python -m pytest scripts/tests/ -v
 ```
 
-**当前状态：289 个测试全部通过。**
+**当前状态：296 个测试全部通过。**
 
 ### 常用测试文档
 

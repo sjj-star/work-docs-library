@@ -22,8 +22,9 @@
 | **零数据丢失** | 技术文档信息密度高，任何截断/过滤都可能导致关键寄存器/信号丢失 |
 | **树形章节解析** | 按 Markdown 标题层级拆分是唯一允许的结构性拆分；禁止基于内容相关性的过滤 |
 | **Multimodal 图片流式处理** | 图片（时序图、架构框图）是文档语义不可分割的一部分，必须按原文顺序嵌入文档流 |
-| **SQLite + FAISS** | 单用户、本地部署、零运维；FAISS IndexFlatIP 经 L2 归一化后等效于余弦相似度 |
+| **SQLite + FAISS + NetworkX** | 单用户、本地部署、零运维；FAISS IndexFlatIP 经 L2 归一化后等效于余弦相似度 |
 | **Prompt 外部化** | 所有 LLM 提示词在 `scripts/prompts/*.txt` 中，用户可编辑，无需改代码 |
+| **EntityChunkBridge 跨粒度桥接** | 零 schema 变更的内存双向索引 `chunk_db_id ↔ (entity_type, entity_name)`，打通向量空间与图谱空间，支持 O(1) 双向导航 |
 | **config.json + .env 双轨配置** | `config.json` 存非敏感参数（模型、端点），`.env` 存 API Key；三层优先级（环境变量 > config.json > .env > 默认值） |
 
 ---
@@ -230,8 +231,9 @@
 - ✅ **多文档类型图谱扩展**：新增 `Document`/`Pin`/`Package`/`ElectricalSpec`/`ApplicationDomain`/`OrderingInfo`/`Advisory`/`Workaround`/`SiliconRevision`/`UsageNote`/`Protocol`/`ProtocolLayer`/`TransactionType`/`Channel`/`MessageField`/`StateMachine`/`State`/`Transition`/`Function`/`DataStructure`/`Section`/`CodeExample` 等实体类型，以及 `SUPERSEDES`/`EXTENDS`/`AFFECTS`/`HAS_WORKAROUND`/`CORRECTS`/`DEFINES_TRANSACTION`/`USES_CHANNEL`/`HAS_STATE`/`TRANSITIONS_FROM`/`TRANSITIONS_TO`/`TRIGGERED_BY` 等关系类型，覆盖 Datasheet/Errata/Protocol Spec/ISA Manual/App Note/SW Dev Manual 六种文档类型的核心结构
 - ✅ **跨产品外设变体建模**：`GraphEntity`/`GraphRelation` 新增 `doc_properties` 字段，保存每个文档的原始属性快照；引入 `Product` 实体类型，文档解析时自动提取产品型号并建立 `Product --[HAS_MODULE]--> Module` 关系；查询接口支持 `doc_id` 参数以获取指定文档的原始属性
 - ✅ **属性索引优化**：`NetworkXGraphStore` 内部维护 `property_index`，`find_by_property()` 从 O(N) 降至 O(1)
+- ✅ **跨粒度桥接索引**：`_EntityChunkBridge` 机制层实现 `chunk_db_id ↔ (entity_type, entity_name)` 双向映射。`graph_provenance` 从 O(N) 暴力扫描优化为 O(1) 反向查询。`search_with_graph` / `get_content_with_entities` 重构为原子操作组合
 - ✅ **Pipeline 六阶段拆分**（中间产物持久化原则的具体实践）：`_process_one` 拆分为 `stage1_parse` / `stage2_build_jsonl` / `stage3_submit_batches` / `stage4_ingest_results` / `stage5_build_embed_jsonl` / `stage6_submit_embed_batches`，每个中间产物（result.md / requests.jsonl / batch_info.json / results.jsonl / 子图谱 JSON / embed.jsonl / embed_results.jsonl）均可独立执行、人为干预、重新执行
-- ✅ 283 个测试全部通过
+- ✅ 296 个测试全部通过
 
 ### 下一阶段（精确到下一步）
 1. **可视化**：图谱可视化导出（Graphviz / D3.js）
