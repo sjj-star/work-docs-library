@@ -140,9 +140,8 @@ class Config:
     EMBED_MAX_RETRIES: int = 0  # 将在下方初始化
     EMBED_RETRY_BACKOFF: int = 0  # 将在下方初始化
     EMBED_TIMEOUT: int = 0  # 将在下方初始化
-    EMBED_ARRAY_MAX_SIZE: int = 0  # 将在下方初始化
     EMBED_BATCH_TIMEOUT: int = 0  # 将在下方初始化
-    EMBED_MAX_TOKENS_PER_REQUEST: int = 0  # 将在下方初始化
+    CHUNK_MAX_CHARS: int = 0  # 将在下方初始化
 
     # --- LLM 客户端参数 ---
     LLM_MAX_RETRIES: int = 0  # 将在下方初始化
@@ -214,17 +213,14 @@ class Config:
         cls.EMBED_TIMEOUT = int(
             _resolve_config("WORKDOCS_EMBED_TIMEOUT", "embedding.timeout", "120")
         )
-        cls.EMBED_ARRAY_MAX_SIZE = int(
-            _resolve_config("WORKDOCS_EMBED_ARRAY_MAX_SIZE", "embedding.array_max_size", "64")
-        )
         cls.EMBED_BATCH_TIMEOUT = int(
             _resolve_config("WORKDOCS_EMBED_BATCH_TIMEOUT", "embedding.batch_timeout", "3600")
         )
-        cls.EMBED_MAX_TOKENS_PER_REQUEST = int(
+        cls.CHUNK_MAX_CHARS = int(
             _resolve_config(
-                "WORKDOCS_EMBED_MAX_TOKENS_PER_REQUEST",
-                "embedding.max_tokens_per_request",
-                "3000",
+                "WORKDOCS_CHUNK_MAX_CHARS",
+                "chunk.max_chars",
+                "6000",
             )
         )
 

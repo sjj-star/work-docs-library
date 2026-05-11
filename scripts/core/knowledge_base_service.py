@@ -223,6 +223,7 @@ class KnowledgeBaseService:
         try:
             doc_ids = pipe.ingest(str(path), dry_run=dry_run, force=force)
             # 增量合并：只加载新导入的文档子图到全局图
+            failed_doc_ids: list[str] = []
             for doc_id in doc_ids:
                 graph_path = Config.DB_PATH.parent / Config.GRAPH_OUTPUT_DIR / f"{doc_id}.json"
                 if graph_path.exists():
@@ -231,11 +232,23 @@ class KnowledgeBaseService:
                         temp.load(graph_path)
                         self._merge_graph(temp)
                     except Exception as e:
+                        failed_doc_ids.append(doc_id)
                         logger.warning(f"加载子图失败 | path={graph_path} | error={e}")
+            if failed_doc_ids:
+                # 回滚本次 ingest 中已成功合并的子图，避免全局图部分合并
+                for doc_id in doc_ids:
+                    if doc_id not in failed_doc_ids:
+                        self.graph.remove_document_contributions(doc_id)
+                raise RuntimeError(f"部分子图加载失败，已回滚全局图变更: {failed_doc_ids}")
             self._save_global_graph()
-            # 同步 bridge 索引
+            # 同步 bridge 索引（失败时记录警告，重启后自动恢复）
             for doc_id in doc_ids:
-                self._sync_bridge_for_doc(doc_id)
+                try:
+                    self._sync_bridge_for_doc(doc_id)
+                except Exception as e:
+                    logger.warning(
+                        f"Bridge 同步失败，重启后自动恢复 | doc_id={doc_id} | error={e}"
+                    )
             return doc_ids
         finally:
             pipe.close()
@@ -308,8 +321,13 @@ class KnowledgeBaseService:
                     temp.load(graph_path)
                     self._merge_graph(temp)
                 self._save_global_graph()
-                # 同步 bridge 索引
-                self._sync_bridge_for_doc(doc_id)
+                # 同步 bridge 索引（失败时记录警告，重启后自动恢复）
+                try:
+                    self._sync_bridge_for_doc(doc_id)
+                except Exception as e:
+                    logger.warning(
+                        f"Bridge 同步失败，重启后自动恢复 | doc_id={doc_id} | error={e}"
+                    )
                 return result
             finally:
                 pipe.close()
@@ -466,7 +484,7 @@ class KnowledgeBaseService:
         返回深拷贝，避免修改内存中的全局图节点。
         """
         if doc_id and entity.doc_properties and doc_id in entity.doc_properties:
-            entity = copy.copy(entity)
+            entity = copy.deepcopy(entity)
             entity.properties = dict(entity.doc_properties[doc_id])
         return entity
 
@@ -606,9 +624,14 @@ class KnowledgeBaseService:
     def add_entity(self, entity: GraphEntity) -> list[dict]:
         """添加或更新实体. 返回冲突日志列表."""
         conflicts = self.graph.add_entity(entity)
-        if conflicts:
-            self.db.insert_conflict_logs(conflicts)
-        self._save_global_graph()
+        try:
+            self._save_global_graph()
+            if conflicts:
+                self.db.insert_conflict_logs(conflicts)
+        except Exception:
+            # 持久化失败时回滚内存图，避免重启后冲突日志指向不存在的变更
+            self.graph.delete_entity(entity.entity_type, entity.name)
+            raise
         return conflicts
 
     def update_entity(
@@ -638,9 +661,20 @@ class KnowledgeBaseService:
     def add_relation(self, relation) -> list[dict]:
         """添加或更新关系. 返回冲突日志列表."""
         conflicts = self.graph.add_relation(relation)
-        if conflicts:
-            self.db.insert_conflict_logs(conflicts)
-        self._save_global_graph()
+        try:
+            self._save_global_graph()
+            if conflicts:
+                self.db.insert_conflict_logs(conflicts)
+        except Exception:
+            # 持久化失败时回滚内存图
+            self.graph.delete_relation(
+                relation.from_type,
+                relation.from_name,
+                relation.to_type,
+                relation.to_name,
+                relation.rel_type,
+            )
+            raise
         return conflicts
 
     def update_relation(

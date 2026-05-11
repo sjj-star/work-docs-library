@@ -306,6 +306,76 @@
 
 ---
 
+## 16. Chunk 与 Sub-chunk 的生成链路
+
+### 概念定义
+
+| 术语 | 定义 | 示例 |
+|------|------|------|
+| **Chapter** | `ChapterParser` 按 Markdown 标题层级（`#`/`##`/`###`/`####`）解析出的树节点，包含 `title` 和 `content` | `{"title": "2.1 GPIO Configuration", "content": "..."}` |
+| **Chunk** | 数据库 `chunks` 表中的一行，是**内容存储和向量检索的最小单位** | `Chunk(chunk_id="ch_3", content="...", db_id=42)` |
+| **Sub-chunk** | 超长 chapter 被 `_maybe_split_chapter` 拆分后的产物，有自己的 `chunk_id` 和 `db_id` | `Chunk(chunk_id="ch_3_part_0", content="...前半", db_id=43)` |
+
+### 生成链路
+
+```
+PDF → Markdown → ChapterParser.parse_tree() → collect_all_nodes()
+    → _maybe_split_chapter() → _insert_chunk() → SQLite
+```
+
+1. **章节树**（`parse_tree()`）：按 `#`/`##`/`###`/`####` 构建多级树。`###` 级别的小节是"基本 chunk 单位"
+2. **扁平化**（`collect_all_nodes()`）：递归收集所有有 content 的节点，为每个节点附加从根到当前节点的完整标题路径前缀
+3. **拆分检查**（`_maybe_split_chapter()`）：
+   ```python
+   max_chars = Config.CHUNK_MAX_CHARS  # 默认 6000
+   if len(content) <= max_chars:
+       return [{**ch, "_chunk_id": f"ch_{base_idx}"}]        # 不拆分
+   parts = _split_for_embedding(content, max_chars)          # 按段落→句子切分
+   return [{**ch, "content": part, "_chunk_id": f"ch_{base_idx}_part_{i}"} for i, part in enumerate(parts)]
+   ```
+4. **入库**（`_insert_chunk()`）：每个 chunk/sub-chunk 成为数据库中的独立行
+
+### `_split_for_embedding` 的切分策略
+
+按优先级逐级 fallback：
+
+1. **段落边界**（`\n\n+`）：保护代码块、HTML table、Markdown table 不被截断
+2. **句子边界**（`[.!?。！？]\s+`）：标点后的空格是天然语义边界
+3. **保留原样**：若单个句子仍超长，记录 warning 并保留原样（由 API 错误处理兜底）
+
+### Sub-chunk 的继承与独立性
+
+Sub-chunk 继承父 chapter 的所有属性，但有自己的 `db_id`：
+
+| 属性 | 继承/独立 | 说明 |
+|------|----------|------|
+| `content` | **独立** | 拆分后的片段内容 |
+| `chunk_id` | **独立** | `ch_N_part_M` 格式 |
+| `db_id` | **独立** | SQLite 自增主键，FAISS 索引用它 |
+| `chapter_title` | 继承 | 与父 chapter 相同 |
+| `content_hash` | 继承 | 父 chapter 的 hash（用于增量更新比对） |
+| `extracted_entities` | 继承 | 父 chapter 缓存的实体引用 |
+| `extracted_relations` | 继承 | 父 chapter 缓存的关系 |
+| `image_descriptions` | 继承 | 父 chapter 合并后的图片描述 |
+
+### 为什么 Chunk 粒度 = 向量化粒度？
+
+数据库中的一行 = 一个向量化单位。这意味着：
+- 每个 chunk（包括 sub-chunk）独立向量化
+- sub-chunk 在 SQLite、FAISS、`_EntityChunkBridge` 中都是**一等公民**
+- 不存在"一个 chunk 对应多个向量"或"多个 chunk 合并为一个向量"的情况
+- 这彻底解决了早期版本中 batch 路径 split-chunk 未聚合导致 FAISS 重复向量的问题
+
+### `CHUNK_MAX_CHARS` 的设计意图
+
+`CHUNK_MAX_CHARS`（默认 6000）控制的是**单个 chunk 的最大字符数上限**：
+- 在 **stage4（入库阶段）** 决定 chapter 是否需要拆分
+- **向量化阶段只是下游消费方**，因为 chunk 已被拆分到合适大小
+- 默认值 6000 是基于项目实际处理的 PDF 技术文档文本分布的经验参数（自然语言+代码/LaTeX 混合内容约对应 2500-2800 actual tokens）
+- 纯数字/特殊字符密集的段落可能在此限制下仍超过 3072 tokens，但这是可接受的风险——API 调用失败时会记录错误，用户可手动调低该值
+
+---
+
 ## 为什么需要 EntityChunkBridge 双向桥接索引？
 
 **选择**：在 `KnowledgeBaseService` 内部维护一个纯内存的 `_EntityChunkBridge`，建立 `chunk_db_id ↔ (entity_type, entity_name)` 的双向多对多映射。零 schema 变更、零数据模型变更，从 SQLite `chunk.metadata["extracted_entities"]` 构建。
@@ -409,7 +479,7 @@ graph_provenance 优化（图谱→向量）:
 
 ---
 
-## 16. 为什么 PDF 解析使用 BigModel 专用 API？
+## 17. 为什么 PDF 解析使用 BigModel 专用 API？
 
 **选择**：PDF 解析主路径使用 `BigModelParserClient`，调用 BigModel (智谱) 专有的 Expert 文件解析 API（`/files/parser/create` + `/files/parser/result`）。
 
@@ -433,7 +503,7 @@ graph_provenance 优化（图谱→向量）:
 
 ---
 
-## 19. 审计修复经验总结
+## 20. 审计修复经验总结
 
 **背景**：2026-04 代码审计发现 21 项缺陷（9 个 P0 数据损坏风险、7 个 P1 可靠性缺陷、5 个 P2 代码质量问题），已全部修复并通过 283 个测试验证。
 
@@ -475,7 +545,7 @@ graph_provenance 优化（图谱→向量）:
 
 ---
 
-## 17. 为什么引入 `doc_properties` 和 `Product` 实体？
+## 18. 为什么引入 `doc_properties` 和 `Product` 实体？
 
 **选择**：`GraphEntity`/`GraphRelation` 新增 `doc_properties: dict[str, dict[str, Any]]` 字段，同时引入 `Product` 实体类型。
 
@@ -503,7 +573,7 @@ graph_query(entity_type="Product", name="TMS320F28379D")
 
 ---
 
-## 18. 为什么 Pipeline 六阶段拆分？
+## 19. 为什么 Pipeline 六阶段拆分？
 
 **选择**：将 `DocGraphPipeline._process_one` 从三阶段（`stage1_parse` / `stage2_build_jsonl` / `stage3_ingest`）拆分为六阶段（`stage1_parse` / `stage2_build_jsonl` / `stage3_submit_batches` / `stage4_ingest_results` / `stage5_build_embed_jsonl` / `stage6_submit_embed_batches`），其中 `stage3` 提交 LLM Batch API 后将**原始结果文件保存到磁盘**，`stage4` 从磁盘读取结果并解析入库（**不含向量化**），`stage5` 本地构建 Embedding Batch JSONL，`stage6` 提交 Embedding Batch API 完成向量化。
 
@@ -541,7 +611,7 @@ graph_query(entity_type="Product", name="TMS320F28379D")
 
 ---
 
-## 20. 为什么 thinking 参数必须始终传递？
+## 21. 为什么 thinking 参数必须始终传递？
 
 **选择**：LLM Batch API 请求中无论 `LLM_THINKING_ENABLED` 配置为 `0` 还是 `1`，都在 body 中显式传递 `extra_body={"thinking": {"type": "enabled"/"disabled"}}`。
 

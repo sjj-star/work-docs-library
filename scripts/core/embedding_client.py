@@ -19,7 +19,6 @@ class EmbeddingClient:
     MAX_RETRY_ATTEMPTS = Config.EMBED_MAX_RETRIES
     RETRY_BACKOFF_BASE = Config.EMBED_RETRY_BACKOFF
     DEFAULT_TIMEOUT = Config.EMBED_TIMEOUT
-    MAX_ARRAY_SIZE = Config.EMBED_ARRAY_MAX_SIZE
 
     def __init__(
         self,
@@ -72,32 +71,27 @@ class EmbeddingClient:
         raise last_exc
 
     def embed(self, texts: list[str]) -> list[list[float]]:
-        """生成文本嵌入向量."""
+        """生成文本嵌入向量.
+
+        调用方负责控制每次传入的文本数量（当前所有调用方均传入单元素列表）。
+        """
         if not texts:
             return []
 
-        # 分批处理避免 API 限制
-        batch_size = self.MAX_ARRAY_SIZE
-        all_embeddings = []
+        # 构建请求数据
+        request_data = {"model": self.model, "input": texts}
 
-        for i in range(0, len(texts), batch_size):
-            batch_texts = texts[i : i + batch_size]
+        # 无条件添加 dimensions 参数
+        # 支持的 API 会生效，不支持的 API 会忽略
+        config_dim = int(Config.EMBEDDING_DIMENSION)
+        if config_dim > 0:
+            request_data["dimensions"] = config_dim
 
-            # 构建请求数据
-            request_data = {"model": self.model, "input": batch_texts}
+        data = self._post(self.embed_url, request_data)
 
-            # 无条件添加 dimensions 参数
-            # 支持的 API 会生效，不支持的 API 会忽略
-            config_dim = int(Config.EMBEDDING_DIMENSION)
-            if config_dim > 0:
-                request_data["dimensions"] = config_dim
-
-            data = self._post(self.embed_url, request_data)
-
-            items = data["data"]
-            items.sort(key=lambda x: x["index"])
-            batch_embeddings = [item["embedding"] for item in items]
-            all_embeddings.extend(batch_embeddings)
+        items = data["data"]
+        items.sort(key=lambda x: x["index"])
+        all_embeddings = [item["embedding"] for item in items]
 
         # 首次调用：验证维度
         if not self._dim_validated and all_embeddings:

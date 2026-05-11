@@ -20,11 +20,12 @@
     "dimension": null,
     "batch_endpoint": "",
     "batch_timeout": "",
-    "max_tokens_per_request": "",
     "max_retries": "",
     "retry_backoff": "",
-    "timeout": "",
-    "array_max_size": ""
+    "timeout": ""
+  },
+  "chunk": {
+    "max_chars": ""
   },
   "parser": {
     "api_key": "",

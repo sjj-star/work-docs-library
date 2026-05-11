@@ -26,13 +26,6 @@ import fitz
 from parsers.pdf_parser import PDFParser
 from PIL import Image
 
-try:
-    import tiktoken
-
-    _TIKTOKEN_ENC = tiktoken.get_encoding("cl100k_base")
-except Exception:
-    _TIKTOKEN_ENC = None
-
 from .batch_clients import BatchClient
 from .bigmodel_parser_client import BigModelParserClient
 from .config import Config
@@ -330,56 +323,44 @@ def split_text_by_paragraphs(text: str, max_len: int) -> list[str]:
     return chunks
 
 
-def _estimate_tokens(text: str) -> int:
-    """估算文本的 token 数.
-
-    优先使用 tiktoken（cl100k_base）本地计算；
-    未安装时回退到字符数 // 2（保守估计，对中文安全）.
-    """
-    if _TIKTOKEN_ENC is not None:
-        return len(_TIKTOKEN_ENC.encode(text))
-    return len(text) // 2
-
-
-def _split_for_embedding(text: str, max_tokens: int) -> list[str]:
-    """按语义边界切分文本，确保每段不超过 max_tokens.
+def _split_for_embedding(text: str, max_chars: int) -> list[str]:
+    """按语义边界切分文本，确保每段不超过 max_chars.
 
     切分策略（按优先级）：
     1. 段落边界（保护代码块、HTML table、Markdown table）
     2. 句子边界（标点 [.!?。！？] 后空格）
     3. 若句子仍超长，记录 warning 并保留原样（由 API 错误处理）
     """
-    # 第一步：段落切分，给 split_text_by_paragraphs 足够的字符空间
-    parts = split_text_by_paragraphs(text, max_tokens * 2)
+    # 第一步：段落切分
+    parts = split_text_by_paragraphs(text, max_chars * 2)
 
     result: list[str] = []
     for part in parts:
-        if _estimate_tokens(part) <= max_tokens:
+        if len(part) <= max_chars:
             result.append(part)
             continue
 
         # 第二步：段落仍超长，按句子边界切分
         sentences = re.split(r"(?<=[.!?。！？])\s+", part)
         current = ""
-        current_tokens = 0
+        current_chars = 0
         for s in sentences:
             s = s.strip()
             if not s:
                 continue
-            s_tokens = _estimate_tokens(s)
-            if current_tokens + s_tokens > max_tokens and current:
+            s_chars = len(s)
+            if current_chars + s_chars > max_chars and current:
                 result.append(current)
                 current = s
-                current_tokens = s_tokens
+                current_chars = s_chars
             else:
                 current = (current + " " + s).strip() if current else s
-                current_tokens += s_tokens
+                current_chars += s_chars
 
         if current:
-            if _estimate_tokens(current) > max_tokens:
+            if len(current) > max_chars:
                 logger.warning(
-                    f"Embedding 文本仍超长，保留原样 | chars={len(current)} | "
-                    f"tokens={_estimate_tokens(current)} | max={max_tokens}"
+                    f"Embedding 文本仍超长，保留原样 | chars={len(current)} | max_chars={max_chars}"
                 )
             result.append(current)
 
@@ -779,17 +760,8 @@ class DocGraphPipeline:
             logger.warning(f"LLM BatchClient 初始化失败: {e}")
             self.llm_batch = None
 
-        try:
-            self.embed_batch = BatchClient(
-                api_key=Config.EMBEDDING_API_KEY,
-                base_url=Config.EMBEDDING_BASE_URL,
-                batch_endpoint=Config.EMBEDDING_BATCH_ENDPOINT,
-                auto_delete_input_file=True,
-            )
-            logger.info("Embedding BatchClient 已初始化")
-        except RuntimeError as e:
-            logger.warning(f"Embedding BatchClient 初始化失败: {e}")
-            self.embed_batch = None
+        # Embedding 已改为同步 API，不再使用 BatchClient
+        self.embed_batch = None
 
         # 解析器（仅 PDF，Office 文件暂时不支持）
         self.parsers = {
@@ -799,7 +771,7 @@ class DocGraphPipeline:
         # 子组件
         self.chapter_parser = ChapterParser()
         self.entity_extractor = EntityExtractor(self.llm_batch)
-        self.embedding_batch_client = self.embed_batch
+        self.embedding_batch_client = None
 
     def scan(self, path: str) -> list[str]:
         """扫描文件."""
@@ -984,7 +956,7 @@ class DocGraphPipeline:
         force: bool = False,
     ) -> tuple[
         list[dict[str, Any]],
-        list[tuple[dict[str, Any], Chunk]],
+        list[tuple[dict[str, Any], list[Chunk]]],
         list[dict[str, Any]],
         list[dict[str, Any]],
         list[Chunk],
@@ -1010,8 +982,12 @@ class DocGraphPipeline:
         if old_doc:
             old_chunks = self.db.query_by_doc(old_doc.doc_id)
 
-        old_chunk_map = {ck.chapter_title: ck for ck in old_chunks}
-        unchanged: list[tuple[dict[str, Any], Chunk]] = []
+        from collections import defaultdict
+
+        old_chunk_map: dict[str, list[Chunk]] = defaultdict(list)
+        for ck in old_chunks:
+            old_chunk_map[ck.chapter_title].append(ck)
+        unchanged: list[tuple[dict[str, Any], list[Chunk]]] = []
         changed: list[dict[str, Any]] = []
         added: list[dict[str, Any]] = []
         removed: list[Chunk] = []
@@ -1020,18 +996,21 @@ class DocGraphPipeline:
             ch_hash = hashlib.md5(ch["content"].encode()).hexdigest()[:16]
             ch["content_hash"] = ch_hash
             if ch["title"] in old_chunk_map:
-                old_ck = old_chunk_map[ch["title"]]
-                old_hash = old_ck.metadata.get("content_hash", "")
-                if old_hash == ch_hash and not force:
-                    unchanged.append((ch, old_ck))
+                old_cks = old_chunk_map[ch["title"]]
+                # sub-chunks 共享 content_hash，只要有一个匹配即认为整个 chapter 未变
+                if any(
+                    old_ck.metadata.get("content_hash", "") == ch_hash
+                    for old_ck in old_cks
+                ) and not force:
+                    unchanged.append((ch, old_cks))
                 else:
                     changed.append(ch)
             else:
                 added.append(ch)
 
-        for title, old_ck in old_chunk_map.items():
+        for title, old_cks in old_chunk_map.items():
             if title not in {c["title"] for c in new_chapters_flat}:
-                removed.append(old_ck)
+                removed.extend(old_cks)
 
         logger.info(
             f"章节增量分析 | 未变={len(unchanged)} | "
@@ -1291,7 +1270,9 @@ class DocGraphPipeline:
         all_image_descriptions: list[dict[str, Any]] = []
 
         # 复用未变章节的实体缓存
-        for ch, old_ck in unchanged:
+        for ch, old_cks in unchanged:
+            # sub-chunks 共享相同的缓存元数据，从第一个取即可
+            old_ck = old_cks[0]
             cached_ents = old_ck.metadata.get("extracted_entities", [])
             cached_rels = old_ck.metadata.get("extracted_relations", [])
             cached_imgs = old_ck.metadata.get("image_descriptions", [])
@@ -1456,7 +1437,6 @@ class DocGraphPipeline:
         batch_dir = Config.DB_PATH.parent / "batch"
         batch_dir.mkdir(parents=True, exist_ok=True)
         embed_jsonl_path = batch_dir / f"{doc_id}_embed.jsonl"
-        embed_map_path = batch_dir / f"{doc_id}_embed_map.json"
 
         db_chunks = self.db.query_by_doc(doc_id)
         reembed_pairs: list[tuple[str, int]] = []
@@ -1470,65 +1450,20 @@ class DocGraphPipeline:
 
         if not reembed_pairs:
             embed_jsonl_path.write_text("", encoding="utf-8")
-            embed_map_path.write_text("[]", encoding="utf-8")
             logger.info(f"所有 chunk 已有 embedding，生成空 JSONL | path={embed_jsonl_path}")
             return embed_jsonl_path
 
-        texts, db_ids = zip(*reembed_pairs)
-
-        # 对超长 content 按语义边界切分（token 驱动）
-        max_tokens = Config.EMBED_MAX_TOKENS_PER_REQUEST
-        split_texts: list[str] = []
-        split_id_map: list[int] = []
-        for text, db_id in zip(texts, db_ids):
-            if _estimate_tokens(text) <= max_tokens:
-                split_texts.append(text)
-                split_id_map.append(db_id)
-            else:
-                parts = _split_for_embedding(text, max_tokens)
-                for part in parts:
-                    split_texts.append(part)
-                    split_id_map.append(db_id)
-
-        # 构建 requests，按 token 数动态分组，同时受 EMBED_ARRAY_MAX_SIZE 硬上限约束
+        # 构建 requests，每个 request 包含单个文本，custom_id 直接编码 db_id
         requests: list[dict[str, Any]] = []
-        current_batch: list[str] = []
-        current_tokens = 0
-        max_tokens = Config.EMBED_MAX_TOKENS_PER_REQUEST
-        max_array = Config.EMBED_ARRAY_MAX_SIZE
-        start_idx = 0
-
-        for text in split_texts:
-            tokens = _estimate_tokens(text)
-            if (current_tokens + tokens > max_tokens and current_batch) or len(
-                current_batch
-            ) >= max_array:
-                requests.append(
-                    {
-                        "custom_id": f"embed_{start_idx}",
-                        "method": "POST",
-                        "url": Config.EMBEDDING_BATCH_ENDPOINT,
-                        "body": {
-                            "model": Config.EMBEDDING_MODEL,
-                            "input": current_batch,
-                        },
-                    }
-                )
-                start_idx += len(current_batch)
-                current_batch = []
-                current_tokens = 0
-            current_batch.append(text)
-            current_tokens += tokens
-
-        if current_batch:
+        for text, db_id in reembed_pairs:
             requests.append(
                 {
-                    "custom_id": f"embed_{start_idx}",
+                    "custom_id": f"embed_dbid_{db_id}",
                     "method": "POST",
                     "url": Config.EMBEDDING_BATCH_ENDPOINT,
                     "body": {
                         "model": Config.EMBEDDING_MODEL,
-                        "input": current_batch,
+                        "input": text,
                     },
                 }
             )
@@ -1536,10 +1471,9 @@ class DocGraphPipeline:
         from core.batch_clients import _build_jsonl
 
         _build_jsonl(requests, embed_jsonl_path)
-        embed_map_path.write_text(json.dumps(split_id_map), encoding="utf-8")
         logger.info(
             f"Embedding JSONL 已生成 | path={embed_jsonl_path} | "
-            f"chunks={len(split_texts)} | requests={len(requests)}"
+            f"chunks={len(reembed_pairs)} | requests={len(requests)}"
         )
         return embed_jsonl_path
 
@@ -1561,9 +1495,6 @@ class DocGraphPipeline:
         if embed_jsonl_path is None:
             embed_jsonl_path = batch_dir / f"{doc_id}_embed.jsonl"
 
-        results_path = batch_dir / f"{doc_id}_embed_results.jsonl"
-        embed_map_path = batch_dir / f"{doc_id}_embed_map.json"
-
         # 1. 收集复用 embedding
         db_chunks = self.db.query_by_doc(doc_id)
         all_items: list[tuple[int, list[float]]] = []
@@ -1582,73 +1513,52 @@ class DocGraphPipeline:
                 self.db.update_chunk_status(ck.id, "done")
             return doc_id
 
-        # 2. 提交 Batch API 或降级到同步 API
+        # 2. 从 JSONL 读取并同步向量化
         if not embed_jsonl_path.exists() or embed_jsonl_path.stat().st_size == 0:
-            logger.warning(f"Embedding JSONL 为空，跳过 API 提交 | path={embed_jsonl_path}")
-        elif self.embedding_batch_client:
+            logger.warning(f"Embedding JSONL 为空，跳过向量化 | path={embed_jsonl_path}")
+        else:
             from core.batch_clients import _parse_jsonl
 
             requests = _parse_jsonl(embed_jsonl_path.read_text(encoding="utf-8"))
             if requests:
-                logger.info(f"提交 Embedding Batch | requests={len(requests)}")
-                if results_path.exists():
-                    results_path.unlink()
-                results = self.embedding_batch_client.submit_parallel_batches(
-                    requests,
-                    output_path=results_path,
-                    timeout=Config.EMBED_BATCH_TIMEOUT,
-                )
-                logger.info(f"Embedding Batch 完成 | results={len(results)}")
-
-                # 3. 解析结果
-                if embed_map_path.exists():
-                    split_id_map = json.loads(embed_map_path.read_text(encoding="utf-8"))
-                else:
-                    split_id_map = list(reembed_db_ids)
-
-                for result in results:
-                    custom_id = result.get("custom_id", "")
-                    idx_str = custom_id.split("_")[1] if "_" in custom_id else "0"
+                logger.info(f"同步 Embedding | requests={len(requests)} | doc_id={doc_id}")
+                embedder = EmbeddingClient()
+                for req in requests:
+                    custom_id = req.get("custom_id", "")
+                    # custom_id 格式: embed_dbid_{db_id}
                     try:
-                        start_idx = int(idx_str)
-                    except ValueError:
-                        start_idx = 0
-
-                    body = result.get("response", {}).get("body", {})
-                    data_list = body.get("data", [])
-                    for item in data_list:
-                        arr_idx = item.get("index", 0)
-                        embedding = item.get("embedding", [])
-                        global_idx = start_idx + arr_idx
-                        if 0 <= global_idx < len(split_id_map):
-                            db_id = split_id_map[global_idx]
-                            all_items.append((db_id, embedding))
-        else:
-            # fallback: 同步 EmbeddingClient
-            logger.info(
-                f"Embedding BatchClient 不可用，降级到同步 EmbeddingClient | doc_id={doc_id}"
-            )
-            embedder = EmbeddingClient()
-            max_tokens = Config.EMBED_MAX_TOKENS_PER_REQUEST
-            for ck in db_chunks:
-                if ck.id not in reembed_db_ids:
-                    continue
-                text = ck.content
-                if _estimate_tokens(text) > max_tokens:
-                    parts = _split_for_embedding(text, max_tokens)
-                    embeddings = embedder.embed(parts)
-                    dim = len(embeddings[0])
-                    avg_emb = [sum(e[i] for e in embeddings) / len(embeddings) for i in range(dim)]
-                    all_items.append((ck.id, avg_emb))
-                else:
+                        db_id = int(custom_id.split("_")[-1])
+                    except (ValueError, IndexError):
+                        logger.warning(f"无法从 custom_id 解析 db_id | custom_id={custom_id}")
+                        continue
+                    text = req.get("body", {}).get("input", "")
+                    if not text:
+                        logger.warning(f"JSONL request 中 input 为空 | custom_id={custom_id}")
+                        continue
                     emb = embedder.embed_single(text)
-                    all_items.append((ck.id, emb))
-            embedder.close()
+                    all_items.append((db_id, emb))
+                embedder.close()
 
-        # 4. 统一写入 SQLite 和 FAISS
+        # 4. 统一写入 SQLite 和 FAISS（带失败回滚）
         if all_items:
             self.db.update_chunks_embedded_batch(all_items)
-            self.vec.add_batch(all_items)
+            try:
+                self.vec.add_batch(all_items)
+            except Exception as e:
+                logger.error(
+                    f"FAISS 添加失败，回滚 SQLite embedding | doc_id={doc_id} | error={e}"
+                )
+                for chunk_db_id, _ in all_items:
+                    ck = self.db.get_chunk_by_db_id(chunk_db_id)
+                    if ck:
+                        meta = ck.metadata.copy()
+                        meta.pop("embedding", None)
+                        with self.db._connect() as conn:
+                            conn.execute(
+                                "UPDATE chunks SET metadata = ?, status = 'embedded' WHERE id = ?",
+                                (json.dumps(meta, ensure_ascii=False), chunk_db_id),
+                            )
+                raise
 
         # 5. 更新状态为 done
         for ck in db_chunks:
@@ -1745,7 +1655,7 @@ class DocGraphPipeline:
         file_hash: str,
         chapters: list[dict[str, Any]],
         full_text: str,
-        unchanged: list[tuple[dict[str, Any], Chunk]] | None = None,
+        unchanged: list[tuple[dict[str, Any], list[Chunk]]] | None = None,
         changed: list[dict[str, Any]] | None = None,
         added: list[dict[str, Any]] | None = None,
         removed: list[Chunk] | None = None,
@@ -1778,15 +1688,12 @@ class DocGraphPipeline:
             """构建 chunk metadata，包含缓存的实体/关系/embedding."""
             ch_ents = [e for e in entity_dicts if e.get("source_chapter") == ch_title]
             ch_ent_keys = {(e.get("type", ""), e.get("name", "")) for e in ch_ents}
-            # 按章节过滤关系：保留 from 或 to 在当前章节实体列表中的关系
-            # 使用 (type, name) 元组避免跨类型同名污染
             ch_rels = [
                 r
                 for r in relation_dicts
                 if (r.get("from_type", ""), r.get("from", "")) in ch_ent_keys
                 or (r.get("to_type", ""), r.get("to", "")) in ch_ent_keys
             ]
-            # 按章节过滤图片描述
             ch_images = [img for img in image_descriptions if img.get("chapter_title") == ch_title]
             meta: dict[str, Any] = {
                 "content_hash": ch_hash,
@@ -1801,13 +1708,26 @@ class DocGraphPipeline:
         # 3. 插入所有新 chunks
         chunk_db_ids: list[int] = []
 
+        def _maybe_split_chapter(ch: dict[str, Any], base_idx: int) -> list[dict[str, Any]]:
+            """如果 chapter content 超过向量化限制，拆分为多个 sub-chapters."""
+            content = ch["content"]
+            max_chars = Config.CHUNK_MAX_CHARS
+            if len(content) <= max_chars:
+                return [{**ch, "_chunk_id": f"ch_{base_idx}"}]
+            parts = _split_for_embedding(content, max_chars)
+            return [
+                {**ch, "content": part, "_chunk_id": f"ch_{base_idx}_part_{i}"}
+                for i, part in enumerate(parts)
+            ]
+
         def _insert_chunk(ch: dict[str, Any], ch_hash: str, old_ck: Chunk | None) -> int:
             merged = self._merge_image_descriptions(
                 ch["content"], ch.get("title", ""), image_descriptions
             )
+            chunk_id = ch.get("_chunk_id", f"ch_{len(chunk_db_ids)}")
             ck = Chunk(
                 doc_id=doc_id,
-                chunk_id=f"ch_{len(chunk_db_ids)}",
+                chunk_id=chunk_id,
                 content=merged,
                 chunk_type="text",
                 chapter_title=ch["title"],
@@ -1817,12 +1737,25 @@ class DocGraphPipeline:
             chunk_db_ids.append(db_id)
             return db_id
 
-        for ch, old_ck in unchanged:
-            _insert_chunk(ch, ch["content_hash"], old_ck)
+        for ch, old_cks in unchanged:
+            base_idx = len(chunk_db_ids)
+            subs = _maybe_split_chapter(ch, base_idx)
+            # 只有当新旧 sub-chunk 数量一致时才按索引复用 embedding
+            # （_split_for_embedding 是确定性函数，content_hash 不变则拆分结果不变）
+            if old_cks and len(subs) == len(old_cks):
+                for sub, old_ck in zip(subs, old_cks):
+                    _insert_chunk(sub, sub["content_hash"], old_ck)
+            else:
+                for sub in subs:
+                    _insert_chunk(sub, sub["content_hash"], None)
         for ch in changed:
-            _insert_chunk(ch, ch["content_hash"], None)
+            base_idx = len(chunk_db_ids)
+            for sub in _maybe_split_chapter(ch, base_idx):
+                _insert_chunk(sub, sub["content_hash"], None)
         for ch in added:
-            _insert_chunk(ch, ch["content_hash"], None)
+            base_idx = len(chunk_db_ids)
+            for sub in _maybe_split_chapter(ch, base_idx):
+                _insert_chunk(sub, sub["content_hash"], None)
 
         if not chapters:
             merged = self._merge_image_descriptions(full_text, "", image_descriptions)
@@ -1900,5 +1833,3 @@ class DocGraphPipeline:
             self.parser_client = None
         if self.llm_batch:
             self.llm_batch.close()
-        if self.embedding_batch_client:
-            self.embedding_batch_client.close()
