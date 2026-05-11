@@ -34,7 +34,6 @@ def patched_config(monkeypatch, tmp_path):
     monkeypatch.setattr(Config, "DB_PATH", kb / "workdocs.db")
     monkeypatch.setattr(Config, "FAISS_INDEX_PATH", kb / "faiss.index")
     monkeypatch.setattr(Config, "ID_MAP_PATH", kb / "id_map.json")
-    monkeypatch.setattr(Config, "EMBED_ARRAY_MAX_SIZE", 2)
     monkeypatch.setattr(Config, "EMBEDDING_DIMENSION", 4)
     monkeypatch.setattr(Config, "EMBEDDING_BASE_URL", "https://api.openai.com/v1")
     monkeypatch.setattr(Config, "LLM_BASE_URL", "https://api.openai.com/v1")
@@ -52,6 +51,10 @@ class FakeEmbedder:
     def embed(self, texts):
         """Embed 函数."""
         return [[1.0, 0.0, 0.0, 0.0] for _ in texts]
+
+    def embed_single(self, text):
+        """embed_single 函数."""
+        return [1.0, 0.0, 0.0, 0.0]
 
     def get_embedding_dimension(self):
         """get_embedding_dimension 函数."""

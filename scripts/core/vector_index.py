@@ -26,6 +26,7 @@ class VectorIndex:
         self.id_map_path = id_map_path or Config.ID_MAP_PATH
         self._index: faiss.IndexFlatIP | None = None
         self._id_map: list[int] = []  # faiss internal id -> chunk db id
+        self._db_ids: set[int] = set()  # 已索引的 chunk_db_id 集合（防重复）
         self._load()
 
     def _load(self) -> None:
@@ -62,6 +63,7 @@ class VectorIndex:
                 self._id_map = loaded
         else:
             self._id_map = []
+        self._db_ids = set(self._id_map)
 
     def _save(self) -> None:
         """原子保存 FAISS 索引和 id_map（临时文件 + rename）。."""
@@ -89,6 +91,9 @@ class VectorIndex:
         ids = []
         vectors = []
         for chunk_db_id, vector in items:
+            if chunk_db_id in self._db_ids:
+                logger.warning(f"跳过重复向量 | db_id={chunk_db_id}")
+                continue
             vec = np.array([vector], dtype=np.float32)
             actual_dim = vec.shape[1]
             if self._index.d != actual_dim:
@@ -103,6 +108,7 @@ class VectorIndex:
             all_vecs = np.vstack(vectors)
             self._index.add(all_vecs)  # type: ignore[reportCallIssue]
             self._id_map.extend(ids)
+            self._db_ids.update(ids)
             self._save()
 
     def remove_doc(self, chunk_db_ids: list[int]) -> None:
@@ -124,6 +130,7 @@ class VectorIndex:
             faiss.normalize_L2(mat)
             self._index.add(mat)  # type: ignore[reportCallIssue]
         self._id_map = new_map
+        self._db_ids = set(new_map)
         self._save()
 
     def search(self, query_vector: list[float], top_k: int = 5) -> list[tuple[int, float]]:

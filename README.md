@@ -74,20 +74,15 @@ flowchart TB
 缓存实体引用"]
     end
 
-    subgraph Stage5["阶段5: 构建 Embedding Batch JSONL"]
+    subgraph Stage5["阶段5: 构建 Embedding JSONL"]
         S5A["SQLite chunks\n(status=embedded)"] --> S5B["查询无 embedding 的 chunks"]
-        S5B -->|token 估算| S5C["_split_for_embedding()\n段落边界 → 句子 fallback"]
-        S5C --> S5D["按 token 数动态分组\n+ EMBED_ARRAY_MAX_SIZE 硬上限"]
+        S5B --> S5D["每个 chunk 生成单文本 request\ncustom_id 编码 db_id"]
         S5D --> S5E["{doc_id}_embed.jsonl"]
-        S5D --> S5F["{doc_id}_embed_map.json\nindex → chunk_db_id 映射"]
     end
 
-    subgraph Stage6["阶段6: 提交 Embedding Batch API"]
-        S6A["{doc_id}_embed.jsonl"] --> S6B["Embedding Batch API\n(BigModel embedding-3)"]
-        S6B -->|失败 fallback| S6C["同步 EmbeddingClient"]
-        S6B --> S6D["{doc_id}_embed_results.jsonl"]
-        S6C --> S6E["解析 embeddings"]
-        S6D --> S6E
+    subgraph Stage6["阶段6: 同步 Embedding 向量化"]
+        S6A["{doc_id}_embed.jsonl"] --> S6B["同步 Embedding API\n(BigModel embedding-3)"]
+        S6B --> S6E["解析 embeddings"]
         S6E --> S6F["update_chunks_embedded_batch()\nSQLite metadata.embedding"]
         S6F --> S6G["FAISS IndexFlatIP\nadd_batch()"]
         S6G --> S6H["chunk status: done"]
@@ -116,8 +111,8 @@ flowchart TB
 2. **阶段2（构建 LLM Batch）**：`ChapterParser.parse_tree()` 将 Markdown 解析为树形章节结构（`#` 文档标题，`##` 章节，`###+` 子章节），`collect_all_nodes()` 递归收集所有有 content 的节点并附加完整标题路径前缀。`BatchBuilder.build_batches()` 按 `max_chars` 切分，超长内容按段落边界（`\n\n+`）切分为 sub-batch，同时保护代码块/表格不被截断。`EntityExtractor` 流式解析图片引用，按原文顺序构建 multimodal content（文本 → `[image_id: alt]` → base64 图片），生成 `{doc_id}.jsonl` + `{doc_id}_batch_info.json`
 3. **阶段3（提交 LLM Batch）**：**优先读取** `batch/{doc_id}.jsonl`（支持用户编辑后重新提交），结合 `batch/{doc_id}_batch_info.json` 做增量过滤，仅对变更/新增章节的 requests 提交 Batch API。超大 JSONL 自动按 100MB 拆分并行提交。结果保存为 `{doc_id}_results.jsonl`，增量摘要保存为 `{doc_id}_incremental.json` 供阶段4校验一致性
 4. **阶段4（解析入库，不含向量化）**：从 `results.jsonl` 解析 `entities`/`relationships`/`image_descriptions`，复用未变章节的缓存实体/关系。`GraphStore`（NetworkX）构建图谱，**同名同类型实体自动去重合并**，每个文档保存独立子图 `graphs/{doc_id}.json`。同时保存每个文档的原始属性快照到 `doc_properties[doc_id]`，支持按文档精确查询。提取产品型号建立 `Product --[HAS_MODULE]--> Module` 关系。chunks 写入 SQLite，状态设为 `embedded`；每个 chunk 的 `metadata.extracted_entities` 缓存该 chunk 中提及的实体引用，作为后续跨粒度桥接索引的唯一数据源
-5. **阶段5（构建 Embedding Batch）**：从 SQLite 查询状态为 `embedded` 且暂无 `metadata.embedding` 的 chunks，超长 content 按段落边界切分后，按 `EMBED_ARRAY_MAX_SIZE` 分组构建数组 input，生成 `{doc_id}_embed.jsonl` + `{doc_id}_embed_map.json`
-6. **阶段6（提交 Embedding Batch）**：提交 Embedding Batch API（默认 BigModel `embedding-3`），失败时降级到同步 `EmbeddingClient`。解析结果后统一写入 SQLite `metadata.embedding` + FAISS `IndexFlatIP`，chunk 状态更新为 `done`
+5. **阶段5（构建 Embedding JSONL）**：从 SQLite 查询状态为 `embedded` 且暂无 `metadata.embedding` 的 chunks，每个 chunk 生成一个单文本 request（`custom_id` 直接编码 `db_id`），生成 `{doc_id}_embed.jsonl`
+6. **阶段6（同步 Embedding 向量化）**：读取 `{doc_id}_embed.jsonl`，逐条调用同步 Embedding API（默认 BigModel `embedding-3`），结果直接写入 SQLite `metadata.embedding` + FAISS `IndexFlatIP`，chunk 状态更新为 `done`
 7. **跨粒度桥接索引**：`KnowledgeBaseService` 内部维护 `_EntityChunkBridge`，在 `__init__` 时从所有 chunks 的 `metadata.extracted_entities` 全量构建 `chunk_db_id ↔ (entity_type, entity_name)` 双向映射。`ingest_document` / `reprocess_document` 完成后自动同步。提供 O(1) 的正向查询（chunk→entities）和反向查询（entity→chunks），打通向量空间与图谱空间
 8. **全局图谱重建**：`KnowledgeBaseService.ingest_document()` 完成后**全量重建**全局图 `graphs/global.json`（`clear()` + 遍历所有子图重新加载），确保无幽灵残留，实现**跨文档知识互通**
 
@@ -297,28 +292,25 @@ cp scripts/.env.example scripts/.env
 ```
 
 - **输入**: SQLite chunks（状态 `embedded` 且暂无 `metadata.embedding`）
-- **输出**: `batch/{doc_id}_embed.jsonl` + `batch/{doc_id}_embed_map.json`
-- **切分逻辑**: `_split_for_embedding()` 三级语义保护切分
-  1. **段落边界**：`split_text_by_paragraphs()` 保护代码块、HTML/Markdown 表格
-  2. **句子 fallback**：段落仍超长时按 `[.!?。！？]` 后空格切分
-  3. **兜底保留**：单句仍超长则记录 warning 后原样保留（宁可 API 报错也不破坏语义）
-- **分组逻辑**: `tiktoken` 本地估算 token 数，按 `EMBED_MAX_TOKENS_PER_REQUEST`（默认 3000）动态分组，同时受 `EMBED_ARRAY_MAX_SIZE`（默认 64）硬上限约束
-- **产物格式**: `embed.jsonl` 每行 body.input 是字符串数组（chunk content 列表）
+- **输出**: `batch/{doc_id}_embed.jsonl`
+- **分组逻辑**: 每个需要向量化的 chunk 生成一个独立 request，`custom_id` 直接编码 `db_id`（格式 `embed_dbid_{db_id}`），`body.input` 为单字符串。不再使用 token 估算或数组分组
+- **产物格式**: `embed.jsonl` 每行 body.input 是单个字符串（chunk content）
 - **干预**: 编辑 `embed.jsonl`（删除不想向量化的 chunks）
 - **⚠️ 关键限制**:
-  - 删除行：无需修改 `embed_map.json`，**但不可修改剩余行的 `custom_id`**（stage6 通过 `custom_id` 中的 `start_idx` 偏移量定位 split_id_map，修改 custom_id 会导致 embedding 与 chunk 映射错位）
-  - **新增行：不可随意新增**（custom_id 的 `start_idx` 必须与 split_id_map 的数组索引严格对齐，新增会破坏映射关系）
+  - 删除行：可直接删除，不影响其他行（每个 request 独立）
+  - 新增行：不建议新增（新 chunk 需先有 db_id）
 - **触发下一阶段**: `/doc_submit_embed_batches {doc_id}`
 
-#### 阶段6: 提交 Embedding Batch API
+#### 阶段6: 同步 Embedding 向量化
 
 ```bash
 /doc_submit_embed_batches {doc_id}
 # 可选参数: --embed-jsonl-path PATH（自定义 Embedding JSONL 路径）
 ```
 
-- **输入**: `batch/{doc_id}_embed.jsonl` + `batch/{doc_id}_embed_map.json`
+- **输入**: `batch/{doc_id}_embed.jsonl`
 - **输出**: SQLite `metadata.embedding` + FAISS 向量索引
+- **处理逻辑**: 读取 JSONL 逐条调用同步 Embedding API（`EmbeddingClient.embed_single()`），从 `custom_id` 解析 `db_id`，结果直接入库
 - **干预**: 无（此阶段纯 API 调用与结果入库）
 - **chunk 状态**: `embedded` → `done`
 
@@ -434,13 +426,12 @@ Kimi CLI 通过 `plugin.json` 注册以下工具：
 | `WORKDOCS_EMBEDDING_BASE_URL` | `embedding.endpoint` | `https://open.bigmodel.cn/api/paas/v4` | BigModel Base URL |
 | `WORKDOCS_EMBEDDING_MODEL` | `embedding.model` | `embedding-3` | 向量化模型 |
 | `WORKDOCS_EMBEDDING_DIMENSION` | `embedding.dimension` | `1024` | 向量维度 |
-| `WORKDOCS_EMBEDDING_BATCH_ENDPOINT` | `embedding.batch_endpoint` | `/v4/embeddings` | Embedding Batch API endpoint |
-| `WORKDOCS_EMBED_BATCH_TIMEOUT` | `embedding.batch_timeout` | `3600` | Embedding Batch API 轮询超时（秒） |
-| `WORKDOCS_EMBED_MAX_TOKENS_PER_REQUEST` | `embedding.max_tokens_per_request` | `3000` | 单个 Embedding 请求总 token 上限（含数组内所有文本）。使用 tiktoken 本地估算，未安装时回退到字符数 // 2 |
+| `WORKDOCS_EMBEDDING_BATCH_ENDPOINT` | `embedding.batch_endpoint` | `/v4/embeddings` | Embedding API endpoint（同步调用） |
+| `WORKDOCS_EMBED_BATCH_TIMEOUT` | `embedding.batch_timeout` | `3600` | Embedding API 超时（秒） |
+| `WORKDOCS_CHUNK_MAX_CHARS` | `chunk.max_chars` | `6000` | **单个 chunk 的最大字符数上限**。在 stage4 入库时，若 chapter content 超过此值，`_maybe_split_chapter` 会将其拆分为多个 sub-chunks |
 | `WORKDOCS_EMBED_MAX_RETRIES` | `embedding.max_retries` | `3` | Embedding 同步请求最大重试次数 |
 | `WORKDOCS_EMBED_RETRY_BACKOFF` | `embedding.retry_backoff` | `2` | Embedding 重试退避系数（秒） |
 | `WORKDOCS_EMBED_TIMEOUT` | `embedding.timeout` | `120` | Embedding 同步请求超时（秒） |
-| `WORKDOCS_EMBED_ARRAY_MAX_SIZE` | `embedding.array_max_size` | `64` | 每个 Embedding 请求 `input` 数组最大文本数 |
 | **Parser 配置** | | | |
 | `WORKDOCS_PARSER_API_KEY` | `parser.api_key` | 空 | BigModel Expert 解析 API Key（⚠️ 仅用于 PDF 解析，为 BigModel 专有接口） |
 | `WORKDOCS_PARSER_TIMEOUT` | `parser.timeout` | `60` | 解析请求超时（秒） |
@@ -526,20 +517,78 @@ Kimi CLI 通过 `plugin.json` 注册以下工具：
 | `created_at` | 创建时间戳 |
 | `status` | `pending` → `embedded` → `done`（`ChunkStatus` StrEnum） |
 
-### 图谱存储
+### 四存储系统架构
 
-图谱以 JSON 格式持久化到 `knowledge_base/graphs/<doc_id>.json`：
+本项目使用四个独立的存储系统，各司其职：
+
+| 存储 | 职责 | 持久化 | 原子性 |
+|------|------|--------|--------|
+| **SQLite** | 文档元数据、chunks 内容、状态、缓存 | `workdocs.db` | 单连接事务（自动 commit） |
+| **FAISS** | 向量索引（语义搜索） | `faiss.index` + `id_map.json` | 文件级原子写入（临时文件 + rename） |
+| **NetworkX** | 全局知识图谱（实体+关系） | `{doc_id}.json`（子图）+ `global.json`（全局图） | 内存操作 + 文件原子写入 |
+| **Bridge** | chunk ↔ 实体 双向索引 | 纯内存（重启从 SQLite 重建） | 内存级 |
+
+#### `chunks.metadata` JSON 结构
 
 ```json
 {
-  "nodes": [
-    {"type": "Module", "name": "DMA_Controller", "properties": {...}}
-  ],
-  "edges": [
-    {"type": "HAS_REGISTER", "from": "DMA_Controller", "to": "DMA_CTRL", ...}
-  ]
+  "content_hash": "md5前16位",
+  "extracted_entities": [{"type": "Module", "name": "DMA_Controller", "properties": {}}],
+  "extracted_relations": [{"type": "HAS_REGISTER", "from": "DMA_Controller", "to": "DMA_CTRL"}],
+  "image_descriptions": [{"image_id": "img_001", "description": "...", "chapter_title": "..."}],
+  "embedding": [0.1, 0.2, ...]
 }
 ```
+
+### Chunk 生命周期状态图
+
+```
+                     _save_chunks_to_db
+       (insert_chunk + update_chunk_status = embedded)
+  ┌─────────────────────────────────────────────────────────┐
+  │                                                         ↓
+pending ───────────────────────────────────────────────→ embedded
+                                                               │
+                                stage5: 构建 embed.jsonl       │
+                                stage6: 同步 Embedding API     │
+                                                               │
+                    update_chunks_embedded_batch()             │
+                    vec.add_batch()                            │
+                                                               ↓
+                                                            done
+```
+
+注意：`pending` 状态在实际流程中几乎不可见——`_save_chunks_to_db` 直接插入 chunks 并设为 `embedded`。`skipped` 和 `failed` 状态当前未使用。
+
+### 跨存储关联矩阵
+
+| 方向 | 关联机制 | 一致性保证 |
+|------|---------|-----------|
+| SQLite chunk → FAISS | `chunk.id`（db_id）→ `_id_map[faiss_id]` | stage4 `remove_doc()` 删除旧向量；stage6 `add_batch()` 添加新向量。两操作通过代码顺序保证，非原子事务。 |
+| FAISS → SQLite | `_id_map[faiss_id]` → `db.get_chunk_by_db_id(db_id)` | 搜索时回查 SQLite 获取最新内容 |
+| SQLite chunk → Graph | `chunk.metadata["extracted_entities"]` | 实体提取时写入 chunk metadata，作为 Bridge 索引的唯一数据源 |
+| Graph → SQLite chunk | `_EntityChunkBridge._reverse[EntityRef]` | ingest/reprocess 完成后 `_sync_bridge_for_doc()` 增量同步 |
+| Graph 子图 → 全局图 | `ingest_document()` 增量合并；`reprocess_document()` 先移除旧贡献再合并 | `_save_global_graph()` 原子持久化到 `global.json`。崩溃后可从子图 `rebuild_global_graph()` 重建。 |
+
+### 状态转移安全性审计
+
+#### SQLite ↔ FAISS 一致性（stage6）
+
+`stage6_submit_embed_batches` 中执行两步操作：
+
+1. `self.db.update_chunks_embedded_batch(all_items)` — 将 embedding 写入 SQLite `metadata`
+2. `self.vec.add_batch(all_items)` — 将向量写入 FAISS 索引
+
+**已修复**：第二步被包裹在 `try/except` 中。若 FAISS 写入失败（如磁盘满），自动回滚第一步——清除 SQLite 中这些 chunks 的 `metadata.embedding`，恢复 `status` 为 `embedded`。下次 stage6 会重新向量化这些 chunks。
+
+#### 极端场景处理
+
+| 场景 | 行为 | 恢复方法 |
+|------|------|----------|
+| 进程崩溃在 stage4 与 stage6 之间 | chunks 状态为 `embedded`，FAISS 中无对应向量 | 重新调用 `/doc_submit_embed_batches {doc_id}` |
+| FAISS 索引文件损坏 | 加载时抛出 `RuntimeError` | 删除 `faiss.index` + `id_map.json`，重新处理所有文档 |
+| 全局图 `global.json` 损坏 | 加载失败 | 删除 `global.json`，重启后自动从所有子图重建 |
+| 子图 `{doc_id}.json` 缺失但 SQLite 存在 | 全局图缺少该文档实体 | 调用 `/doc_reprocess {doc_id}` 重新提取 |
 
 ---
 

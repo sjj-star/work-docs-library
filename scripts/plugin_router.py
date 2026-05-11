@@ -302,9 +302,7 @@ def tool_doc_submit_embed_batches(params: dict) -> dict:
     pipe = DocGraphPipeline()
     try:
         embed_jsonl_path_param = params.get("embed_jsonl_path")
-        embed_jsonl_path = (
-            Path(embed_jsonl_path_param) if embed_jsonl_path_param else None
-        )
+        embed_jsonl_path = Path(embed_jsonl_path_param) if embed_jsonl_path_param else None
 
         result_doc_id = pipe.stage6_submit_embed_batches(doc_id, embed_jsonl_path)
         return {
@@ -1007,7 +1005,6 @@ def tool_config(params: dict) -> dict:
         "EMBED_MAX_RETRIES": "Embedding 配置",
         "EMBED_RETRY_BACKOFF": "Embedding 配置",
         "EMBED_TIMEOUT": "Embedding 配置",
-        "EMBED_ARRAY_MAX_SIZE": "Embedding 配置",
         "PARSER_API_KEY": "解析器配置",
         "PARSER_TIMEOUT": "解析器配置",
         "PARSER_MAX_RETRIES": "解析器配置",

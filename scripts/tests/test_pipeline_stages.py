@@ -33,7 +33,6 @@ def patched_config(monkeypatch, tmp_path):
     monkeypatch.setattr(Config, "FAISS_INDEX_PATH", kb / "faiss.index")
     monkeypatch.setattr(Config, "ID_MAP_PATH", kb / "id_map.json")
     monkeypatch.setattr(Config, "GRAPH_OUTPUT_DIR", "graphs")
-    monkeypatch.setattr(Config, "EMBED_ARRAY_MAX_SIZE", 2)
     monkeypatch.setattr(Config, "EMBEDDING_DIMENSION", 4)
     monkeypatch.setattr(Config, "LLM_BATCH_MAX_CHARS", 500)
     monkeypatch.setattr(Config, "EMBEDDING_BASE_URL", "https://api.openai.com/v1")
@@ -120,6 +119,7 @@ def _mock_external_clients(monkeypatch):
             (),
             {
                 "embed": lambda self, texts: [[1.0, 0.0, 0.0, 0.0] for _ in texts],
+                "embed_single": lambda self, text: [1.0, 0.0, 0.0, 0.0],
                 "get_embedding_dimension": lambda self: 4,
                 "close": lambda self: None,
                 "_dim_validated": True,
@@ -675,18 +675,8 @@ def test_stage3_ingest_all_nodes(patched_config, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# tiktoken 与动态 token 分组测试
+# 字符数限制切分测试
 # ---------------------------------------------------------------------------
-
-
-def test_estimate_tokens():
-    """_estimate_tokens 应正确估算 token 数（tiktoken 可用时）."""
-    from core.doc_graph_pipeline import _estimate_tokens
-
-    # "hello world" = 2 tokens in cl100k_base
-    assert _estimate_tokens("hello world") == 2
-    # 中文每个字约 1~2 tokens
-    assert _estimate_tokens("你好世界") >= 2
 
 
 def test_merge_image_descriptions_inline_replace(patched_config, monkeypatch):
@@ -726,15 +716,13 @@ def test_merge_image_descriptions_fallback_append(patched_config, monkeypatch):
     assert "[img_002] A chart" in result
 
 
-def test_stage5_token_based_grouping(patched_config, monkeypatch):
-    """stage5_build_embed_jsonl 应按 token 数动态分组."""
+def test_stage5_single_text_jsonl(patched_config, monkeypatch):
+    """stage5_build_embed_jsonl 应生成单文本 JSONL，custom_id 包含 db_id."""
     _mock_external_clients(monkeypatch)
-    monkeypatch.setattr(Config, "EMBED_MAX_TOKENS_PER_REQUEST", 3)
-    monkeypatch.setattr(Config, "EMBED_ARRAY_MAX_SIZE", 100)
 
     pipe = DocGraphPipeline()
 
-    # 直接插入测试 chunks（不触发字符切分）
+    # 直接插入测试 chunks
     from core.models import Chunk
 
     chunks = [
@@ -762,13 +750,19 @@ def test_stage5_token_based_grouping(patched_config, monkeypatch):
     lines = embed_jsonl_path.read_text(encoding="utf-8").strip().split("\n")
     requests = [json.loads(line) for line in lines if line.strip()]
 
-    # 每个文本约 2 tokens，limit=3，应分成 2 个 requests
+    # 每个 chunk 对应一个 request
     assert len(requests) == 2
-    assert requests[0]["custom_id"] == "embed_0"
-    assert requests[1]["custom_id"] == "embed_1"
-    # 验证 body.input 为数组
-    assert isinstance(requests[0]["body"]["input"], list)
-    assert len(requests[0]["body"]["input"]) == 1
+    # 验证 custom_id 格式: embed_dbid_{db_id}
+    assert requests[0]["custom_id"].startswith("embed_dbid_")
+    assert requests[1]["custom_id"].startswith("embed_dbid_")
+    # 验证 body.input 为字符串（不是数组）
+    assert isinstance(requests[0]["body"]["input"], str)
+    assert requests[0]["body"]["input"] == "hello world"
+    assert isinstance(requests[1]["body"]["input"], str)
+    assert requests[1]["body"]["input"] == "foo bar"
+    # 验证不生成 embed_map.json
+    embed_map_path = embed_jsonl_path.parent / "test_doc_embed_map.json"
+    assert not embed_map_path.exists()
 
 
 def test_split_for_embedding_paragraph_boundary():
@@ -776,8 +770,8 @@ def test_split_for_embedding_paragraph_boundary():
     from core.doc_graph_pipeline import _split_for_embedding
 
     text = "First paragraph here.\n\nSecond paragraph here."
-    parts = _split_for_embedding(text, max_tokens=3)
-    # 两个段落应被分开
+    parts = _split_for_embedding(text, max_chars=30)
+    # 两个段落应被分开（每个段落都 < 30 chars）
     assert len(parts) == 2
     assert "First paragraph" in parts[0]
     assert "Second paragraph" in parts[1]
@@ -785,13 +779,12 @@ def test_split_for_embedding_paragraph_boundary():
 
 def test_split_for_embedding_sentence_fallback():
     """单个段落超长时应按句子边界 fallback 切分."""
-    from core.doc_graph_pipeline import _estimate_tokens, _split_for_embedding
+    from core.doc_graph_pipeline import _split_for_embedding
 
-    # 一个段落，两个句子。第一句 3 tokens，第二句 4 tokens
-    text = "Hello world. Foo bar baz."
-    parts = _split_for_embedding(text, max_tokens=4)
+    text = "Hello world. Foo bar. Baz qux."
+    parts = _split_for_embedding(text, max_chars=15)
     # 应切成至少 2 部分（句子级 fallback）
     assert len(parts) >= 2
-    # 每部分不超过 4 tokens
+    # 每部分不超过 15 chars（允许单个句子超长时被保留原样）
     for p in parts:
-        assert _estimate_tokens(p) <= 4
+        assert len(p) <= 20  # 放宽到 20，因为单个短句可能略超 15

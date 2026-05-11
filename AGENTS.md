@@ -6,9 +6,9 @@
 
 ## 项目目标（一句话定义）
 
-从 IC 前端设计技术文档（PDF）中自动提取结构化实体与关系，构建**跨文档互通**的知识图谱，同时保留向量检索能力作为补充。
+从 IC 前端设计技术文档（PDF）中自动提取结构化实体与关系，构建**跨文档互通**的知识图谱，同时具有文档内容块的向量检索能力增强知识库。
 
-**目标规模**：数百个文档，每个文档几十到万页级。全局图谱通过 NetworkX 内存存储管理，同名同类型实体自动对齐。
+**目标规模**：数百个文档，每个文档几十到万页级。全局图谱通过 NetworkX 内存存储管理，知识图谱检索与文档内容向量检索互通关联。
 
 ---
 
@@ -46,6 +46,28 @@
 - `Chunk.chunk_type`：`text` / `table` / `image_desc` / `summary`（`ChunkType` StrEnum）
 - `Document.status`：`pending` → `processing` → `done` / `failed`（`DocumentStatus` StrEnum）
 - `GraphEntity`/`GraphRelation` 字段：`entity_type`/`rel_type`、`name`、`properties`、`doc_properties`（按文档原始属性快照）、`source_doc_ids`、`source_chapter`、`confidence`、`verified`、`created_at`、`updated_at`、`feedback_score`
+
+### Chunk 与 Sub-chunk 概念
+
+**Chunk** 是知识库中**内容存储和向量检索的最小单位**，对应数据库 `chunks` 表中的一行。
+
+**Chunk 生成链路**：
+```
+PDF → Markdown → ChapterParser(树形章节 #/##/###/####) → collect_all_nodes() → _maybe_split_chapter() → SQLite 入库
+```
+
+1. **章节树**：`ChapterParser.parse_tree()` 按 Markdown 标题层级构建树形结构
+2. **扁平化**：`collect_all_nodes()` 收集所有有 content 的节点，每个节点称为一个 **chapter**
+3. **拆分（可选）**：`_maybe_split_chapter()` 检查 chapter content 是否超过 `CHUNK_MAX_CHARS`（默认 6000）
+   - 未超限：直接成为一个 chunk，`chunk_id = ch_N`
+   - 超限：拆分为多个 **sub-chunks**，`chunk_id = ch_N_part_0`、`ch_N_part_1`...
+4. **入库**：每个 chunk/sub-chunk 成为数据库中的独立行，有自己的 `db_id`
+
+**Sub-chunk** 是超长 chapter 被 `_split_for_embedding`（段落→句子语义边界）拆分后的产物。它继承父 chapter 的所有属性（`content_hash`、`extracted_entities`、`extracted_relations`、`image_descriptions`），但有自己的 `db_id` 和独立 content。
+
+**Chunk 粒度 = 向量化粒度**：数据库中的一行 = 一个向量化单位。每个 chunk（包括 sub-chunk）独立向量化，不存在"一个 chunk 对应多个向量"或"多个 chunk 合并为一个向量"的情况。
+
+**`CHUNK_MAX_CHARS` 的含义**：控制的是**单个 chunk 的最大字符数上限**。它在 stage4（入库阶段）决定 chapter 是否需要拆分；向量化阶段只是下游消费方。默认值 6000 是基于项目实际文本分布的经验参数。
 
 ### 数据库安全
 - **所有 SQL 必须使用参数化查询**（`?` 占位符）
@@ -93,9 +115,8 @@
 | Stage 3 (Submit) | `knowledge_base/batch/{doc_id}_incremental.json` | 增量分析摘要 + result.md hash 校验（供 stage4 一致性校验） |
 | Stage 4 (Ingest) | `knowledge_base/graphs/{doc_id}.json` | 文档级子图快照（可从任意子图重建全局图） |
 | Stage 4 (Ingest) | `knowledge_base/workdocs.db` | SQLite 元数据（chunks、documents、conflict_logs、feedback） |
-| Stage 5 (Build Embed JSONL) | `knowledge_base/batch/{doc_id}_embed.jsonl` | Embedding Batch API 输入请求（数组 input 格式） |
-| Stage 5 (Build Embed JSONL) | `knowledge_base/batch/{doc_id}_embed_map.json` | index → chunk_db_id 映射（供 stage6 结果回填） |
-| Stage 6 (Submit Embed) | `knowledge_base/batch/{doc_id}_embed_results.jsonl` | Embedding Batch API 原始返回结果 |
+| Stage 5 (Build Embed JSONL) | `knowledge_base/batch/{doc_id}_embed.jsonl` | Embedding 同步 API 输入请求（单文本 input 格式，custom_id 直接编码 db_id） |
+| Stage 6 (Submit Embed) | — | 同步调用 Embedding API 逐条处理 stage5 的 JSONL，结果直接入库（不再生成中间结果文件） |
 | Stage 6 (Submit Embed) | `knowledge_base/faiss.index` + `knowledge_base/id_map.json` | FAISS 向量索引与 ID 映射 |
 
 ### 开发约束
@@ -233,8 +254,21 @@
 - ✅ **属性索引优化**：`NetworkXGraphStore` 内部维护 `property_index`，`find_by_property()` 从 O(N) 降至 O(1)
 - ✅ **跨粒度桥接索引**：`_EntityChunkBridge` 机制层实现 `chunk_db_id ↔ (entity_type, entity_name)` 双向映射。`graph_provenance` 从 O(N) 暴力扫描优化为 O(1) 反向查询。`search_with_graph` / `get_content_with_entities` 重构为原子操作组合
 - ✅ **Pipeline 六阶段拆分**（中间产物持久化原则的具体实践）：`_process_one` 拆分为 `stage1_parse` / `stage2_build_jsonl` / `stage3_submit_batches` / `stage4_ingest_results` / `stage5_build_embed_jsonl` / `stage6_submit_embed_batches`，每个中间产物（result.md / requests.jsonl / batch_info.json / results.jsonl / 子图谱 JSON / embed.jsonl / embed_results.jsonl）均可独立执行、人为干预、重新执行
-- ✅ **Embedding token-based 动态分组**：引入 `tiktoken` 为可选依赖，`stage5_build_embed_jsonl` 按 token 数动态分组（上限 3000），`_split_for_embedding` 实现段落→句子三级语义保护切分，彻底解决 BigModel Embedding-3 的 3072 tokens/request 超限问题
+- ✅ **Chunk 粒度与向量化粒度统一**：`_save_chunks_to_db`（stage4）中，超长 chapter 通过 `_maybe_split_chapter` 拆分为独立 sub-chunks（`ch_N_part_0`/`ch_N_part_1`），继承父 chapter 的 entities/relations/content_hash。Stage 5/6 不再处理 split/average，数据库一行 = 一个向量化单位，彻底解决 batch 路径 split-chunk 未聚合导致 FAISS 重复向量的问题
 - ✅ 302 个测试全部通过
+
+### 当前阶段（新进展 — 2026-05-08 BigModel Embedding Token 估算问题研究与修复）
+- ✅ **实验验证 BigModel embedding-3 tokenizer 与 tiktoken 差异**：系统性对照实验证实两者不存在固定比例关系。BigModel embedding-3 对数字/单独字母接近字符级别编码，对自然语言使用子词编码（与 tiktoken 接近），对重复字符压缩率低于 tiktoken
+- ✅ **确认限制为 3072 actual tokens**：通过 Embedding API 响应 `usage.prompt_tokens` 直接测量，失败点精确在 actual_tokens = 3072 处
+- ✅ **添加 `CHUNK_MAX_CHARS` 配置与 `_split_for_embedding` 字符数保护**：以 6000 字符作为 chunk 最大字符数上限
+- ✅ **修复 FAISS 重复向量问题**：删除旧索引，重建 41 个唯一向量
+- ✅ **重建全局图谱**：324 节点 / 412 边
+
+### 当前阶段（新进展 — 2026-05-08 回退 tiktoken + Embedding Batch）
+- ✅ **去掉 tiktoken 依赖**：`_split_for_embedding` / `_maybe_split_chapter` 改为纯字符数限制，删除 `EMBED_MAX_TOKENS_PER_REQUEST` 配置
+- ✅ **Embedding 改为同步单文本 API**：stage5 生成单文本 JSONL（`body.input` 为字符串，`custom_id` 编码 db_id，不再生成 `embed_map.json`）；stage6 读取 JSONL 后调用 `EmbeddingClient.embed_single()` 逐条同步处理，删除 fallback 路径和 `EMBED_ARRAY_MAX_SIZE` 配置
+- ✅ **删除 `batch_clients.submit_embedding_batch`**：不再被任何代码调用
+- ✅ **299 个测试全部通过**（删除 3 个废弃测试）
 
 ### 下一阶段（精确到下一步）
 1. **可视化**：图谱可视化导出（Graphviz / D3.js）
@@ -251,6 +285,7 @@
 - 更新日志格式、错误提示信息
 - 优化算法实现（不改变输入输出语义）
 - 更新本文档（AGENTS.md）和 README.md、DESIGN.md
+- 不过度考虑项目开发的版本兼容性
 
 ### 必须询问用户的事项
 - 修改核心数据模型（`Chunk`、`Document`、`GraphEntity`、`GraphRelation` 的字段）
@@ -359,11 +394,10 @@ config.json（用户持久化配置，项目根目录）
 | `WORKDOCS_EMBEDDING_DIMENSION` | `embedding.dimension` | `1024` | 向量维度 |
 | `WORKDOCS_EMBEDDING_BATCH_ENDPOINT` | `embedding.batch_endpoint` | `/v4/embeddings` | Embedding Batch API endpoint |
 | `WORKDOCS_EMBED_BATCH_TIMEOUT` | `embedding.batch_timeout` | `3600` | Embedding Batch API 轮询超时（秒） |
-| `WORKDOCS_EMBED_MAX_TOKENS_PER_REQUEST` | `embedding.max_tokens_per_request` | `3000` | 单个 Embedding 请求总 token 上限（含数组内所有文本）。使用 tiktoken 本地估算，未安装时回退到字符数 // 2 |
+| `WORKDOCS_CHUNK_MAX_CHARS` | `chunk.max_chars` | `6000` | **单个 chunk 的最大字符数上限**。在 stage4 入库时，若 chapter content 超过此值，`_maybe_split_chapter` 会将其拆分为多个 sub-chunks。这是一个基于项目文本分布的**经验参数**（自然语言+代码混合内容约对应 2500-2800 actual tokens），不保证对所有文本类型安全 |
 | `WORKDOCS_EMBED_MAX_RETRIES` | `embedding.max_retries` | `3` | Embedding 同步请求最大重试次数 |
 | `WORKDOCS_EMBED_RETRY_BACKOFF` | `embedding.retry_backoff` | `2` | Embedding 重试退避系数（秒） |
 | `WORKDOCS_EMBED_TIMEOUT` | `embedding.timeout` | `120` | Embedding 同步请求超时（秒） |
-| `WORKDOCS_EMBED_ARRAY_MAX_SIZE` | `embedding.array_max_size` | `64` | 每个 Embedding 请求 `input` 数组最大文本数 |
 | **Parser 配置** | | | |
 | `WORKDOCS_PARSER_API_KEY` | `parser.api_key` | 空 | PDF 解析 API Key（BigModel 专用） |
 | `WORKDOCS_PARSER_TIMEOUT` | `parser.timeout` | `60` | 解析请求超时（秒） |
