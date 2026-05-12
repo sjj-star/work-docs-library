@@ -83,8 +83,6 @@ def test_insert_chunk_and_query(db, sample_doc):
         content="hello world",
         chunk_type="text",
         chapter_title="Ch1",
-        keywords=["kw1", "kw2"],
-        summary="sum",
     )
     db_id = db.insert_chunk(chunk)
     assert isinstance(db_id, int)
@@ -99,22 +97,9 @@ def test_insert_chunk_and_query(db, sample_doc):
     by_regex = db.query_by_chapter_regex("doc1", r"^Ch")
     assert len(by_regex) == 1
 
-    by_kw = db.query_by_keyword("kw1")
-    assert len(by_kw) == 1
-
     fetched = db.get_chunk_by_db_id(db_id)
     assert fetched is not None
-    assert fetched.keywords == ["kw1", "kw2"]
-
-
-def test_chunk_summary(db, sample_doc):
-    """Test chunk summary."""
-    db.upsert_document(sample_doc)
-    chunk = Chunk(doc_id="doc1", chunk_id="p1", content="c", chunk_type="text")
-    db_id = db.insert_chunk(chunk)
-    db.update_chunk_summary(db_id, "new summary")
-    ck = db.get_chunk_by_db_id(db_id)
-    assert ck.summary == "new summary"
+    assert fetched.chapter_title == "Ch1"
 
 
 def test_chunk_embedding_batch(db, sample_doc):

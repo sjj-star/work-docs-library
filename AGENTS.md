@@ -425,7 +425,7 @@ config.json（用户持久化配置，项目根目录）
 | `WORKDOCS_PLUGIN_SUBGRAPH_DEPTH` | `plugin.subgraph_depth` | `1` | 子图扩展默认深度 |
 | `WORKDOCS_PLUGIN_DEFAULT_LIMIT` | `plugin.default_limit` | `100` | 默认分页限制 |
 | **Pipeline / Graph** | | | |
-| `WORKDOCS_DEFAULT_SUMMARY_LENGTH` | `pipeline.summary_length` | `200` | 默认摘要长度（字符） |
+
 | `WORKDOCS_GRAPH_MAX_PATH_DEPTH` | `graph.max_path_depth` | `6` | 图谱路径搜索最大深度 |
 | `WORKDOCS_GRAPH_OUTPUT_DIR` | `graph.output_dir` | `graphs` | 图谱 JSON 输出目录 |
 

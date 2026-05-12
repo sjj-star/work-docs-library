@@ -398,7 +398,6 @@ class KnowledgeBaseService:
         doc_id: str | None = None,
         chapter: str | None = None,
         chapter_regex: str | None = None,
-        keyword: str | None = None,
         concept: str | None = None,
         top_k: int = Config.PLUGIN_QUERY_TOP_K,
     ) -> list[Chunk]:
@@ -408,7 +407,6 @@ class KnowledgeBaseService:
             doc_id: 文档 ID（chapter/concept 查询必需）
             chapter: 章节标题子串匹配
             chapter_regex: 章节标题正则匹配
-            keyword: 关键词匹配（跨文档）
             concept: 概念名匹配（需 doc_id）
             top_k: 最大返回数量
 
@@ -427,14 +425,12 @@ class KnowledgeBaseService:
             if not doc_id:
                 raise ValueError("chapter_regex query requires doc_id")
             results = self.db.query_by_chapter_regex(doc_id, chapter_regex)
-        elif keyword:
-            results = self.db.query_by_keyword(keyword)
         elif concept:
             if not doc_id:
                 raise ValueError("concept query requires doc_id")
             results = self.db.query_by_concept(doc_id, concept)
         else:
-            raise ValueError("Provide chapter, chapter_regex, keyword, or concept")
+            raise ValueError("Provide chapter, chapter_regex, or concept")
 
         return results[:top_k]
 

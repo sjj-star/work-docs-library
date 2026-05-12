@@ -160,7 +160,6 @@ class Config:
     PLUGIN_DEFAULT_LIMIT: int = 0  # 将在下方初始化
 
     # --- Pipeline 业务常量 ---
-    DEFAULT_SUMMARY_LENGTH: int = 0  # 将在下方初始化
     GRAPH_MAX_PATH_DEPTH: int = 0  # 将在下方初始化
 
     # --- 目录配置 ---
@@ -259,9 +258,6 @@ class Config:
         )
 
         # Pipeline 业务常量
-        cls.DEFAULT_SUMMARY_LENGTH = int(
-            _resolve_config("WORKDOCS_DEFAULT_SUMMARY_LENGTH", "pipeline.summary_length", "200")
-        )
         cls.GRAPH_MAX_PATH_DEPTH = int(
             _resolve_config("WORKDOCS_GRAPH_MAX_PATH_DEPTH", "graph.max_path_depth", "6")
         )
