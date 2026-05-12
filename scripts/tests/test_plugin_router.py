@@ -171,10 +171,8 @@ def test_ingest_with_llm_config_uses_doc_graph_pipeline(patched_config, monkeypa
     db = KnowledgeDB()
     chunks = db.query_by_doc(doc_id)
     assert len(chunks) > 0
-    # LLM_API_FLOW should persist summary and mark as done
     for ck in chunks:
         assert ck.status == "done"
-        assert ck.summary is not None and len(ck.summary) > 0
 
 
 def test_reprocess_doc_graph_pipeline(patched_config, monkeypatch):
@@ -393,7 +391,7 @@ def test_ingest_resume_skips_phase_a(patched_config, monkeypatch):
     db = KnowledgeDB()
     with db._connect() as conn:
         conn.execute(
-            "UPDATE chunks SET status = 'embedded', summary = '', keywords = '' WHERE doc_id = ?",
+            "UPDATE chunks SET status = 'embedded' WHERE doc_id = ?",
             (doc_id,),
         )
         conn.execute("UPDATE documents SET status = 'embedded' WHERE doc_id = ?", (doc_id,))
@@ -409,7 +407,6 @@ def test_ingest_resume_skips_phase_a(patched_config, monkeypatch):
 
     chunks = db.query_by_doc(doc_id)
     assert chunks[0].status == "done"
-    assert chunks[0].summary != ""
 
 
 # ---------------------------------------------------------------------------
@@ -444,9 +441,7 @@ def test_image_analysis_persisted_to_chunk_metadata(patched_config, monkeypatch)
     db = KnowledgeDB()
     chunks = db.query_by_doc(doc_id)
     assert len(chunks) == 1
-    # DocGraphPipeline: chunks are marked done and have summary
     assert chunks[0].status == "done"
-    assert chunks[0].summary != ""
 
 
 # ---------------------------------------------------------------------------

@@ -1414,17 +1414,6 @@ class DocGraphPipeline:
             )
         )
 
-        # 生成默认 summary
-        chunks = self.db.query_by_doc(doc_id)
-        for ck in chunks:
-            if not ck.summary:
-                default_summary = (
-                    ck.content[: Config.DEFAULT_SUMMARY_LENGTH] + "..."
-                    if len(ck.content) > Config.DEFAULT_SUMMARY_LENGTH
-                    else ck.content
-                )
-                self.db.update_chunk_summary(ck.id, default_summary)
-
         logger.info(f"文档入库完成 | doc_id={doc_id}")
         return doc_id
 

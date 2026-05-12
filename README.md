@@ -451,7 +451,6 @@ Kimi CLI 通过 `plugin.json` 注册以下工具：
 | `WORKDOCS_PLUGIN_SUBGRAPH_DEPTH` | `plugin.subgraph_depth` | `1` | 子图扩展默认深度 |
 | `WORKDOCS_PLUGIN_DEFAULT_LIMIT` | `plugin.default_limit` | `100` | 默认分页限制 |
 | **Pipeline / Graph** | | | |
-| `WORKDOCS_DEFAULT_SUMMARY_LENGTH` | `pipeline.summary_length` | `200` | 默认摘要长度（字符） |
 | `WORKDOCS_GRAPH_MAX_PATH_DEPTH` | `graph.max_path_depth` | `6` | 图谱路径搜索最大深度 |
 | `WORKDOCS_GRAPH_OUTPUT_DIR` | `graph.output_dir` | `graphs` | 图谱 JSON 输出目录 |
 
@@ -511,8 +510,6 @@ Kimi CLI 通过 `plugin.json` 注册以下工具：
 | `content` | 原始提取内容（含合并后的图片描述） |
 | `chunk_type` | `text` / `table` / `image_desc` / `summary` |
 | `chapter_title` | 所属章节 |
-| `keywords` | JSON 列表：提取的关键词 |
-| `summary` | 章节摘要 |
 | `metadata` | JSON：嵌入向量、图片信息、content_hash、**`extracted_entities`**（chunk→实体映射，桥接索引唯一数据源）、缓存的关系等 |
 | `created_at` | 创建时间戳 |
 | `status` | `pending` → `embedded` → `done`（`ChunkStatus` StrEnum） |

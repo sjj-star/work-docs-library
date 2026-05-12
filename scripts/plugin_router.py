@@ -50,8 +50,6 @@ def _chunk_to_dict(ck, preview_len: int = 500) -> dict:
         "chunk_type": ck.chunk_type,
         "chapter_title": ck.chapter_title,
         "content_preview": ck.content[:preview_len],
-        "summary": ck.summary,
-        "keywords": ck.keywords,
     }
 
 
@@ -473,14 +471,12 @@ def tool_query(params: dict) -> dict:
         doc_id: 文档 ID（chapter/concept 查询必需）
         chapter: 章节标题子串匹配
         chapter_regex: 章节标题正则匹配
-        keyword: 关键词匹配（跨文档）
         concept: 概念名匹配（需 doc_id）
         top_k: 最大返回数量（默认 10）
     """
     doc_id = params.get("doc_id")
     chapter = params.get("chapter")
     chapter_regex = params.get("chapter_regex")
-    keyword = params.get("keyword")
     concept = params.get("concept")
     top_k = params.get("top_k", Config.PLUGIN_QUERY_TOP_K)
 
@@ -490,7 +486,6 @@ def tool_query(params: dict) -> dict:
             doc_id=doc_id,
             chapter=chapter,
             chapter_regex=chapter_regex,
-            keyword=keyword,
             concept=concept,
             top_k=top_k,
         )
@@ -1020,7 +1015,6 @@ def tool_config(params: dict) -> dict:
         "PLUGIN_GRAPH_MAX_DEPTH": "Plugin 配置",
         "PLUGIN_SUBGRAPH_DEPTH": "Plugin 配置",
         "PLUGIN_DEFAULT_LIMIT": "Plugin 配置",
-        "DEFAULT_SUMMARY_LENGTH": "Pipeline 配置",
         "GRAPH_MAX_PATH_DEPTH": "Pipeline 配置",
         "DB_PATH": "路径配置",
         "FAISS_INDEX_PATH": "路径配置",

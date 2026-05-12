@@ -58,8 +58,6 @@ class KnowledgeDB:
             content TEXT,
             chunk_type TEXT,
             chapter_title TEXT,
-            keywords TEXT,
-            summary TEXT,
             metadata TEXT,
             status TEXT DEFAULT 'pending',
             created_at TEXT DEFAULT CURRENT_TIMESTAMP,
@@ -220,9 +218,9 @@ class KnowledgeDB:
                 INSERT INTO chunks
                 (
                     doc_id, chunk_id, content, chunk_type, chapter_title,
-                    keywords, summary, metadata, status
+                    metadata, status
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     chunk.doc_id,
@@ -230,8 +228,6 @@ class KnowledgeDB:
                     chunk.content,
                     str(chunk.chunk_type),
                     chunk.chapter_title,
-                    json.dumps(chunk.keywords, ensure_ascii=False),
-                    chunk.summary,
                     json.dumps(chunk.metadata, ensure_ascii=False),
                     str(chunk.status),
                 ),
@@ -285,11 +281,6 @@ class KnowledgeDB:
             for r in rows
         ]
 
-    def update_chunk_summary(self, db_id: int, summary: str) -> None:
-        """update_chunk_summary 函数."""
-        with self._connect() as conn:
-            conn.execute("UPDATE chunks SET summary = ? WHERE id = ?", (summary, db_id))
-
     def query_by_doc(self, doc_id: str) -> list[Chunk]:
         """获取文档的所有 chunks."""
         sql = "SELECT * FROM chunks WHERE doc_id = ? ORDER BY created_at"
@@ -316,29 +307,16 @@ class KnowledgeDB:
         chunks = self._rows_to_chunks(rows)
         return [ck for ck in chunks if compiled.search(ck.chapter_title)]
 
-    def query_by_keyword(self, keyword: str) -> list[Chunk]:
-        """query_by_keyword 函数."""
-        sql = "SELECT * FROM chunks WHERE keywords LIKE ? ORDER BY doc_id, created_at"
-        with self._connect() as conn:
-            rows = conn.execute(sql, (f"%{keyword}%",)).fetchall()
-        return self._rows_to_chunks(rows)
-
     def query_by_concept(self, doc_id: str, concept_name: str) -> list[Chunk]:
         """Return chunks whose metadata.entities contain the given concept name."""
         sql = """
             SELECT * FROM chunks
-            WHERE doc_id = ? AND (
-                metadata LIKE ?
-                OR summary LIKE ?
-                OR keywords LIKE ?
-            )
+            WHERE doc_id = ? AND metadata LIKE ?
             ORDER BY created_at
         """
         pattern = f'"name": "{concept_name}"'
         with self._connect() as conn:
-            rows = conn.execute(
-                sql, (doc_id, pattern, f"%{concept_name}%", f"%{concept_name}%")
-            ).fetchall()
+            rows = conn.execute(sql, (doc_id, pattern)).fetchall()
         return self._rows_to_chunks(rows)
 
     def get_chunk_by_db_id(self, db_id: int) -> Chunk | None:
@@ -512,25 +490,16 @@ class KnowledgeDB:
         return row["score"] or 0
 
     def _rows_to_chunks(self, rows: list[sqlite3.Row]) -> list[Chunk]:
-        chunks = []
-        for r in rows:
-            kw_raw = r["keywords"] or ""
-            try:
-                keywords = json.loads(kw_raw)
-            except json.JSONDecodeError:
-                keywords = [k.strip() for k in kw_raw.split(",") if k.strip()]
-            chunks.append(
-                Chunk(
-                    id=r["id"],
-                    doc_id=r["doc_id"],
-                    chunk_id=r["chunk_id"],
-                    content=r["content"],
-                    chunk_type=r["chunk_type"],
-                    chapter_title=r["chapter_title"],
-                    keywords=keywords,
-                    summary=r["summary"] or "",
-                    status=r["status"] or "pending",
-                    metadata=json.loads(r["metadata"] or "{}"),
-                )
+        return [
+            Chunk(
+                id=r["id"],
+                doc_id=r["doc_id"],
+                chunk_id=r["chunk_id"],
+                content=r["content"],
+                chunk_type=r["chunk_type"],
+                chapter_title=r["chapter_title"],
+                status=r["status"] or "pending",
+                metadata=json.loads(r["metadata"] or "{}"),
             )
-        return chunks
+            for r in rows
+        ]

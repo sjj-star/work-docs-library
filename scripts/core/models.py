@@ -33,8 +33,6 @@ class Chunk:
     content: str
     chunk_type: ChunkType | str = ChunkType.TEXT
     chapter_title: str = ""
-    keywords: list[str] = field(default_factory=list)
-    summary: str = ""
     status: ChunkStatus | str = ChunkStatus.PENDING
     metadata: dict[str, Any] = field(default_factory=dict)
     id: int = 0  # database primary key

@@ -16,7 +16,6 @@ def test_chapter_to_dict():
 def test_chunk_defaults():
     """Test chunk defaults."""
     ck = Chunk(doc_id="d1", chunk_id="c1", content="hello", chunk_type="text")
-    assert ck.keywords == []
     assert ck.metadata == {}
 
 
