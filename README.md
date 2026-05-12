@@ -524,7 +524,7 @@ Kimi CLI 通过 `plugin.json` 注册以下工具：
 | 存储 | 职责 | 持久化 | 原子性 |
 |------|------|--------|--------|
 | **SQLite** | 文档元数据、chunks 内容、状态、缓存 | `workdocs.db` | 单连接事务（自动 commit） |
-| **FAISS** | 向量索引（语义搜索） | `faiss.index` + `id_map.json` | 文件级原子写入（临时文件 + rename） |
+| **FAISS** | 向量索引（语义搜索） | `faiss.index` + `id_map.json` | 文件级原子写入（临时文件 + rename）+ `fcntl` 进程锁 |
 | **NetworkX** | 全局知识图谱（实体+关系） | `{doc_id}.json`（子图）+ `global.json`（全局图） | 内存操作 + 文件原子写入 |
 | **Bridge** | chunk ↔ 实体 双向索引 | 纯内存（重启从 SQLite 重建） | 内存级 |
 
@@ -533,8 +533,8 @@ Kimi CLI 通过 `plugin.json` 注册以下工具：
 ```json
 {
   "content_hash": "md5前16位",
-  "extracted_entities": [{"type": "Module", "name": "DMA_Controller", "properties": {}}],
-  "extracted_relations": [{"type": "HAS_REGISTER", "from": "DMA_Controller", "to": "DMA_CTRL"}],
+  "extracted_entities": [{"entity_type": "Module", "name": "DMA_Controller", "properties": {}}],
+  "extracted_relations": [{"rel_type": "HAS_REGISTER", "from_name": "DMA_Controller", "to_name": "DMA_CTRL"}],
   "image_descriptions": [{"image_id": "img_001", "description": "...", "chapter_title": "..."}],
   "embedding": [0.1, 0.2, ...]
 }
@@ -564,7 +564,7 @@ pending ────────────────────────
 
 | 方向 | 关联机制 | 一致性保证 |
 |------|---------|-----------|
-| SQLite chunk → FAISS | `chunk.id`（db_id）→ `_id_map[faiss_id]` | stage4 `remove_doc()` 删除旧向量；stage6 `add_batch()` 添加新向量。两操作通过代码顺序保证，非原子事务。 |
+| SQLite chunk → FAISS | `chunk.id`（db_id）→ `_id_map[faiss_id]` | FAISS 已加 `fcntl` 进程锁，修改前 `_reload()` 磁盘最新状态；SQLite + FAISS 仍非分布式事务，但单进程内已防并发覆盖 |
 | FAISS → SQLite | `_id_map[faiss_id]` → `db.get_chunk_by_db_id(db_id)` | 搜索时回查 SQLite 获取最新内容 |
 | SQLite chunk → Graph | `chunk.metadata["extracted_entities"]` | 实体提取时写入 chunk metadata，作为 Bridge 索引的唯一数据源 |
 | Graph → SQLite chunk | `_EntityChunkBridge._reverse[EntityRef]` | ingest/reprocess 完成后 `_sync_bridge_for_doc()` 增量同步 |
@@ -581,13 +581,15 @@ pending ────────────────────────
 
 **已修复**：第二步被包裹在 `try/except` 中。若 FAISS 写入失败（如磁盘满），自动回滚第一步——清除 SQLite 中这些 chunks 的 `metadata.embedding`，恢复 `status` 为 `embedded`。下次 stage6 会重新向量化这些 chunks。
 
+此外，FAISS `add_batch()` / `remove_doc()` 均通过 `fcntl.flock` 加进程级排他锁，修改前调用 `_reload()` 加载磁盘最新状态，防止多进程并发覆盖。
+
 #### 极端场景处理
 
 | 场景 | 行为 | 恢复方法 |
 |------|------|----------|
 | 进程崩溃在 stage4 与 stage6 之间 | chunks 状态为 `embedded`，FAISS 中无对应向量 | 重新调用 `/doc_submit_embed_batches {doc_id}` |
 | FAISS 索引文件损坏 | 加载时抛出 `RuntimeError` | 删除 `faiss.index` + `id_map.json`，重新处理所有文档 |
-| 全局图 `global.json` 损坏 | 加载失败 | 删除 `global.json`，重启后自动从所有子图重建 |
+| 全局图异常（节点<10 但文档>0） | 启动时检测到全局图不完整 | 自动触发 `rebuild_global_graph()` 重建；手动调用 `/rebuild_global_graph` 亦可 |
 | 子图 `{doc_id}.json` 缺失但 SQLite 存在 | 全局图缺少该文档实体 | 调用 `/doc_reprocess {doc_id}` 重新提取 |
 
 ---
@@ -657,7 +659,7 @@ WORKDOCS_PARSER_API_KEY=your-api-key
 2. **Batch API 延迟**：Batch API 成本为同步 API 的 50%，但存在分钟级排队延迟
 3. **JSONL 大小限制**：单个 JSONL 文件不能超过 100MB，超大文档会自动拆分为多个并行 batch
 4. **Embedding 维度不可变**：FAISS 索引创建后维度固定。更换模型导致维度变化时，必须删除旧索引并重新处理
-5. **FAISS 与 SQLite 非原子**：极端情况下可能出现索引与元数据不一致，可通过 `reprocess` 重建
+5. **FAISS 与 SQLite 非原子**：已缓解——FAISS 操作加 `fcntl` 进程锁，修改前 `_reload()` 磁盘最新状态。极端情况仍可通过 `reprocess` 重建
 6. **图片压缩**：`LLM_VISION_MAX_EDGE`（默认 1024）和 `LLM_VISION_QUALITY`（默认 85）控制 base64 图片大小
 7. **NetworkX 内存上限**：全局图为内存存储，数百个文档 × 万页级时可能达到 GB 级。当前单机目标规模可接受，预留 Neo4j 迁移接口
 8. **输入文档约束**：Markdown 图片引用 `![name](images/path.jpg)` 中的 `name` 将作为 `image_id`，建议填写有意义的名称

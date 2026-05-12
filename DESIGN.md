@@ -50,7 +50,7 @@
 
 **权衡**：
 - 内存存储，单图规模受限于可用内存（当前目标文档为几十到几百页，远未触及瓶颈）
-- 不支持并发写入（当前为单用户本地部署，不成为问题）
+- 单进程写入为主；FAISS 已加 `fcntl` 进程级文件锁防并发覆盖，但不建议多进程并发 reprocess
 - 复杂图算法（PageRank、社区发现）性能不如专用图数据库
 
 ---
@@ -124,9 +124,9 @@
 - **足够当前需求**：当前 Schema 包含 `_schema_meta`（版本管理）、`documents`（文档元数据）、`chunks`（内容块）、`conflict_logs`（同名实体属性冲突日志）、`feedback`（实体/关系用户反馈）五张表，无复杂查询
 
 **权衡**：
-- 不支持高并发写入（当前为单进程顺序处理，不成为问题）
+- 单进程写入为主；FAISS 已加 `fcntl` 进程级文件锁防并发覆盖，但不建议多进程并发 reprocess
 - 无内置全文检索（当前使用 FAISS 向量搜索 + 关键词 LIKE 查询，暂不依赖 SQLite FTS）
-- 极端情况下（进程崩溃）FAISS 索引与 SQLite 元数据可能不一致，可通过 `reprocess` 重建
+- FAISS 已加进程锁和修改前重载（`_reload()`），进程崩溃后可通过 `rebuild_global_graph` 或重启自动恢复；极端情况仍可通过 `reprocess` 重建
 
 ---
 
@@ -532,7 +532,7 @@ graph_provenance 优化（图谱→向量）:
 |------|------|----------|
 | **仅支持 PDF** | DOCX/XLSX 解析器代码已存在，但尚未接入 `DocGraphPipeline` | 下一步开发计划 |
 | **Batch API 分钟级延迟** | Batch API 的固有特性 | 离线任务，用户可接受；支持 `progress` 查询状态 |
-| **FAISS 与 SQLite 非原子** | 两个独立存储系统，无分布式事务 | `reprocess` 可重建；极端情况手动删除索引 |
+| **FAISS 与 SQLite 非原子** | 两个独立存储系统，无分布式事务 | 已缓解：FAISS 操作加 `fcntl` 进程锁，修改前 `_reload()` 磁盘最新状态。仍可通过 `reprocess` 或手动删除索引重建 |
 | **Embedding 维度不可变** | FAISS 索引创建后维度固定 | 更换模型时删除旧索引并重新处理 |
 | **JSONL 100MB 限制** | Kimi/BigModel Batch API 的硬性限制 | `submit_parallel_batches()` 自动拆分并行提交 |
 | **NetworkX 内存上限** | 全局图为内存存储，随文档数量增长可能达到 GB 级 | 当前单机目标规模可接受；预留 Neo4j 迁移接口 |
