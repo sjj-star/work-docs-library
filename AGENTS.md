@@ -43,7 +43,7 @@
 ### 类型与模型
 - 领域模型使用 `dataclass`（`Chunk`、`Document`、`GraphEntity`、`GraphRelation`、`SubGraphView`）
 - `Chunk.status`：`pending` → `embedded` → `done`（含 `skipped`、`failed`，`ChunkStatus` StrEnum）
-- `Chunk.chunk_type`：`text` / `table` / `image_desc` / `summary`（`ChunkType` StrEnum）
+- `Chunk.chunk_type`：`text` / `table` / `image_desc`（`ChunkType` StrEnum）
 - `Document.status`：`pending` → `processing` → `done` / `failed`（`DocumentStatus` StrEnum）
 - `GraphEntity`/`GraphRelation` 字段：`entity_type`/`rel_type`、`name`、`properties`、`doc_properties`（按文档原始属性快照）、`source_doc_ids`、`source_chapter`、`confidence`、`verified`、`created_at`、`updated_at`、`feedback_score`
 

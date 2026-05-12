@@ -508,7 +508,7 @@ Kimi CLI 通过 `plugin.json` 注册以下工具：
 | `doc_id` (FK) | 所属文档 |
 | `chunk_id` | 逻辑 ID（如 `ch_0`） |
 | `content` | 原始提取内容（含合并后的图片描述） |
-| `chunk_type` | `text` / `table` / `image_desc` / `summary` |
+| `chunk_type` | `text` / `table` / `image_desc` |
 | `chapter_title` | 所属章节 |
 | `metadata` | JSON：嵌入向量、图片信息、content_hash、**`extracted_entities`**（chunk→实体映射，桥接索引唯一数据源）、缓存的关系等 |
 | `created_at` | 创建时间戳 |
