@@ -164,11 +164,13 @@ PDF → Markdown → ChapterParser(树形章节 #/##/###/####) → collect_all_n
 - `reprocess_document` 先移除旧数据再重新处理，处理失败后全局图处于半空状态
 - `_save_global_graph` 直接覆写文件，进程崩溃时可能导致 `global.json` 损坏
 - SQLite 和 FAISS 的更新分两步执行，向量化失败后两者不一致
+- FAISS 索引文件被多进程并发写入覆盖（如同时 reprocess 两个文档），导致向量丢失或错乱
 
 **开发约束**：
 - 修改全局状态前保存快照（`copy.deepcopy` 或临时文件备份）
 - 文件写入采用"临时文件 + 原子重命名（`os.replace`）"策略
 - 跨存储系统的操作（如 SQLite + FAISS）必须统一在 try 块中，失败时统一清理
+- 对共享文件资源（FAISS 索引、全局图 JSON）加进程级文件锁（`fcntl.flock`），修改前重载磁盘最新状态
 - 对于不可逆操作（如 API 调用），必须在操作前完成所有本地校验
 
 ### 4. 输入验证与 Schema 兼容原则
@@ -269,6 +271,12 @@ PDF → Markdown → ChapterParser(树形章节 #/##/###/####) → collect_all_n
 - ✅ **Embedding 改为同步单文本 API**：stage5 生成单文本 JSONL（`body.input` 为字符串，`custom_id` 编码 db_id，不再生成 `embed_map.json`）；stage6 读取 JSONL 后调用 `EmbeddingClient.embed_single()` 逐条同步处理，删除 fallback 路径和 `EMBED_ARRAY_MAX_SIZE` 配置
 - ✅ **删除 `batch_clients.submit_embedding_batch`**：不再被任何代码调用
 - ✅ **299 个测试全部通过**（删除 3 个废弃测试）
+
+### 当前阶段（新进展 — 2026-05-08 并发覆盖与接口字段名修复审计）
+- ✅ **FAISS 进程级文件锁**：`VectorIndex` 新增 `fcntl.flock` + `_reload()`，修改前重载磁盘最新状态，防止多进程并发写入覆盖
+- ✅ **接口字段名标准化**：`plugin_router.py` 中 `_entity_to_dict` `"type"`→`"entity_type"`；`_relation_to_dict` `"type"`→`"rel_type"`, `"from"`/`"to"`→`"from_name"`/`"to_name"`；`tool_graph_path` 同步更新路径节点与边描述字段
+- ✅ **全局图完整性校验**：`_load_all_graphs()` 启动时若 nodes<10 且 documents>0 则自动 `rebuild_global_graph()`；`reprocess_document()` 保存后若节点数低于处理前 50% 自动重建
+- ✅ **305 个测试全部通过**
 
 ### 下一阶段（精确到下一步）
 1. **可视化**：图谱可视化导出（Graphviz / D3.js）
