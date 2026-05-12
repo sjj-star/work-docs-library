@@ -67,7 +67,7 @@
     },
     {
       "name": "query",
-      "description": "按章节标题、关键词或概念查询 chunk",
+      "description": "按章节标题或概念查询 chunk",
       "command": [
         "venv/bin/python3",
         "scripts/plugin_router.py",
@@ -87,10 +87,6 @@
           "chapter_regex": {
             "type": "string",
             "description": "章节标题正则匹配"
-          },
-          "keyword": {
-            "type": "string",
-            "description": "关键词匹配"
           },
           "concept": {
             "type": "string",
