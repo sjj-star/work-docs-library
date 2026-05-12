@@ -1,5 +1,6 @@
 """vector_index 模块."""
 
+import fcntl
 import json
 import logging
 import os
@@ -24,10 +25,45 @@ class VectorIndex:
         self.dim = dim
         self.index_path = index_path or Config.FAISS_INDEX_PATH
         self.id_map_path = id_map_path or Config.ID_MAP_PATH
+        self._lock_path = self.index_path.with_suffix(".lock")
+        self._lock_fd: int | None = None
         self._index: faiss.IndexFlatIP | None = None
         self._id_map: list[int] = []  # faiss internal id -> chunk db id
         self._db_ids: set[int] = set()  # 已索引的 chunk_db_id 集合（防重复）
         self._load()
+
+    def _acquire_lock(self) -> None:
+        """获取进程级排他文件锁（防止并发写覆盖）."""
+        if self._lock_fd is None:
+            self._lock_path.parent.mkdir(parents=True, exist_ok=True)
+            self._lock_path.touch(exist_ok=True)
+            self._lock_fd = os.open(str(self._lock_path), os.O_RDWR | os.O_CREAT)
+        fcntl.flock(self._lock_fd, fcntl.LOCK_EX)
+
+    def _release_lock(self) -> None:
+        """释放文件锁."""
+        if self._lock_fd is not None:
+            fcntl.flock(self._lock_fd, fcntl.LOCK_UN)
+
+    def _reload(self) -> None:
+        """重新加载磁盘上的最新状态（调用方必须已持有锁）."""
+        if Path(self.index_path).exists():
+            self._index = faiss.read_index(str(self.index_path))
+        else:
+            self._index = faiss.IndexFlatIP(self.dim)
+        if Path(self.id_map_path).exists():
+            with open(self.id_map_path, encoding="utf-8") as f:
+                loaded = json.load(f)
+            if isinstance(loaded, dict):
+                max_fid = max(loaded.values()) if loaded else -1
+                self._id_map = [0] * (max_fid + 1)
+                for db_id, fid in loaded.items():
+                    self._id_map[int(fid)] = int(db_id)
+            else:
+                self._id_map = list(loaded)
+        else:
+            self._id_map = []
+        self._db_ids = set(self._id_map)
 
     def _load(self) -> None:
         if Path(self.index_path).exists():
@@ -88,28 +124,33 @@ class VectorIndex:
             raise RuntimeError("Index not initialized")
         if not items:
             return
-        ids = []
-        vectors = []
-        for chunk_db_id, vector in items:
-            if chunk_db_id in self._db_ids:
-                logger.warning(f"跳过重复向量 | db_id={chunk_db_id}")
-                continue
-            vec = np.array([vector], dtype=np.float32)
-            actual_dim = vec.shape[1]
-            if self._index.d != actual_dim:
-                raise RuntimeError(
-                    f"Cannot add vector with {actual_dim} dimensions "
-                    f"to index with {self._index.d} dimensions."
-                )
-            faiss.normalize_L2(vec)
-            vectors.append(vec)
-            ids.append(chunk_db_id)
-        if vectors:
-            all_vecs = np.vstack(vectors)
-            self._index.add(all_vecs)  # type: ignore[reportCallIssue]
-            self._id_map.extend(ids)
-            self._db_ids.update(ids)
-            self._save()
+        self._acquire_lock()
+        try:
+            self._reload()  # 确保基于最新状态操作
+            ids = []
+            vectors = []
+            for chunk_db_id, vector in items:
+                if chunk_db_id in self._db_ids:
+                    logger.warning(f"跳过重复向量 | db_id={chunk_db_id}")
+                    continue
+                vec = np.array([vector], dtype=np.float32)
+                actual_dim = vec.shape[1]
+                if self._index.d != actual_dim:
+                    raise RuntimeError(
+                        f"Cannot add vector with {actual_dim} dimensions "
+                        f"to index with {self._index.d} dimensions."
+                    )
+                faiss.normalize_L2(vec)
+                vectors.append(vec)
+                ids.append(chunk_db_id)
+            if vectors:
+                all_vecs = np.vstack(vectors)
+                self._index.add(all_vecs)  # type: ignore[reportCallIssue]
+                self._id_map.extend(ids)
+                self._db_ids.update(ids)
+                self._save()
+        finally:
+            self._release_lock()
 
     def remove_doc(self, chunk_db_ids: list[int]) -> None:
         """remove_doc 函数."""
@@ -117,21 +158,26 @@ class VectorIndex:
             raise RuntimeError("Index not initialized")
         if not chunk_db_ids:
             return
-        ids_to_remove = set(chunk_db_ids)
-        new_map = []
-        vectors = []
-        for fid, db_id in enumerate(self._id_map):
-            if db_id not in ids_to_remove:
-                new_map.append(db_id)
-                vectors.append(self._index.reconstruct(fid))  # type: ignore[reportCallIssue]
-        self._index = faiss.IndexFlatIP(self.dim)
-        if vectors:
-            mat = np.array(vectors, dtype=np.float32)
-            faiss.normalize_L2(mat)
-            self._index.add(mat)  # type: ignore[reportCallIssue]
-        self._id_map = new_map
-        self._db_ids = set(new_map)
-        self._save()
+        self._acquire_lock()
+        try:
+            self._reload()  # 确保基于最新状态操作
+            ids_to_remove = set(chunk_db_ids)
+            new_map = []
+            vectors = []
+            for fid, db_id in enumerate(self._id_map):
+                if db_id not in ids_to_remove:
+                    new_map.append(db_id)
+                    vectors.append(self._index.reconstruct(fid))  # type: ignore[reportCallIssue]
+            self._index = faiss.IndexFlatIP(self.dim)
+            if vectors:
+                mat = np.array(vectors, dtype=np.float32)
+                faiss.normalize_L2(mat)
+                self._index.add(mat)  # type: ignore[reportCallIssue]
+            self._id_map = new_map
+            self._db_ids = set(new_map)
+            self._save()
+        finally:
+            self._release_lock()
 
     def search(self, query_vector: list[float], top_k: int = 5) -> list[tuple[int, float]]:
         """Search 函数."""

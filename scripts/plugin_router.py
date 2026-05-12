@@ -58,7 +58,7 @@ def _chunk_to_dict(ck, preview_len: int = 500) -> dict:
 def _entity_to_dict(e) -> dict:
     """将 GraphEntity 序列化为字典."""
     return {
-        "type": e.entity_type,
+        "entity_type": e.entity_type,
         "name": e.name,
         "properties": e.properties,
         "doc_properties": e.doc_properties,
@@ -75,9 +75,9 @@ def _entity_to_dict(e) -> dict:
 def _relation_to_dict(r) -> dict:
     """将 GraphRelation 序列化为字典."""
     return {
-        "type": r.rel_type,
-        "from": r.from_name,
-        "to": r.to_name,
+        "rel_type": r.rel_type,
+        "from_name": r.from_name,
+        "to_name": r.to_name,
         "from_type": r.from_type,
         "to_type": r.to_type,
         "properties": r.properties,
@@ -661,12 +661,12 @@ def tool_graph_path(params: dict) -> dict:
 
     def _parse_nid(nid: str) -> dict:
         parts = nid.split("::", 1)
-        return {"type": parts[0], "name": parts[1] if len(parts) > 1 else nid}
+        return {"entity_type": parts[0], "name": parts[1] if len(parts) > 1 else nid}
 
     return {
         "success": True,
-        "from": {"type": from_type, "name": from_name},
-        "to": {"type": to_type, "name": to_name},
+        "from_entity": {"entity_type": from_type, "name": from_name},
+        "to_entity": {"entity_type": to_type, "name": to_name},
         "max_depth": max_depth,
         "path_count": len(paths),
         "paths": [[_parse_nid(nid) for nid in p] for p in paths],
@@ -818,8 +818,8 @@ def tool_graph_delete_relation(params: dict) -> dict:
     return {
         "success": True,
         "rel_type": rel_type,
-        "from": f"{from_type}::{from_name}",
-        "to": f"{to_type}::{to_name}",
+        "from_name": f"{from_type}::{from_name}",
+        "to_name": f"{to_type}::{to_name}",
         "message": "Deleted.",
     }
 

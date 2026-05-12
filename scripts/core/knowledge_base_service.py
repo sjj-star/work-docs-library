@@ -119,10 +119,19 @@ class KnowledgeBaseService:
     def _load_all_graphs(self) -> None:
         """加载所有已保存的文档图谱到全局内存图，实现跨文档实体互通."""
         global_path = Config.DB_PATH.parent / Config.GRAPH_OUTPUT_DIR / "global.json"
+        doc_count = len(self.db.list_documents())
         if global_path.exists():
             try:
                 self.graph.load(global_path)
-                logger.info(f"全局图谱已加载 | {self.graph.stats()}")
+                stats = self.graph.stats()
+                logger.info(f"全局图谱已加载 | {stats}")
+                # 启动校验：节点数异常少且 documents 表有数据时自动重建
+                if stats["nodes"] < 10 and doc_count > 0:
+                    logger.warning(
+                        f"全局图谱节点数异常 | nodes={stats['nodes']} | "
+                        f"docs={doc_count} | 触发自动重建"
+                    )
+                    self.rebuild_global_graph()
                 return
             except Exception as e:
                 logger.warning(f"加载全局图谱失败 | error={e}")
@@ -321,6 +330,15 @@ class KnowledgeBaseService:
                     temp.load(graph_path)
                     self._merge_graph(temp)
                 self._save_global_graph()
+                # 完整性校验：保存后节点数不应低于 reprocess 前（允许小幅波动）
+                after_nodes = self.graph.stats()["nodes"]
+                before_nodes = backup_g.number_of_nodes()
+                if after_nodes < before_nodes * 0.5:
+                    logger.warning(
+                        f"全局图节点数异常下降 | before={before_nodes} after={after_nodes} | "
+                        f"触发重建 | doc_id={doc_id}"
+                    )
+                    self.rebuild_global_graph()
                 # 同步 bridge 索引（失败时记录警告，重启后自动恢复）
                 try:
                     self._sync_bridge_for_doc(doc_id)
