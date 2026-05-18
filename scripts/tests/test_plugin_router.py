@@ -449,11 +449,13 @@ def test_image_analysis_persisted_to_chunk_metadata(patched_config, monkeypatch)
 # ---------------------------------------------------------------------------
 
 
-def _make_graph_service():
-    """创建一个预填充了测试数据的 KnowledgeBaseService."""
+@pytest.fixture
+def graph_service(monkeypatch, tmp_path):
+    """创建一个预填充了测试数据的 KnowledgeBaseService（隔离全局图）."""
     from core.graph_store import GraphEntity, GraphRelation, NetworkXGraphStore
     from core.knowledge_base_service import KnowledgeBaseService
 
+    monkeypatch.setattr(Config, "GRAPH_OUTPUT_DIR", str(tmp_path / "graphs"))
     svc = KnowledgeBaseService(
         db=KnowledgeDB(),
         vec=None,  # graph tools don't need vec
@@ -494,10 +496,9 @@ def _make_graph_service():
     return svc
 
 
-def test_graph_query_exact_match(monkeypatch):
+def test_graph_query_exact_match(monkeypatch, graph_service):
     """graph_query 精确匹配实体."""
-    svc = _make_graph_service()
-    monkeypatch.setattr(plugin_router, "_get_service", lambda: svc)
+    monkeypatch.setattr(plugin_router, "_get_service", lambda: graph_service)
 
     result = plugin_router.tool_graph_query({"entity_type": "Module", "name": "TOP"})
     assert result["success"] is True
@@ -505,10 +506,9 @@ def test_graph_query_exact_match(monkeypatch):
     assert result["entities"][0]["name"] == "TOP"
 
 
-def test_graph_query_name_pattern(monkeypatch):
+def test_graph_query_name_pattern(monkeypatch, graph_service):
     """graph_query 按名称模糊匹配."""
-    svc = _make_graph_service()
-    monkeypatch.setattr(plugin_router, "_get_service", lambda: svc)
+    monkeypatch.setattr(plugin_router, "_get_service", lambda: graph_service)
 
     result = plugin_router.tool_graph_query({"name_pattern": "CL"})
     assert result["success"] is True
@@ -516,10 +516,9 @@ def test_graph_query_name_pattern(monkeypatch):
     assert result["entities"][0]["name"] == "CLK"
 
 
-def test_graph_query_by_type(monkeypatch):
+def test_graph_query_by_type(monkeypatch, graph_service):
     """graph_query 按类型列出所有实体."""
-    svc = _make_graph_service()
-    monkeypatch.setattr(plugin_router, "_get_service", lambda: svc)
+    monkeypatch.setattr(plugin_router, "_get_service", lambda: graph_service)
 
     result = plugin_router.tool_graph_query({"entity_type": "Module"})
     assert result["success"] is True
@@ -528,10 +527,9 @@ def test_graph_query_by_type(monkeypatch):
     assert names == {"TOP", "SUB"}
 
 
-def test_graph_query_neighbors(monkeypatch):
+def test_graph_query_neighbors(monkeypatch, graph_service):
     """graph_query depth=1 查询邻居节点."""
-    svc = _make_graph_service()
-    monkeypatch.setattr(plugin_router, "_get_service", lambda: svc)
+    monkeypatch.setattr(plugin_router, "_get_service", lambda: graph_service)
 
     result = plugin_router.tool_graph_query(
         {"entity_type": "Module", "name": "TOP", "depth": 1, "direction": "out"}
@@ -543,10 +541,9 @@ def test_graph_query_neighbors(monkeypatch):
     assert names == {"SUB", "CLK"}
 
 
-def test_graph_query_neighbors_filtered(monkeypatch):
+def test_graph_query_neighbors_filtered(monkeypatch, graph_service):
     """graph_query 按关系类型过滤邻居."""
-    svc = _make_graph_service()
-    monkeypatch.setattr(plugin_router, "_get_service", lambda: svc)
+    monkeypatch.setattr(plugin_router, "_get_service", lambda: graph_service)
 
     result = plugin_router.tool_graph_query(
         {"entity_type": "Module", "name": "TOP", "depth": 1, "rel_type": "CONTAINS"}
@@ -556,10 +553,9 @@ def test_graph_query_neighbors_filtered(monkeypatch):
     assert result["neighbors"][0]["entity"]["name"] == "SUB"
 
 
-def test_graph_path_found(monkeypatch):
+def test_graph_path_found(monkeypatch, graph_service):
     """graph_path 找到路径."""
-    svc = _make_graph_service()
-    monkeypatch.setattr(plugin_router, "_get_service", lambda: svc)
+    monkeypatch.setattr(plugin_router, "_get_service", lambda: graph_service)
 
     result = plugin_router.tool_graph_path(
         {
@@ -578,10 +574,9 @@ def test_graph_path_found(monkeypatch):
     assert path[2]["name"] == "REG"
 
 
-def test_graph_path_not_found(monkeypatch):
+def test_graph_path_not_found(monkeypatch, graph_service):
     """graph_path 找不到路径."""
-    svc = _make_graph_service()
-    monkeypatch.setattr(plugin_router, "_get_service", lambda: svc)
+    monkeypatch.setattr(plugin_router, "_get_service", lambda: graph_service)
 
     result = plugin_router.tool_graph_path(
         {
@@ -595,10 +590,9 @@ def test_graph_path_not_found(monkeypatch):
     assert result["path_count"] == 0
 
 
-def test_graph_query_subgraph(monkeypatch):
+def test_graph_query_subgraph(monkeypatch, graph_service):
     """graph_query depth>1 提取子图."""
-    svc = _make_graph_service()
-    monkeypatch.setattr(plugin_router, "_get_service", lambda: svc)
+    monkeypatch.setattr(plugin_router, "_get_service", lambda: graph_service)
 
     result = plugin_router.tool_graph_query({"entity_type": "Module", "name": "TOP", "depth": 2})
     assert result["success"] is True
@@ -615,10 +609,9 @@ def test_graph_tools_missing_params():
     assert plugin_router.tool_graph_upsert_entity({})["success"] is False
 
 
-def test_graph_upsert_entity_create(monkeypatch):
+def test_graph_upsert_entity_create(monkeypatch, graph_service):
     """graph_upsert_entity 创建新实体."""
-    svc = _make_graph_service()
-    monkeypatch.setattr(plugin_router, "_get_service", lambda: svc)
+    monkeypatch.setattr(plugin_router, "_get_service", lambda: graph_service)
 
     result = plugin_router.tool_graph_upsert_entity(
         {"entity_type": "Module", "name": "NEW", "properties": {"desc": "test"}}
@@ -629,10 +622,9 @@ def test_graph_upsert_entity_create(monkeypatch):
     assert result["mode"] == "created"
 
 
-def test_graph_upsert_entity_update(monkeypatch):
+def test_graph_upsert_entity_update(monkeypatch, graph_service):
     """graph_upsert_entity 更新已有实体（含 verify 功能）."""
-    svc = _make_graph_service()
-    monkeypatch.setattr(plugin_router, "_get_service", lambda: svc)
+    monkeypatch.setattr(plugin_router, "_get_service", lambda: graph_service)
 
     # 先创建
     plugin_router.tool_graph_upsert_entity({"entity_type": "Module", "name": "M1"})
@@ -643,27 +635,25 @@ def test_graph_upsert_entity_update(monkeypatch):
     assert result["success"] is True
     assert result["mode"] == "updated"
 
-    e = svc.graph.get_entity("Module", "M1")
+    e = graph_service.graph.get_entity("Module", "M1")
     assert e is not None
     assert e.properties == {"a": 1}
     assert e.verified is True
 
 
-def test_graph_delete_entity(monkeypatch):
+def test_graph_delete_entity(monkeypatch, graph_service):
     """graph_delete_entity 删除实体."""
-    svc = _make_graph_service()
-    monkeypatch.setattr(plugin_router, "_get_service", lambda: svc)
+    monkeypatch.setattr(plugin_router, "_get_service", lambda: graph_service)
 
     plugin_router.tool_graph_upsert_entity({"entity_type": "Module", "name": "DEL"})
     result = plugin_router.tool_graph_delete_entity({"entity_type": "Module", "name": "DEL"})
     assert result["success"] is True
-    assert svc.graph.get_entity("Module", "DEL") is None
+    assert graph_service.graph.get_entity("Module", "DEL") is None
 
 
-def test_graph_upsert_relation(monkeypatch):
+def test_graph_upsert_relation(monkeypatch, graph_service):
     """graph_upsert_relation 添加关系."""
-    svc = _make_graph_service()
-    monkeypatch.setattr(plugin_router, "_get_service", lambda: svc)
+    monkeypatch.setattr(plugin_router, "_get_service", lambda: graph_service)
 
     plugin_router.tool_graph_upsert_entity({"entity_type": "Module", "name": "A"})
     plugin_router.tool_graph_upsert_entity({"entity_type": "Module", "name": "B"})
@@ -680,10 +670,9 @@ def test_graph_upsert_relation(monkeypatch):
     assert result["conflicts"] == []
 
 
-def test_graph_delete_relation(monkeypatch):
+def test_graph_delete_relation(monkeypatch, graph_service):
     """graph_delete_relation 删除关系."""
-    svc = _make_graph_service()
-    monkeypatch.setattr(plugin_router, "_get_service", lambda: svc)
+    monkeypatch.setattr(plugin_router, "_get_service", lambda: graph_service)
 
     plugin_router.tool_graph_upsert_entity({"entity_type": "Module", "name": "A"})
     plugin_router.tool_graph_upsert_entity({"entity_type": "Module", "name": "B"})
@@ -708,20 +697,18 @@ def test_graph_delete_relation(monkeypatch):
     assert result["success"] is True
 
 
-def test_graph_conflicts_empty(monkeypatch):
+def test_graph_conflicts_empty(monkeypatch, graph_service):
     """graph_conflicts 无冲突时返回空列表."""
-    svc = _make_graph_service()
-    monkeypatch.setattr(plugin_router, "_get_service", lambda: svc)
+    monkeypatch.setattr(plugin_router, "_get_service", lambda: graph_service)
 
     result = plugin_router.tool_graph_conflicts({})
     assert result["success"] is True
     assert result["count"] == 0
 
 
-def test_graph_feedback_submit(monkeypatch):
+def test_graph_feedback_submit(monkeypatch, graph_service):
     """graph_feedback action=submit 提交反馈."""
-    svc = _make_graph_service()
-    monkeypatch.setattr(plugin_router, "_get_service", lambda: svc)
+    monkeypatch.setattr(plugin_router, "_get_service", lambda: graph_service)
 
     result = plugin_router.tool_graph_feedback(
         {
@@ -736,10 +723,9 @@ def test_graph_feedback_submit(monkeypatch):
     assert result["feedback_id"] > 0
 
 
-def test_graph_feedback_query(monkeypatch):
+def test_graph_feedback_query(monkeypatch, graph_service):
     """graph_feedback action=query 查询反馈."""
-    svc = _make_graph_service()
-    monkeypatch.setattr(plugin_router, "_get_service", lambda: svc)
+    monkeypatch.setattr(plugin_router, "_get_service", lambda: graph_service)
 
     # 先提交一条
     plugin_router.tool_graph_feedback(
@@ -755,10 +741,9 @@ def test_graph_feedback_query(monkeypatch):
     assert any(f.get("entity_name") == "M1" for f in result["feedbacks"])
 
 
-def test_graph_provenance(monkeypatch):
+def test_graph_provenance(monkeypatch, graph_service):
     """graph_provenance 实体来源溯源."""
-    svc = _make_graph_service()
-    monkeypatch.setattr(plugin_router, "_get_service", lambda: svc)
+    monkeypatch.setattr(plugin_router, "_get_service", lambda: graph_service)
 
     result = plugin_router.tool_graph_provenance({"entity_type": "Module", "name": "TOP"})
     assert result["success"] is True
