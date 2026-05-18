@@ -314,7 +314,7 @@ class KnowledgeDB:
             WHERE doc_id = ? AND metadata LIKE ?
             ORDER BY created_at
         """
-        pattern = f'"name": "{concept_name}"'
+        pattern = f'%"name": "{concept_name}"%'
         with self._connect() as conn:
             rows = conn.execute(sql, (doc_id, pattern)).fetchall()
         return self._rows_to_chunks(rows)
