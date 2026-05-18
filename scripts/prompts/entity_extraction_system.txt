@@ -32,6 +32,8 @@
 - Product: 芯片产品型号（如 TMS320F28379D、TMS320F280049C）
 - Document: 文档本身（properties: doc_type, title, part_number, revision, date）
 
+**Document 实体规则**：每个输入文档只提取一次 Document 实体。名称必须使用文档标题的原始文本，禁止改写为下划线格式，禁止在不同章节中重复提取。
+
 ### Datasheet 专用实体
 - Pin: 引脚（properties: pin_number, signal_name, pin_type, io_type, voltage_level, pull_up_down, alternate_function）
 - Package: 封装（properties: package_type, pin_count, body_size, pitch, thermal_resistance_junction_to_ambient, thermal_resistance_junction_to_case）
@@ -268,6 +270,51 @@ access 属性的取值必须是以下标准缩写之一：
 - 每个转换提取为 Transition 实体
 - TRANSITIONS_FROM 和 TRANSITIONS_TO 关系必须完整
 - trigger_event 和 guard_condition 属性不能为空
+
+## 实体质量约束（新增）
+
+以下规则用于防止过度提取和低质量实体，必须严格遵守：
+
+### 1. 代码示例排除规则
+
+遇到代码示例（code listing / assembly code / C code / pseudo-code）时：
+- ❌ 不提取代码中的局部变量、临时变量、循环变量（如 i, j, tmp, status, current_ch）
+- ❌ 不提取代码标签（如 HRBUCK_DRV, Loop_Start）
+- ❌ 不提取汇编中的地址常量（如 EPWM1_BASE, CMPAHR1）
+- ❌ 不提取代码中的宏展开值（如 .set 定义的值）
+- ✅ 只提取代码示例中被文档正文明确描述为可配置参数的项
+- ✅ 只提取代码中被文档正文引用的关键配置值（如 "将 TBPRD 设置为 1000" 中的 TBPRD）
+
+### 2. Feature 实体过滤规则
+
+以下类型文本禁止提取为 Feature：
+- 章节标题本身（如 "2.1 Controlling the HRPWM Capabilities"）
+- 文档格式说明（如 "Hexadecimal Notation Convention", "Register Representation Convention"）
+- 目录条目或列表前缀（如 "Step 1.", "Example 7.", "Figure 1-1"）
+- 纯描述性段落标题（如 "Introduction", "Overview", "Summary"）
+
+Feature 必须是产品的独立技术功能点，具有可验证性：
+- ✅ "High Resolution PWM Generation"（可验证的功能）
+- ❌ "32-bit_Concatenated_Write"（代码操作，不是功能）
+- ❌ "Count-down Mode"（计数器工作模式，过于底层）
+
+### 3. 类型唯一性规则
+
+同一个概念在同一文档中只能被赋予一个实体类型。选择最合适的类型，优先级：
+Module > Register > Signal > Instruction > Parameter > Feature
+
+- MEP 是 HRPWM 内部的微边定位模块 → Module（不是 Feature）
+- HRPWM 是高分辨率脉宽调制模块 → Module（不是 Feature）
+- SYSCLKOUT 是系统时钟输出信号 → Signal（不是 Parameter）
+
+### 4. Parameter 实体精确规则
+
+Parameter 只提取文档正文中明确描述为可配置参数或宏定义的项：
+- ✅ 文档文字说明 "MEP_ScaleFactor 参数控制微边定位精度"
+- ✅ 配置表中的配置项（如 "PWM Frequency: 20kHz"）
+- ❌ 代码中的临时变量（如 current_ch, status）
+- ❌ 描述性文本（如 "Reserved Bit Definition"）
+- ❌ 计算过程中的临时常数（如 "Fractional Rounding Constant"）
 
 ## 属性标准化规则
 
