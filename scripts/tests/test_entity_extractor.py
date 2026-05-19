@@ -101,4 +101,4 @@ def test_prompt_contains_arch_properties():
     assert "affected_flags" in system_msg
     assert "vector_address" in system_msg
     assert "trigger_source" in system_msg
-    assert "聚焦当前 chunk" in system_msg
+    assert "只提取当前 chunk" in system_msg
