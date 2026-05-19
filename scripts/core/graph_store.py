@@ -709,6 +709,29 @@ class NetworkXGraphStore(GraphStore):
                 if not self._property_index[idx_key]:
                     del self._property_index[idx_key]
 
+    @staticmethod
+    def _completeness_score(props: dict[str, Any]) -> int:
+        """计算属性字典的完整性评分：非空键值对的数量.
+
+        None、空字符串 ""、空列表 [] 不计分。
+        """
+        return sum(1 for v in props.values() if v not in (None, "", []))
+
+    @staticmethod
+    def _find_property_source(
+        doc_properties: dict[str, dict[str, Any]], key: str, value: Any
+    ) -> str | None:
+        """从 doc_properties 中推断某个属性键值对的来源文档.
+
+        遍历 doc_properties，找到 value 与当前属性值匹配的 doc_id。
+        如果多个文档匹配（值相同），返回第一个。
+        如果无匹配（如手动修改过），返回 None。
+        """
+        for did, props in doc_properties.items():
+            if props.get(key) == value:
+                return did
+        return None
+
     def add_entity(self, entity: GraphEntity) -> list[dict]:
         """add_entity 函数. 返回冲突日志列表."""
         with self._lock:
@@ -727,20 +750,37 @@ class NetworkXGraphStore(GraphStore):
             self._remove_from_property_index(nid, entity.entity_type, old_props)
             # 合并 properties，检测冲突
             merged_props = old_props
+            existing_doc_props = existing.get("doc_properties", {})
             for k, v in entity.properties.items():
                 if k in merged_props and merged_props[k] != v:
+                    # 推断当前值的来源文档，比较完整性评分
+                    current_val = merged_props[k]
+                    new_score = self._completeness_score(entity.properties)
+                    old_doc_id = self._find_property_source(existing_doc_props, k, current_val)
+                    if old_doc_id:
+                        old_score = self._completeness_score(
+                            existing_doc_props.get(old_doc_id, {})
+                        )
+                        if new_score > old_score:
+                            merged_props[k] = v
+                    else:
+                        old_score = -1  # 无法推断来源，保留旧值
+
                     conflicts.append(
                         {
                             "entity_type": entity.entity_type,
                             "name": entity.name,
                             "property_key": k,
-                            "old_value": merged_props[k],
+                            "old_value": current_val,
                             "new_value": v,
                             "timestamp": now,
                             "doc_id": doc_id,
+                            "old_completeness": old_score,
+                            "new_completeness": new_score,
                         }
                     )
-                merged_props[k] = v
+                else:
+                    merged_props[k] = v
             existing["properties"] = merged_props
             # 加入新属性索引
             self._add_to_property_index(nid, entity.entity_type, merged_props)
@@ -750,7 +790,6 @@ class NetworkXGraphStore(GraphStore):
             existing["source_doc_ids"] = existing_sids
             existing["source_chapter"] = entity.source_chapter or existing.get("source_chapter", "")
             # 保存文档级属性快照
-            existing_doc_props = existing.get("doc_properties", {})
             if doc_id:
                 existing_doc_props[doc_id] = dict(entity.properties)
             existing["doc_properties"] = existing_doc_props
@@ -853,8 +892,22 @@ class NetworkXGraphStore(GraphStore):
         if existing:
             # 检测属性冲突
             merged_props = dict(existing.get("properties", {}))
+            existing_doc_props = existing.get("doc_properties", {})
             for k, v in relation.properties.items():
                 if k in merged_props and merged_props[k] != v:
+                    # 推断当前值的来源文档，比较完整性评分
+                    current_val = merged_props[k]
+                    new_score = self._completeness_score(relation.properties)
+                    old_doc_id = self._find_property_source(existing_doc_props, k, current_val)
+                    if old_doc_id:
+                        old_score = self._completeness_score(
+                            existing_doc_props.get(old_doc_id, {})
+                        )
+                        if new_score > old_score:
+                            merged_props[k] = v
+                    else:
+                        old_score = -1  # 无法推断来源，保留旧值
+
                     conflicts.append(
                         {
                             "from_type": relation.from_type,
@@ -863,19 +916,21 @@ class NetworkXGraphStore(GraphStore):
                             "to_name": relation.to_name,
                             "rel_type": relation.rel_type,
                             "property_key": k,
-                            "old_value": merged_props[k],
+                            "old_value": current_val,
                             "new_value": v,
                             "timestamp": now,
                             "doc_id": doc_id,
+                            "old_completeness": old_score,
+                            "new_completeness": new_score,
                         }
                     )
-                merged_props[k] = v
+                else:
+                    merged_props[k] = v
             existing["properties"] = merged_props
             existing_sids = _normalize_sids(existing.get("source_doc_ids", set()))
             existing_sids.update(relation.source_doc_ids)
             existing["source_doc_ids"] = existing_sids
             # 保存文档级属性快照
-            existing_doc_props = existing.get("doc_properties", {})
             if doc_id:
                 existing_doc_props[doc_id] = dict(relation.properties)
             existing["doc_properties"] = existing_doc_props

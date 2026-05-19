@@ -530,7 +530,10 @@ def test_subgraph_view_counts(graph_store, sample_entities, sample_relations):
 
 
 def test_entity_deduplication_merges_properties(graph_store):
-    """重复添加同名同类型实体应合并属性."""
+    """重复添加同名同类型实体应合并属性.
+
+    完整性相同时（e1=2, e2=2）保留旧值，新键追加。
+    """
     e1 = GraphEntity(entity_type="Module", name="X", properties={"a": 1, "b": 2})
     e2 = GraphEntity(entity_type="Module", name="X", properties={"b": 3, "c": 4})
     graph_store.add_entity(e1)
@@ -538,8 +541,8 @@ def test_entity_deduplication_merges_properties(graph_store):
 
     ent = graph_store.get_entity("Module", "X")
     assert ent is not None
-    assert ent.properties == {"a": 1, "b": 3, "c": 4}
-    # 后添加的实体 source_doc_id 覆盖空值
+    # b 冲突：e1 完整性=2, e2 完整性=2，平局保留旧值 b=2
+    assert ent.properties == {"a": 1, "b": 2, "c": 4}
     assert ent.name == "X"
 
 
@@ -566,6 +569,83 @@ def test_entity_deduplication_preserves_source_when_empty(graph_store):
     assert ent.properties == {"a": 1, "b": 2}
     assert ent.source_doc_ids == {"doc1"}
     assert ent.source_chapter == "ch1"
+
+
+def test_entity_merge_prefers_higher_completeness(graph_store):
+    """冲突属性选择完整性更高的文档."""
+    graph_store.add_entity(
+        GraphEntity(
+            entity_type="Register",
+            name="CTRL",
+            properties={"addr": "0x1000", "width": 16},
+            source_doc_ids={"doc_a"},
+        )
+    )
+    graph_store.add_entity(
+        GraphEntity(
+            entity_type="Register",
+            name="CTRL",
+            properties={"addr": "0x2000"},
+            source_doc_ids={"doc_b"},
+        )
+    )
+    result = graph_store.get_entity("Register", "CTRL")
+    assert result is not None
+    # doc_a 完整性=2 > doc_b 完整性=1，addr 保留 doc_a 的值
+    assert result.properties == {"addr": "0x1000", "width": 16}
+    assert result.doc_properties == {
+        "doc_a": {"addr": "0x1000", "width": 16},
+        "doc_b": {"addr": "0x2000"},
+    }
+
+
+def test_entity_merge_new_key_always_appended(graph_store):
+    """新文档独有的属性键始终追加，不受完整性影响."""
+    graph_store.add_entity(
+        GraphEntity(
+            entity_type="Register",
+            name="CTRL",
+            properties={"addr": "0x1000"},
+            source_doc_ids={"doc_a"},
+        )
+    )
+    graph_store.add_entity(
+        GraphEntity(
+            entity_type="Register",
+            name="CTRL",
+            properties={"addr": "0x2000", "width": 16},
+            source_doc_ids={"doc_b"},
+        )
+    )
+    result = graph_store.get_entity("Register", "CTRL")
+    assert result is not None
+    # addr 冲突：doc_b 完整性=2 > doc_a 完整性=1，覆盖
+    # width 是新键，追加
+    assert result.properties == {"addr": "0x2000", "width": 16}
+
+
+def test_entity_merge_tie_keeps_existing(graph_store):
+    """完整性评分相同时保留旧值."""
+    graph_store.add_entity(
+        GraphEntity(
+            entity_type="Register",
+            name="CTRL",
+            properties={"addr": "0x1000", "width": 16},
+            source_doc_ids={"doc_a"},
+        )
+    )
+    graph_store.add_entity(
+        GraphEntity(
+            entity_type="Register",
+            name="CTRL",
+            properties={"addr": "0x2000", "access": "RW"},
+            source_doc_ids={"doc_b"},
+        )
+    )
+    result = graph_store.get_entity("Register", "CTRL")
+    assert result is not None
+    # doc_a 完整性=2, doc_b 完整性=2，平局保留旧值
+    assert result.properties == {"addr": "0x1000", "width": 16, "access": "RW"}
 
 
 # ---------------------------------------------------------------------------
@@ -812,15 +892,27 @@ def test_verify_entity(graph_store):
 
 def test_add_entity_conflict_detection(graph_store):
     """add_entity 合并时检测属性冲突."""
-    graph_store.add_entity(GraphEntity(entity_type="Register", name="R1", properties={"width": 32}))
+    graph_store.add_entity(
+        GraphEntity(
+            entity_type="Register",
+            name="R1",
+            properties={"width": 32},
+            source_doc_ids={"doc_a"},
+        )
+    )
     conflicts = graph_store.add_entity(
-        GraphEntity(entity_type="Register", name="R1", properties={"width": 64})
+        GraphEntity(
+            entity_type="Register",
+            name="R1",
+            properties={"width": 64, "access": "RW"},
+            source_doc_ids={"doc_b"},
+        )
     )
     assert len(conflicts) == 1
     assert conflicts[0]["property_key"] == "width"
     assert conflicts[0]["old_value"] == 32
     assert conflicts[0]["new_value"] == 64
-    # 属性应被更新
+    # doc_b 完整性=2 > doc_a 完整性=1，属性被更新
     e = graph_store.get_entity("Register", "R1")
     assert e.properties["width"] == 64
 
@@ -1003,8 +1095,8 @@ def test_entity_doc_properties_on_merge(graph_store):
         "doc_a": {"addr": "0x1000"},
         "doc_b": {"addr": "0x2000"},
     }
-    # properties 仍为合并后值（新值覆盖）
-    assert result.properties == {"addr": "0x2000"}
+    # 完整性相同（doc_a=1, doc_b=1），平局保留旧值
+    assert result.properties == {"addr": "0x1000"}
 
 
 def test_relation_doc_properties_on_create(graph_store):
@@ -1054,6 +1146,36 @@ def test_relation_doc_properties_on_merge(graph_store):
         "doc_a": {"access": "RW"},
         "doc_b": {"access": "RO"},
     }
+
+
+def test_relation_merge_prefers_higher_completeness(graph_store):
+    """关系冲突属性选择完整性更高的文档."""
+    graph_store.add_relation(
+        GraphRelation(
+            rel_type="HAS_REGISTER",
+            from_name="TOP",
+            to_name="CTRL",
+            from_type="Module",
+            to_type="Register",
+            properties={"access": "RW", "priority": 1},
+            source_doc_ids={"doc_a"},
+        )
+    )
+    graph_store.add_relation(
+        GraphRelation(
+            rel_type="HAS_REGISTER",
+            from_name="TOP",
+            to_name="CTRL",
+            from_type="Module",
+            to_type="Register",
+            properties={"access": "RO"},
+            source_doc_ids={"doc_b"},
+        )
+    )
+    rels = graph_store.all_relations()
+    assert len(rels) == 1
+    # doc_a 完整性=2 > doc_b 完整性=1，access 保留 doc_a 的值
+    assert rels[0].properties == {"access": "RW", "priority": 1}
 
 
 def test_doc_properties_persistence(graph_store, tmp_path):
