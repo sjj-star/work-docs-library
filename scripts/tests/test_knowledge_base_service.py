@@ -392,3 +392,52 @@ def test_get_chunk_deep_copy(tmp_path, monkeypatch):
     ck.content = "modified"
     ck2 = svc._get_chunk(id1)
     assert ck2.content == "original"
+
+
+def test_submit_feedback_syncs_relation_score(tmp_path, monkeypatch):
+    """关系反馈提交后同步更新内存图中的 feedback_score."""
+    monkeypatch.setattr("core.config.Config.DB_PATH", tmp_path / "test.db")
+    monkeypatch.setattr("core.config.Config.FAISS_INDEX_PATH", tmp_path / "faiss.index")
+    monkeypatch.setattr("core.config.Config.ID_MAP_PATH", tmp_path / "id_map.json")
+
+    svc = KnowledgeBaseService()
+    # 先创建关系
+    svc.graph.add_entity(GraphEntity(entity_type="Module", name="TOP"))
+    svc.graph.add_entity(GraphEntity(entity_type="Register", name="CTRL"))
+    svc.graph.add_relation(
+        GraphRelation(
+            rel_type="HAS_REGISTER",
+            from_type="Module",
+            from_name="TOP",
+            to_type="Register",
+            to_name="CTRL",
+        )
+    )
+
+    # 提交关系反馈
+    svc.submit_feedback(
+        rating=1,
+        relation_type="HAS_REGISTER",
+        relation_from_type="Module",
+        relation_from_name="TOP",
+        relation_to_type="Register",
+        relation_to_name="CTRL",
+    )
+
+    # 验证内存图中的 feedback_score 已同步
+    rels = svc.graph.all_relations()
+    assert len(rels) == 1
+    assert rels[0].feedback_score == 1
+
+    # 再提交一个负反馈
+    svc.submit_feedback(
+        rating=-1,
+        relation_type="HAS_REGISTER",
+        relation_from_type="Module",
+        relation_from_name="TOP",
+        relation_to_type="Register",
+        relation_to_name="CTRL",
+    )
+
+    rels = svc.graph.all_relations()
+    assert rels[0].feedback_score == 0
