@@ -600,7 +600,7 @@ cd /path/to/work-docs-library
 PYTHONPATH=scripts ./venv/bin/python -m pytest scripts/tests/ -v
 ```
 
-**当前状态：296 个测试全部通过。**
+**当前状态：304 个测试全部通过。**
 
 ### 常用测试文档
 
@@ -626,17 +626,57 @@ WORKDOCS_PARSER_API_KEY=your-api-key
 
 ## Prompts 提示词文件
 
-`scripts/prompts/` 目录下的文本文件被代码**运行时读取**，无需重启即可生效。
+`scripts/prompts/` 目录下的文本文件被代码**运行时读取**，无需重启即可生效。修改提示词后，重新执行 `/doc_build_batches` → `/doc_submit_batches` → `/doc_ingest_results` 即可看到效果，无需重启 Kimi CLI。
 
 ### `entity_extraction_system.txt` — 实体提取 system 提示词
 
 **被谁读取**：`EntityExtractor._load_prompt("entity_extraction_system")`
 
-**作用**：定义 LLM 的身份、实体/关系类型、输出格式。
+**作用**：定义 LLM 的身份、实体/关系类型、输出格式、**三步提取流程**和**质量约束**。
 
-**格式规范**：
-- 纯文本，无占位符
-- 明确指定 `entities`、`relationships`、`image_descriptions` 的 JSON 输出格式
+**当前设计要点**：
+
+#### 三步提取流程
+
+为减少过度提取和跨类型误提取，Prompt 要求 LLM 按以下三步执行：
+
+1. **Step 1 — 内容分类**：先将 chunk 内容归类为 9 种类型之一（寄存器字段描述表格、信号/参数表格、代码示例、架构描述、协议状态机、勘误/电气规格、概述/介绍、指令参考、其他）
+2. **Step 2 — 按类型提取**：仅在对应类型范围内提取实体
+   - RegisterField **只能从寄存器字段描述表格**中提取
+   - 代码示例中**禁止提取任何实体**（零容忍）
+   - 禁止将描述性短语（如 "Compare A"、"Phase registers"）提取为 Register
+3. **Step 3 — 关系链补全 + 去重**：确保每个非 Document 实体至少一条直接关系，同文档内 Document/Product/Module 去重
+
+#### 代码示例排除规则（零容忍）
+
+以下代码元素**绝对禁止**提取为实体：
+
+| 类型 | 示例 |
+|------|------|
+| 局部变量 | `epwm1_tz_isr`、`temp_count` |
+| 代码标签 | `Epwm1_tz_isr:` |
+| 汇编地址常量 | `0x007010` |
+| 宏展开值 | `EPWM1_INT` |
+| 寄存器字段访问 | `EPwm1Regs.TBCTL.bit.PRDLD` |
+| 位域赋值 | `.bit.XXX = YYY` |
+
+> **关键洞察**：`EPwm1Regs.TBCTL.bit.PRDLD` 在代码中是**访问语法**，不是 RegisterField 的定义。RegisterField 的定义只存在于寄存器字段描述表格中。
+
+#### 实体类型优先级
+
+同一概念在同一文档中只能属于一个类型：`Module > Register > Signal > Instruction > Parameter > Feature`
+
+#### 属性格式规范
+
+Prompt 中显式规定格式，确保 LLM 输出统一：
+
+| 属性 | 格式 | 示例 |
+|------|------|------|
+| `width` | 纯数字 | `16` |
+| `access` | R/RW/R-0/W1C | `R/W` |
+| `reset_value` | 十六进制字符串 | `"0x0000"` |
+| `address_offset` | 十六进制字符串 | `"0x0002"` |
+| `bits` | 冒号分隔 | `"15:0"` |
 
 ### `entity_extraction_user.txt` — 实体提取 user 模板
 
@@ -648,9 +688,27 @@ WORKDOCS_PARSER_API_KEY=your-api-key
 - 必须包含 `{{chapters}}` 占位符，运行时被替换为章节文本
 - 必须包含 `{{images}}` 占位符（当前替换为空字符串，图片通过 multimodal content 直接传入）
 
+### Prompt 迭代与质量评审
+
+**Prompt 版本化管理流程**：
+1. 修改 `scripts/prompts/entity_extraction_system.txt`
+2. 执行 `/doc_build_batches {doc_id}` → `/doc_submit_batches {doc_id}` → `/doc_ingest_results {doc_id}`
+3. 对比全局节点/边数量变化、具体实体差异
+4. 记录"预期效果 vs 实际效果"，修正 Prompt 表述
+
+**质量评审 checklist**（每次修改后执行）：
+- [ ] 全局节点数变化是否符合预期（减少误提取 → 应下降）
+- [ ] 代码示例中是否仍有 Register/RegisterField 误提取
+- [ ] Register 属性是否完整（address_offset、width、access、reset_value）
+- [ ] bits/reset_value 格式是否统一
+- [ ] 是否有孤立节点（无关系的实体）
+- [ ] 跨文档合并后属性冲突是否合理
+
 ---
 
 ## 已知限制与注意事项
+
+### 功能限制
 
 1. **仅支持 PDF**：DOCX/XLSX 解析器代码已存在，但尚未接入 `DocGraphPipeline`
 2. **Batch API 延迟**：Batch API 成本为同步 API 的 50%，但存在分钟级排队延迟
@@ -662,6 +720,19 @@ WORKDOCS_PARSER_API_KEY=your-api-key
 8. **输入文档约束**：Markdown 图片引用 `![name](images/path.jpg)` 中的 `name` 将作为 `image_id`，建议填写有意义的名称
 9. **PDF 解析依赖 BigModel 专用 API**：文档提取主路径使用 BigModel 专有 Expert API（`/files/parser/create`），非 OpenAI-compatible，无法直接切换至其他厂商。若 BigModel 不可用，可依赖本地 `PDFParser`（PyMuPDF）作为 fallback，输出格式与 BigModel 完全一致，但解析质量可能略有差异
 10. **跨产品外设变体**：同一个外设/寄存器出现在多个产品手册中时，`doc_properties` 保存每个文档的原始属性快照，全局图的 `properties` 仍为合并后值。查询时通过 `doc_id` 参数获取指定产品的精确属性。产品型号通过启发式正则从文档标题/文件名自动提取
+
+### 实体提取质量已知问题（Prompt 迭代中）
+
+以下问题已通过 Prompt 优化大幅缓解，但尚未完全消除：
+
+| 问题 | 现状 | 缓解措施 | 后续方向 |
+|------|------|---------|---------|
+| **代码示例中的 Register 误提取** | `EPwm1Regs.AQCTLA`（无 `.bit.` 前缀）仍被提取为 Register | Prompt 已禁止 `.bit.XXX = YYY` 和 `Regs.XXX.bit.YYY` 模式，但未覆盖 `Regs.XXX` 模式 | 强化 Prompt：明确禁止提取 `Regs.` 前缀的代码访问语法 |
+| **Register 属性缺失** | 14 个 Register 中 11 个 access 缺失、14 个 reset_value 缺失 | 属性格式已在 Prompt 中规范 | 在 Prompt 中增加"Register 必须提取 access/reset_value"的强制要求，或从表格列映射补全 |
+| **bits 格式不统一** | 同一文档中出现 `15-4`、`15:8`、`7-0`（减号）和 `15:8`、`7:0`（冒号）混用 | Prompt 已规定 `"15:0"` 冒号格式 | 在 Prompt 最终检查清单中增加 bits 格式校验 |
+| **reset_value 格式不统一** | `0`（数字）与 `0x0000`（十六进制）混用 | Prompt 已规定 `"0x0000"` 字符串格式 | 同上，在最终检查清单中增加格式校验 |
+| **孤立 RegisterField** | `TBPHSH`、`Reserved` 来源为 Appendix A 而非字段描述表格 | — | 在 Prompt 中增加 Appendix/附录章节排除规则 |
+| **跨文档属性合并** | 已修复：全局 `properties` 合并时比较文档信息完整性（非空属性数量），完整性高的文档优先。互补属性始终取并集。平局保留旧值。无法推断来源时保留现有值 | `doc_properties` 保存原始快照，`doc_id` 查询可获取精确属性 | 完整性评分基于属性数量而非语义权重。修改后建议调用 `/rebuild_global_graph` 重建全局图
 
 ---
 

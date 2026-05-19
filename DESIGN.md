@@ -6,18 +6,27 @@
 
 ## 1. 为什么 Batch API 优先？
 
-**选择**：所有 LLM 调用（实体提取 + 向量化）默认走 Batch API。使用通用 `BatchClient`（继承 `BaseBatchClient`），通过配置参数（`api_key`/`base_url`/`batch_endpoint`/`download_url_template`）适配不同服务商的 OpenAI-compatible Batch API，无需为每个厂商单独实现客户端。
+**选择**：**实体提取**（LLM 抽取结构化实体/关系）走 Batch API；**向量化**（Embedding）走同步单文本 API。使用通用 `BatchClient`（继承 `BaseBatchClient`），通过配置参数（`api_key`/`base_url`/`batch_endpoint`/`download_url_template`）适配不同服务商的 OpenAI-compatible Batch API，无需为每个厂商单独实现客户端。
 
 **原因**：
 - **成本**：Batch API 价格为同步 API 的 50%，对于文档处理这类非实时场景，成本优势显著
 - **吞吐量**：`submit_parallel_batches()` 按 100MB JSONL 限制自动切分，ThreadPoolExecutor 并行提交，可处理超大文档
-- **可接受性**：技术文档导入是离线任务，分钟级排队延迟对用户体验影响有限
+- **可接受性**：实体提取的 Batch API 延迟通常为分钟级，对离线文档导入场景可接受
+
+**为什么向量化不走 Batch API？**
+
+项目早期曾使用 BigModel Embedding Batch API，但实践中发现两个致命问题：
+
+1. **处理时间不可接受**：BigModel Embedding Batch API 的实际处理时间高达 **9 小时**，而同步单文本 API 仅需**分钟级**完成。9 小时的等待使 pipeline 失去实用价值。
+
+2. **Tokenizer 不透明导致切分策略复杂**：BigModel embedding-3 的 tokenizer 与 tiktoken 不存在固定比例关系（对数字/单独字母接近字符级编码，对自然语言使用子词编码），导致按 token 分组的逻辑复杂且容易触发 3072 token 上限错误。实验后改为纯字符数限制（`CHUNK_MAX_CHARS = 6000`），彻底解决了分组问题。
+
+**经验**：Batch API 的延迟不是统一的——LLM Batch API（分钟级）与 Embedding Batch API（小时级）有数量级差异。当外部 tokenizer 不透明时，**字符数限制是比 token 估算更可靠的切分策略**。
 
 **权衡**：
-- 延迟从秒级变为分钟级，不适合实时交互场景
+- 实体提取延迟从秒级变为分钟级，不适合实时交互场景
 - 需要实现轮询和超时逻辑（`LLM_BATCH_TIMEOUT` 默认 3600 秒）
 - 单个 JSONL 不能超过 100MB，超大文档需自动拆分
-- 向量化在 `BatchClient` 初始化失败时会**降级到同步 `EmbeddingClient`**，确保 pipeline 不因 batch 配置缺失而中断
 
 ---
 
@@ -29,7 +38,7 @@
 - **轻量**：无需引入外部数据库服务，零部署成本
 - **JSON 序列化**：`nx.node_link_data()` / `nx.node_link_graph()` 支持完整的图结构导出/导入，便于版本控制和调试
 - **当前需求足够**：支持邻居查询、子图提取、BFS 路径搜索（`find_path`，默认深度 3，硬上限 6 可通过 `Config.GRAPH_MAX_PATH_DEPTH` 调整），NetworkX 的内存遍历性能完全满足
-- **预留接口**：`GraphStore` 抽象基类已预留 Neo4j 迁移接口，未来需求变化时可无缝替换
+- **预留接口**：`GraphStore` 抽象基类已预留 Neo4j 迁移接口，但项目中**尚无 Neo4j 实现类**，当前无迁移计划
 
 **增强功能**：
 - **数据质量标记**：`GraphEntity`/`GraphRelation` 新增 `confidence`/`verified`/`created_at`/`updated_at`/`feedback_score` 字段，支持置信度追踪和人工验证
@@ -503,6 +512,112 @@ graph_provenance 优化（图谱→向量）:
 
 ---
 
+## 18. 跨文档属性差异处理机制
+
+### 18.1 为什么引入 `doc_properties`？
+
+**核心问题**：不同技术文档对同一对象的描述完整性不同。文档 A 可能详细描述寄存器的所有属性（address_offset、width、access、reset_value），文档 B 可能只是引用该寄存器，只提到名称。当两者都提取为 Register 实体并入全局图时，如何保留各自原始描述，同时提供统一查询视图？
+
+**三层数据模型**：
+
+| 层级 | 字段 | 作用 | 示例 |
+|------|------|------|------|
+| 全局合并属性 | `properties` | 跨文档合并后的统一属性（冲突时后来者覆盖） | `{"width": 16, "access": "R/W"}` |
+| 文档原始快照 | `doc_properties[doc_id]` | 每个文档提取时的原始属性，永不丢失 | `{"doc_A": {"width": 16}, "doc_B": {"width": 32}}` |
+| 来源追踪 | `source_doc_ids` | 该实体被哪些文档提及 | `["doc_A", "doc_B"]` |
+
+**合并策略**（`GraphStore._add_entity_unsafe`）：
+1. **属性值冲突**（doc_A: width=16, doc_B: width=32）：比较两个来源文档的**信息完整性评分**（非空属性数量），评分高的一方写入 `properties`。`doc_properties` 各自保留，同时生成 `conflict_logs` 记录。完整性相同时保留旧值（保守策略）
+2. **属性互补**（doc_A 有 addr，doc_B 有 access）：`properties` 取并集（新键直接追加，不受完整性影响），`doc_properties` 各自保留
+3. **详细 vs 简略**（doc_A 有全部属性，doc_B 只有名称）：`properties` 保留更完整文档的属性值，`doc_properties` 保留 B 的简略快照
+4. **无法推断来源**（如手动修改全局图、旧数据无 `doc_properties`）：保留现有值，保守策略
+
+**完整性评分**：
+```python
+def _completeness_score(props: dict) -> int:
+    return sum(1 for v in props.values() if v not in (None, "", []))
+```
+
+简单、通用、无需维护类型权重表。None、空字符串、空列表不计分。
+
+**查询时的属性替换**（`_apply_doc_properties`）：
+```python
+def _apply_doc_properties(entity, doc_id):
+    if doc_id and doc_id in entity.doc_properties:
+        entity = copy.deepcopy(entity)  # 深拷贝，不修改全局图
+        entity.properties = entity.doc_properties[doc_id]
+    return entity
+```
+
+调用 `graph_query(entity_type="Register", name="TBCTL", doc_id="doc_A")` 时，返回的 `properties` 是 doc_A 的原始快照，而非全局合并值。
+
+**冲突日志表**（`conflict_logs`）：
+```sql
+CREATE TABLE conflict_logs (
+    id INTEGER PRIMARY KEY,
+    entity_type TEXT, name TEXT,
+    property_key TEXT, old_value TEXT, new_value TEXT,
+    timestamp TEXT, doc_id TEXT
+);
+```
+
+### 18.2 为什么引入 `Product` 实体？
+
+文档解析时自动从产品型号格式（如 `TMS320F28379D`）提取，建立 `Product --[HAS_MODULE]--> Module` 关系，作为产品级查询入口。
+
+**Agent 推理流程**：
+```
+graph_query(entity_type="Product", name="TMS320F28379D")
+→ graph_neighbors(Product, rel_type="HAS_MODULE", doc_id="doc_hash")
+→ graph_query(Module("DMA_Controller"), doc_id="doc_hash")
+→ 获取 doc_properties["doc_hash"]["address_base"] = "0x4000"
+```
+
+**权衡**：
+- 存储量增加：每个文档的每个实体多保存一份属性（通常 < 10K 实体，可接受）
+- 完整性评分基于属性数量而非语义重要性。例如 doc_A 有 `description`（长文本）和 `width`，doc_B 有 `addr`、`width`、`access`，doc_B 的评分更高（3 > 2），`width` 冲突时选择 doc_B。这在绝大多数场景下合理，但极端情况下可能不反映"哪个属性更重要"
+- 当旧数据无 `doc_properties` 时（如手动编辑全局图、旧版本导入的数据），无法推断属性来源，默认保留现有值。建议修改后调用 `/rebuild_global_graph` 重建
+- 产品型号提取依赖启发式正则，可能误识别或漏识别
+
+---
+
+## 19. 为什么 Pipeline 六阶段拆分？
+
+**选择**：将 `DocGraphPipeline._process_one` 从三阶段（`stage1_parse` / `stage2_build_jsonl` / `stage3_ingest`）拆分为六阶段（`stage1_parse` / `stage2_build_jsonl` / `stage3_submit_batches` / `stage4_ingest_results` / `stage5_build_embed_jsonl` / `stage6_submit_embed_batches`），其中 `stage3` 提交 LLM Batch API 后将**原始结果文件保存到磁盘**，`stage4` 从磁盘读取结果并解析入库（**不含向量化**），`stage5` 本地构建 Embedding 同步 API 输入 JSONL，`stage6` 调用同步 Embedding API 逐条完成向量化。
+
+**原因**：
+- **中间产物可审计**：`knowledge_base/batch/{doc_id}_results.jsonl` 包含 LLM 的原始 JSON 返回，可用于调试提取质量、审计 LLM 行为
+- **阶段可独立执行**：stage3（API 调用，产生费用和延迟）与 stage4/5/6（本地处理，零成本）解耦。用户可以在 stage3 完成后审查结果，再决定是否执行 stage4
+- **失败可重试**：stage4 入库失败（如数据库锁定）时，无需重新调用 Batch API（避免重复付费和排队），直接重试 stage4 即可；同理 stage6 向量化失败仅需重试 stage6
+- **结果可编辑**：用户可手动修改 `batch/{doc_id}.jsonl` 后重新执行 stage3（增量过滤仍会生效），或修改 `results.jsonl` 后重新执行 stage4，修正 LLM 提取错误而无需重新调 API
+- **向量化解耦**：stage4 完成后 chunks 状态为 `embedded`，知识图谱已可查询；stage5/stage6 独立执行向量化，不阻塞图谱使用
+- **向后兼容**：`stage3_ingest()` 保留原签名，内部委托给 `stage3_submit_batches` + `stage4_ingest_results` + `stage5_build_embed_jsonl` + `stage6_submit_embed_batches`，现有调用方无需修改
+
+**中间产物清单**：
+
+| 阶段 | 产物 | 路径 | 说明 |
+|------|------|------|------|
+| Stage 1 | result.md | `parsed/{doc_id}/result.md` | 解析后的 Markdown（可人工编辑） |
+| Stage 2 | requests.jsonl | `batch/{doc_id}.jsonl` | LLM Batch API 输入请求 |
+| Stage 2 | batch_info.json | `batch/{doc_id}_batch_info.json` | request → chapter 映射 |
+| Stage 3 | results.jsonl | `batch/{doc_id}_results.jsonl` | LLM Batch API 原始返回结果 |
+| Stage 3 | incremental.json | `batch/{doc_id}_incremental.json` | 增量分析摘要 + result.md hash |
+| Stage 4 | 子图谱 | `graphs/{doc_id}.json` | 文档级图谱快照 |
+| Stage 5 | embed.jsonl | `batch/{doc_id}_embed.jsonl` | Embedding 同步 API 输入请求（单文本，custom_id 编码 db_id） |
+| Stage 6 | — | — | 同步调用 Embedding API 逐条处理，结果直接入库（无中间产物文件） |
+
+**状态管理**：
+- `PROCESSING` → stage3 提交中
+- `BATCH_SUBMITTED` → stage3 完成，等待 stage4
+- `embedded` → stage4 完成（chunks 已入库，图谱已构建，但未向量化）
+- `DONE` → stage6 完成（向量化已入库）
+
+**权衡**：
+- 磁盘占用增加：每个文档额外保存 results.jsonl、incremental.json、embed.jsonl 等（通常总计几十 KB 到几十 MB）
+- stage3/stage4 之间需要保持 `result.md` 不变，否则增量分析结果可能不一致（修改 result.md 后应重新走 stage2→stage3）
+
+---
+
 ## 20. 审计修复经验总结
 
 **背景**：2026-04 代码审计发现 21 项缺陷（9 个 P0 数据损坏风险、7 个 P1 可靠性缺陷、5 个 P2 代码质量问题），已全部修复并通过 283 个测试验证。
@@ -526,6 +641,138 @@ graph_provenance 优化（图谱→向量）:
 
 ---
 
+## 21. 为什么 thinking 参数必须始终传递？
+
+**选择**：LLM Batch API 请求中无论 `LLM_THINKING_ENABLED` 配置为 `0` 还是 `1`，都在 body 中显式传递 `extra_body={"thinking": {"type": "enabled"/"disabled"}}`。
+
+**原因**：
+- **Kimi K2.6 等模型 thinking 默认开启**：如果不传递参数，模型始终使用 thinking 模式，用户配置 `thinking_enabled=0` 将无效
+- **显式控制**：`{"type": "disabled"}` 可可靠关闭 thinking，`{"type": "enabled"}` 可确保开启（配合 `keep: "all"` 可实现多轮推理连贯）
+- **Batch API 一致性**：同步对话客户端（`LLMChatClient`）和 Batch API 请求（`EntityExtractor._build_batch_requests()`）使用相同的参数传递逻辑
+
+**实现**：
+- `llm_chat_client.py`：`extra_body={"thinking": {"type": "enabled" if self.thinking_enabled else "disabled"}}`
+- `doc_graph_pipeline.py`：在 `_build_batch_requests()` 的 request body 中同样添加 `extra_body`
+- 用户编辑 `batch/{doc_id}.jsonl` 时若删除了 `extra_body`，stage3 读取后会自动补充
+
+---
+
+## 22. 实体提取 Prompt 设计
+
+### 22.1 设计演进：从"验证导向提取规则"到"分步引导提取"
+
+**初始方案的问题**：
+早期 Prompt 采用"表格逐行提取"+"验证导向规则"设计：
+- 要求 LLM 对每一行寄存器表都提取实体
+- 要求验证每个提取的实体是否有明确来源
+- 要求补全缺失的关系链
+
+**过度提取的根因**：
+1. **验证规则反噬**："每个实体必须有至少一条直接关系"的规则，导致 LLM 为代码示例中的临时变量（如 `EPwm1Regs.TBCTL.bit.PRDLD`）编造 `HAS_FIELD` 关系
+2. **表格逐行提取的副作用**：LLM 将寄存器表格的表头/列名（如 "Offset"、"Size"）也提取为 RegisterField
+3. **无内容分类引导**：代码示例、概述性文字、寄存器表格都被同等处理，导致代码中的变量被误提取为 Register
+
+**解决方案：三步提取流程**：
+
+```
+Step 1: 内容分类（9 种类型）
+  ├── 寄存器字段描述表格 → 提取 Register + RegisterField
+  ├── 信号/参数表格 → 提取 Signal/Parameter
+  ├── 代码示例 → 禁止提取任何实体（零容忍）
+  ├── 架构/功能描述 → 提取 Module/Feature/Peripheral
+  ├── 协议状态机 → 提取 State/Transition/Protocol
+  ├── 勘误/电气规格 → 提取 Advisory/ElectricalSpec
+  ├── 概述/介绍 → 提取 Document(类型A/B)
+  ├── 指令参考 → 提取 Instruction
+  └── 其他 → 提取 Product/Pin 等
+
+Step 2: 按类型提取（严格范围限制）
+  ├── RegisterField 只能从寄存器字段描述表格提取
+  ├── Register 只能从寄存器表/概述中明确命名的寄存器提取
+  ├── 禁止从代码示例提取任何 RegisterField
+  └── 禁止将描述性短语（"Compare A"、"Phase registers"）提取为 Register
+
+Step 3: 关系链补全 + 去重检查
+  ├── 每个非 Document 实体至少一条直接关系
+  ├── Document/Product/Module 去重（同文档内）
+  └── 属性格式规范化
+```
+
+**效果**：
+- 全局节点数从 350 → 151（-57%）
+- 边数从 414 → 164（-60%）
+- 代码示例误提取从 13 个降至 0 个
+
+### 22.2 代码示例排除规则（零容忍）
+
+**禁止提取的内容**：
+| 类型 | 示例 | 说明 |
+|------|------|------|
+| 局部变量 | `epwm1_tz_isr`、`temp_count` | C 函数内局部变量 |
+| 代码标签 | `Epwm1_tz_isr:` | 汇编/C 标签 |
+| 汇编地址常量 | `0x007010`、`0x6800` | 绝对地址 |
+| 宏展开值 | `EPWM1_INT`、`SYSCTL_PERIPH_EPWM1` | 预处理器宏 |
+| 临时计算结果 | `5 * EPWM_TIMER_TBPRD / 4` | 表达式结果 |
+| **寄存器字段访问** | `EPwm1Regs.TBCTL.bit.PRDLD` | 代码中对寄存器字段的访问语法 |
+| **位域赋值** | `.bit.XXX = YYY` | 位域读写操作 |
+
+**关键洞察**：`EPwm1Regs.TBCTL.bit.PRDLD` 在代码示例中是**访问语法**（表示"读取 TBCTL 寄存器的 PRDLD 字段"），不是寄存器字段的定义。RegisterField 的定义只存在于寄存器字段描述表格中（如 "TBCTL Field Descriptions" 表格）。
+
+### 22.3 实体类型优先级与互斥规则
+
+**优先级链**：`Module > Register > Signal > Instruction > Parameter > Feature`
+
+**互斥原则**：同一个概念在同一文档中只能属于一个类型。
+
+| 冲突场景 | 正确选择 | 错误示例 |
+|----------|---------|---------|
+| 一个名称既像 Register 又像 Signal | 按文档上下文判断，通常是 Register | `TBCTL` 在寄存器表中为 Register，在信号描述中为 Signal |
+| "Compare A" 是寄存器名还是描述短语 | 如果只是描述功能，不提取为 Register | 提取为 Register 会导致与 `CMPA` 混淆 |
+| "Phase registers" 是模块还是寄存器 | 描述性短语，不提取 | 提取为 Register 导致语义丢失 |
+
+### 22.4 属性格式规范
+
+**必须在 Prompt 中显式规定格式**，否则 LLM 输出格式不统一（实测发现同一文档中 `bits` 字段出现 `15-4`、`15:8`、`7-0` 三种格式，`reset_value` 出现 `0` 和 `0x0000` 两种格式）。
+
+| 属性 | 格式 | 示例 | 错误示例 |
+|------|------|------|---------|
+| `width` | 纯数字 | `16` | `"16 bits"` |
+| `access` | R/RW/R-0/W1C 等 | `R/W` | `"Read/Write"` |
+| `reset_value` | 十六进制字符串 | `"0x0000"` | `0`（数字） |
+| `address_offset` | 十六进制字符串 | `"0x0002"` | `"2"` |
+| `bits` | 冒号分隔 | `"15:0"` | `"15-0"` |
+| `description` | 纯文本，无 HTML | `"Counter Compare A Register"` | `"<p>Counter...</p>"` |
+| `size_in_words` | 纯数字 | `1` | 保留原始语义，不附会 shadow/active 解释 |
+
+### 22.5 Document 实体规则
+
+**类型 A（当前文档本身）**：
+- 每个文档只提取一次
+- 属性：`name`=文档标题, `doc_type_hint`=类型推断
+- 建立 `Document --[HAS_MODULE]--> Module` 等关系
+
+**类型 B（引用文档）**：
+- 仅在 "Related Documentation" 等引用章节中提取
+- 建立 `Document_A --[CITES]--> Document_B`
+- 禁止在正文其他位置重复提取引用文档
+
+### 22.6 Prompt 迭代方法论
+
+**Prompt 版本化管理**：
+- 每次修改后执行完整的 Stage 2-6 Pipeline
+- 对比全局节点/边数量变化、具体实体差异
+- 记录"预期效果 vs 实际效果"，修正 Prompt 表述
+
+**质量评审 checklist**（每次修改后执行）：
+1. 全局节点数变化是否符合预期（减少误提取 → 应下降）
+2. 代码示例中是否仍有 Register/RegisterField 误提取
+3. Register 属性是否完整（address_offset、width、access、reset_value）
+4. bits/reset_value 格式是否统一
+5. 是否有孤立节点（无关系的实体）
+6. 跨文档合并后属性冲突是否合理
+
+---
+
 ## 已知限制与权衡汇总
 
 | 限制 | 原因 | 缓解措施 |
@@ -542,88 +789,6 @@ graph_provenance 优化（图谱→向量）:
 | **_is_heading 仅识别 Markdown #** | 已删除数字编号/中文编号匹配，目录条目（如 "1 Introduction 7"）不再被识别为 heading | 目录文本被收集为 heading 之间的 content，可能混入正文 batch；当前接受此行为，后续可通过机制层策略处理 |
 | **冲突日志无关系级记录** | `add_relation` 冲突只记录 property_key，不记录完整关系上下文 | 冲突日志包含 from/to/type 信息，可定位 |
 | **反馈不反向更新 chunk metadata** | 全局图更新后，chunk metadata 中的 extracted_entities 仍是处理时快照 | `get_content_with_entities` 查全局图获取最新状态 |
-
----
-
-## 18. 为什么引入 `doc_properties` 和 `Product` 实体？
-
-**选择**：`GraphEntity`/`GraphRelation` 新增 `doc_properties: dict[str, dict[str, Any]]` 字段，同时引入 `Product` 实体类型。
-
-**原因**：
-- **跨产品外设变体问题**：IC 技术文档中，同一个外设模块（如 `DMA_Controller`）会出现在多个产品手册中，有时仅 MMIO 地址不同，有时功能有更新
-- **属性覆盖丢失信息**：全局图合并时，同名实体采用"新值覆盖旧值"规则，导致不同产品的原始属性丢失。例如 `DMA_CTRL` 在 `TMS320F28379D` 中地址为 `0x1000`，在 `TMS320F280049C` 中为 `0x2000`，后处理的文档会覆盖前者
-- **Agent 需要精确查询**：当 Agent 生成指定芯片产品的外设代码时，必须获取该产品文档中描述的原始属性，而非被覆盖后的合并值
-
-**实现**：
-- **`doc_properties[doc_id]`**：每个实体/关系在加入全局图时，同时保存一份该文档的原始 `properties` 快照。合并时 `properties` 继续按原规则覆盖，但 `doc_properties` 追加不丢失
-- **`Product` 实体**：文档解析时自动从产品型号格式（如 `TMS320F28379D`）提取，建立 `Product --[HAS_MODULE]--> Module` 关系，作为产品级查询入口
-- **查询接口增强**：`graph_query`、`graph_neighbors`、`get_content_with_entities` 均支持 `doc_id` 参数，返回时自动将 `properties` 替换为 `doc_properties[doc_id]` 中的快照
-
-**Agent 推理流程**：
-```
-graph_query(entity_type="Product", name="TMS320F28379D")
-→ graph_neighbors(Product, rel_type="HAS_MODULE", doc_id="doc_hash")
-→ graph_query(Module("DMA_Controller"), doc_id="doc_hash")
-→ 获取 doc_properties["doc_hash"]["address_base"] = "0x4000"
-```
-
-**权衡**：
-- 存储量增加：每个文档的每个实体多保存一份属性（通常 < 10K 实体，可接受）
-- 产品型号提取依赖启发式正则，可能误识别或漏识别
-
----
-
-## 19. 为什么 Pipeline 六阶段拆分？
-
-**选择**：将 `DocGraphPipeline._process_one` 从三阶段（`stage1_parse` / `stage2_build_jsonl` / `stage3_ingest`）拆分为六阶段（`stage1_parse` / `stage2_build_jsonl` / `stage3_submit_batches` / `stage4_ingest_results` / `stage5_build_embed_jsonl` / `stage6_submit_embed_batches`），其中 `stage3` 提交 LLM Batch API 后将**原始结果文件保存到磁盘**，`stage4` 从磁盘读取结果并解析入库（**不含向量化**），`stage5` 本地构建 Embedding Batch JSONL，`stage6` 提交 Embedding Batch API 完成向量化。
-
-**原因**：
-- **中间产物可审计**：`knowledge_base/batch/{doc_id}_results.jsonl` 包含 LLM 的原始 JSON 返回，可用于调试提取质量、审计 LLM 行为
-- **阶段可独立执行**：stage3（API 调用，产生费用和延迟）与 stage4/5/6（本地处理，零成本）解耦。用户可以在 stage3 完成后审查结果，再决定是否执行 stage4
-- **失败可重试**：stage4 入库失败（如数据库锁定）时，无需重新调用 Batch API（避免重复付费和排队），直接重试 stage4 即可；同理 stage6 向量化失败仅需重试 stage6
-- **结果可编辑**：用户可手动修改 `batch/{doc_id}.jsonl` 后重新执行 stage3（增量过滤仍会生效），或修改 `results.jsonl` 后重新执行 stage4，修正 LLM 提取错误而无需重新调 API
-- **向量化解耦**：stage4 完成后 chunks 状态为 `embedded`，知识图谱已可查询；stage5/stage6 独立执行向量化，不阻塞图谱使用
-- **向后兼容**：`stage3_ingest()` 保留原签名，内部委托给 `stage3_submit_batches` + `stage4_ingest_results` + `stage5_build_embed_jsonl` + `stage6_submit_embed_batches`，现有调用方无需修改
-
-**中间产物清单**：
-
-| 阶段 | 产物 | 路径 | 说明 |
-|------|------|------|------|
-| Stage 1 | result.md | `parsed/{doc_id}/result.md` | 解析后的 Markdown（可人工编辑） |
-| Stage 2 | requests.jsonl | `batch/{doc_id}.jsonl` | LLM Batch API 输入请求 |
-| Stage 2 | batch_info.json | `batch/{doc_id}_batch_info.json` | request → chapter 映射 |
-| Stage 3 | results.jsonl | `batch/{doc_id}_results.jsonl` | LLM Batch API 原始返回结果 |
-| Stage 3 | incremental.json | `batch/{doc_id}_incremental.json` | 增量分析摘要 + result.md hash |
-| Stage 4 | 子图谱 | `graphs/{doc_id}.json` | 文档级图谱快照 |
-| Stage 5 | embed.jsonl | `batch/{doc_id}_embed.jsonl` | Embedding Batch API 输入请求 |
-| Stage 5 | embed_map.json | `batch/{doc_id}_embed_map.json` | index → chunk_db_id 映射 |
-| Stage 6 | embed_results.jsonl | `batch/{doc_id}_embed_results.jsonl` | Embedding Batch API 原始返回 |
-
-**状态管理**：
-- `PROCESSING` → stage3 提交中
-- `BATCH_SUBMITTED` → stage3 完成，等待 stage4
-- `embedded` → stage4 完成（chunks 已入库，图谱已构建，但未向量化）
-- `DONE` → stage6 完成（向量化已入库）
-
-**权衡**：
-- 磁盘占用增加：每个文档额外保存 results.jsonl、incremental.json、embed.jsonl、embed_results.jsonl 等（通常总计几十 KB 到几十 MB）
-- stage3/stage4 之间需要保持 `result.md` 不变，否则增量分析结果可能不一致（修改 result.md 后应重新走 stage2→stage3）
-
----
-
-## 21. 为什么 thinking 参数必须始终传递？
-
-**选择**：LLM Batch API 请求中无论 `LLM_THINKING_ENABLED` 配置为 `0` 还是 `1`，都在 body 中显式传递 `extra_body={"thinking": {"type": "enabled"/"disabled"}}`。
-
-**原因**：
-- **Kimi K2.6 等模型 thinking 默认开启**：如果不传递参数，模型始终使用 thinking 模式，用户配置 `thinking_enabled=0` 将无效
-- **显式控制**：`{"type": "disabled"}` 可可靠关闭 thinking，`{"type": "enabled"}` 可确保开启（配合 `keep: "all"` 可实现多轮推理连贯）
-- **Batch API 一致性**：同步对话客户端（`LLMChatClient`）和 Batch API 请求（`EntityExtractor._build_batch_requests()`）使用相同的参数传递逻辑
-
-**实现**：
-- `llm_chat_client.py`：`extra_body={"thinking": {"type": "enabled" if self.thinking_enabled else "disabled"}}`
-- `doc_graph_pipeline.py`：在 `_build_batch_requests()` 的 request body 中同样添加 `extra_body`
-- 用户编辑 `batch/{doc_id}.jsonl` 时若删除了 `extra_body`，stage3 读取后会自动补充
 
 ---
 

@@ -16,7 +16,7 @@
 
 | 决策 | 原因 |
 |------|------|
-| **Batch API 优先** | 成本为同步 API 的 50%；超大 JSONL 自动拆分并行提交；分钟级延迟可接受 |
+| **Batch API 优先（实体提取）** | 实体提取走 Batch API（成本为同步 API 的 50%；超大 JSONL 自动拆分并行提交；分钟级延迟可接受）。向量化走同步单文本 API（BigModel Embedding Batch 处理时间高达 9 小时，不可接受） |
 | **KnowledgeBaseService 统一服务层** | 封装 DB + VectorIndex + GraphStore，为 Plugin 工具和上层应用提供一致 API；禁止工具直接访问 `db._connect()` |
 | **NetworkX 而非 Neo4j** | 轻量、JSON 序列化、当前查询深度不超过 3 跳，无需引入外部服务 |
 | **零数据丢失** | 技术文档信息密度高，任何截断/过滤都可能导致关键寄存器/信号丢失 |
@@ -25,6 +25,7 @@
 | **SQLite + FAISS + NetworkX** | 单用户、本地部署、零运维；FAISS IndexFlatIP 经 L2 归一化后等效于余弦相似度 |
 | **Prompt 外部化** | 所有 LLM 提示词在 `scripts/prompts/*.txt` 中，用户可编辑，无需改代码 |
 | **EntityChunkBridge 跨粒度桥接** | 零 schema 变更的内存双向索引 `chunk_db_id ↔ (entity_type, entity_name)`，打通向量空间与图谱空间，支持 O(1) 双向导航 |
+| **Prompt 分步引导提取** | 先内容分类（Step 1）→ 再按类型提取（Step 2）→ 最后关系补全（Step 3），比"表格逐行提取"+"验证导向规则"减少 57% 节点/60% 边误提取 |
 | **config.json + .env 双轨配置** | `config.json` 存非敏感参数（模型、端点），`.env` 存 API Key；三层优先级（环境变量 > config.json > .env > 默认值） |
 
 ---
@@ -224,6 +225,30 @@ PDF → Markdown → ChapterParser(树形章节 #/##/###/####) → collect_all_n
 
 ---
 
+### 8. Prompt 策略演进原则（2026-05 新增）
+
+**核心观点**：Prompt 策略与代码机制分离；策略调整在 Prompt 层面完成，代码只负责加载和执行。
+
+**教训来源**：
+- `entity_extraction_system.txt` 从 431 行→180 行→300 行的演进中，零代码变更即可生效
+- "验证导向提取规则"等硬编码策略导致代码变量、章节标题、格式说明都被提取为实体
+- 分步引导（分类→提取→补全）将准确率从"全局规则驱动"改进为"上下文感知驱动"
+
+**开发约束**：
+- **所有提取策略在 Prompt 中描述**，禁止代码硬编码提取规则
+- **Prompt 变更同步更新测试断言**（`test_entity_extractor.py`）
+- **宁可漏提也不误提**：代码示例中的变量/标签/寄存器字段访问必须明确排除
+- **表格列映射显式定义**：禁止 LLM 自行推断列含义
+- **属性格式统一**：width/access/reset/address_offset 等高频属性在 Prompt 中给出正例/反例
+- **体系结构差异显式说明**：不同芯片架构的地址单位、寄存器命名惯例等差异需告知 LLM
+
+**跨文档属性差异处理**：
+- `doc_properties[doc_id]` 保存每个文档的原始属性快照，`properties` 为全局合并属性（冲突时比较来源文档的信息完整性评分——非空属性数量，高分覆盖低分；互补属性取并集；平局保留旧值）
+- 查询接口支持 `doc_id` 参数获取指定文档的原始属性（深拷贝替换，不修改全局图）
+- 属性冲突自动记录 `conflict_logs` 表供人工审核
+
+---
+
 ## 开发计划
 
 ### 当前阶段（已完成）
@@ -277,6 +302,26 @@ PDF → Markdown → ChapterParser(树形章节 #/##/###/####) → collect_all_n
 - ✅ **接口字段名标准化**：`plugin_router.py` 中 `_entity_to_dict` `"type"`→`"entity_type"`；`_relation_to_dict` `"type"`→`"rel_type"`, `"from"`/`"to"`→`"from_name"`/`"to_name"`；`tool_graph_path` 同步更新路径节点与边描述字段
 - ✅ **全局图完整性校验**：`_load_all_graphs()` 启动时若 nodes<10 且 documents>0 则自动 `rebuild_global_graph()`；`reprocess_document()` 保存后若节点数低于处理前 50% 自动重建
 - ✅ **305 个测试全部通过**
+
+### 当前阶段（新进展 — 2026-05-18 Prompt 分步引导与实体提取质量修复）
+- ✅ **Prompt 分步引导策略**：`entity_extraction_system.txt` 引入 Step 1（内容分类）→ Step 2（按类型提取）→ Step 3（关系链补全与去重）三步流程，LLM 先判断 chunk 类型再聚焦提取，显著减少跨类型过度提取
+- ✅ **代码示例寄存器字段排除**：明确禁止提取 `EPwm1Regs.TBCTL.bit.PRDLD`、`.bit.XXX = YYY` 等代码中的寄存器字段访问，解决 17 个代码字段误提取为 RegisterField 的问题
+- ✅ **属性格式统一规范**：`width`→数字、`access`→标准缩写（R/W）、`reset_value`→十六进制字符串、`address_offset`→十六进制字符串，消除格式不一致
+- ✅ **表格列映射规则化**：寄存器汇总表格和字段描述表格分别定义列→属性映射，明确 `Size(x16)` 列映射为 `size_in_words`，禁止将表格格式信息误解析为属性
+- ✅ **RegisterField 来源限制**：只能从"Field Descriptions"表格提取，禁止从代码示例、概述、附录、法律声明中提取
+- ✅ **Document 实体规则细化**：明确区分"当前文档本身"（类型 A，每个文档只提取一次）和"引用文档"（类型 B，Related Documentation 章节中可提取，需建立 CITES 关系）
+- ✅ **体系结构地址单位说明**：明确不同芯片架构的地址基本单位差异（C2000=16-bit word，ARM=8-bit byte），`width` 表示寄存器位宽与地址单位无关
+- ✅ **实体提取规模收敛**：全局节点从 350→193→151→176，边从 414→227→164→184，过度提取问题得到系统性控制
+- ✅ **304 个测试全部通过**
+
+### 当前阶段（新进展 — 2026-05-19 DESIGN.md 审计与代码修复）
+- ✅ **DESIGN.md 严格审计**：对全部 22 章 + 3 个无编号章节逐一检查代码实现。14 项完全实现、5 项部分实现、1 项未实现/遗弃
+- ✅ **全局图合并策略改为信息完整性优先**：`_add_entity_unsafe` / `_add_relation_unsafe` 冲突属性时比较来源文档完整性评分（非空属性数量），高分覆盖低分。互补属性始终取并集，平局保留旧值，无法推断来源时保留现有值
+- ✅ **修复 config.py 硬编码 config.json 路径**：`_load_config_json()` 先读取 `plugin.json` 的 `config_file` 字段，再回退到默认 `"config.json"`
+- ✅ **修复 llm_chat_client.py thinking 参数遗漏**：改为 `extra_body.setdefault("thinking", ...)`，确保 caller 提供 `extra_body` 时 thinking 仍被设置
+- ✅ **修复 GraphRelation feedback_score 未同步**：新增 `db.get_relation_feedback_score()`，修复 `KnowledgeBaseService.submit_feedback()` 中关系反馈的同步逻辑
+- ✅ **DESIGN.md 同步更新**：第 1 章更新 Embedding 策略说明（补充 9 小时 Batch 处理时间 + tokenizer 不透明导致字符数限制策略的经验教训）；第 2 章标注 Neo4j 接口当前无实现；第 19 章更新 Stage 6 中间产物清单（移除 `embed_map.json` / `embed_results.jsonl`）
+- ✅ **309 个测试全部通过**（新增 1 个关系反馈同步测试）
 
 ### 下一阶段（精确到下一步）
 1. **可视化**：图谱可视化导出（Graphviz / D3.js）
@@ -400,8 +445,8 @@ config.json（用户持久化配置，项目根目录）
 | `WORKDOCS_EMBEDDING_BASE_URL` | `embedding.endpoint` | `https://open.bigmodel.cn/api/paas/v4` | Embedding Base URL |
 | `WORKDOCS_EMBEDDING_MODEL` | `embedding.model` | `embedding-3` | 向量化模型 |
 | `WORKDOCS_EMBEDDING_DIMENSION` | `embedding.dimension` | `1024` | 向量维度 |
-| `WORKDOCS_EMBEDDING_BATCH_ENDPOINT` | `embedding.batch_endpoint` | `/v4/embeddings` | Embedding Batch API endpoint |
-| `WORKDOCS_EMBED_BATCH_TIMEOUT` | `embedding.batch_timeout` | `3600` | Embedding Batch API 轮询超时（秒） |
+| `WORKDOCS_EMBEDDING_BATCH_ENDPOINT` | `embedding.batch_endpoint` | `/v4/embeddings` | ~~Embedding Batch API endpoint~~（已废弃，Embedding 改为同步单文本 API） |
+| `WORKDOCS_EMBED_BATCH_TIMEOUT` | `embedding.batch_timeout` | `3600` | ~~Embedding Batch API 轮询超时（秒）~~（已废弃） |
 | `WORKDOCS_CHUNK_MAX_CHARS` | `chunk.max_chars` | `6000` | **单个 chunk 的最大字符数上限**。在 stage4 入库时，若 chapter content 超过此值，`_maybe_split_chapter` 会将其拆分为多个 sub-chunks。这是一个基于项目文本分布的**经验参数**（自然语言+代码混合内容约对应 2500-2800 actual tokens），不保证对所有文本类型安全 |
 | `WORKDOCS_EMBED_MAX_RETRIES` | `embedding.max_retries` | `3` | Embedding 同步请求最大重试次数 |
 | `WORKDOCS_EMBED_RETRY_BACKOFF` | `embedding.retry_backoff` | `2` | Embedding 重试退避系数（秒） |
