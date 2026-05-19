@@ -882,6 +882,29 @@ class KnowledgeBaseService:
             score = self.db.get_entity_feedback_score(entity_type, entity_name)
             self.graph.update_entity(entity_type, entity_name, feedback_score=score)
             self._save_global_graph()
+        elif (
+            relation_type
+            and relation_from_type
+            and relation_from_name
+            and relation_to_type
+            and relation_to_name
+        ):
+            score = self.db.get_relation_feedback_score(
+                relation_type,
+                relation_from_type,
+                relation_from_name,
+                relation_to_type,
+                relation_to_name,
+            )
+            self.graph.update_relation(
+                relation_from_type,
+                relation_from_name,
+                relation_to_type,
+                relation_to_name,
+                relation_type,
+                feedback_score=score,
+            )
+            self._save_global_graph()
         return feedback_id
 
     def get_feedback(

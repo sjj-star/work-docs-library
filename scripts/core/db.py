@@ -489,6 +489,31 @@ class KnowledgeDB:
             ).fetchone()
         return row["score"] or 0
 
+    def get_relation_feedback_score(
+        self,
+        relation_type: str,
+        relation_from_type: str,
+        relation_from_name: str,
+        relation_to_type: str,
+        relation_to_name: str,
+    ) -> int:
+        """获取关系的累计反馈评分."""
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT SUM(rating) as score FROM feedback"
+                " WHERE relation_type = ? AND relation_from_type = ?"
+                " AND relation_from_name = ? AND relation_to_type = ?"
+                " AND relation_to_name = ?",
+                (
+                    relation_type,
+                    relation_from_type,
+                    relation_from_name,
+                    relation_to_type,
+                    relation_to_name,
+                ),
+            ).fetchone()
+        return row["score"] or 0
+
     def _rows_to_chunks(self, rows: list[sqlite3.Row]) -> list[Chunk]:
         return [
             Chunk(

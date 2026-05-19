@@ -180,3 +180,30 @@ def test_feedback(db):
     db.insert_feedback(rating=-1, entity_type="Module", entity_name="TOP")
     score = db.get_entity_feedback_score("Module", "TOP")
     assert score == 0
+
+    # 关系反馈评分
+    db.insert_feedback(
+        rating=1,
+        relation_type="HAS_REGISTER",
+        relation_from_type="Module",
+        relation_from_name="TOP",
+        relation_to_type="Register",
+        relation_to_name="CTRL",
+    )
+    rel_score = db.get_relation_feedback_score(
+        "HAS_REGISTER", "Module", "TOP", "Register", "CTRL"
+    )
+    assert rel_score == 1
+
+    db.insert_feedback(
+        rating=-1,
+        relation_type="HAS_REGISTER",
+        relation_from_type="Module",
+        relation_from_name="TOP",
+        relation_to_type="Register",
+        relation_to_name="CTRL",
+    )
+    rel_score = db.get_relation_feedback_score(
+        "HAS_REGISTER", "Module", "TOP", "Register", "CTRL"
+    )
+    assert rel_score == 0

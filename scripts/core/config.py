@@ -19,13 +19,23 @@ logger = logging.getLogger(__name__)
 
 
 def _load_config_json() -> dict:
-    """加载项目根目录的 config.json（由 plugin.json 的 config_file 指定）."""
-    config_path = _SKILL_ROOT / "config.json"
+    """加载 config.json（路径由 plugin.json 的 config_file 指定，默认回退到 config.json）."""
+    # 优先读取 plugin.json 中的 config_file 字段
+    config_file = "config.json"
+    plugin_path = _SKILL_ROOT / "plugin.json"
+    if plugin_path.exists():
+        try:
+            plugin_data = json.loads(plugin_path.read_text(encoding="utf-8"))
+            config_file = plugin_data.get("config_file", "config.json")
+        except Exception as e:
+            logger.warning(f"读取 plugin.json 失败: {e}")
+
+    config_path = _SKILL_ROOT / config_file
     if config_path.exists():
         try:
             return json.loads(config_path.read_text(encoding="utf-8"))
         except Exception as e:
-            logger.warning(f"读取 config.json 失败: {e}")
+            logger.warning(f"读取 {config_path} 失败: {e}")
     return {}
 
 
