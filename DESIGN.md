@@ -703,6 +703,34 @@ Step 3: 关系链补全 + 去重检查
 - 边数从 414 → 164（-60%）
 - 代码示例误提取从 13 个降至 0 个
 
+**第二次演进：双方向聚焦（2026-05-20）**
+
+三步提取流程解决了"过度提取"问题，但核心实体类型列表仍包含大量与目标用途关联较弱的类型（Pin、Package、ElectricalSpec、Advisory、Workaround、Protocol、Function、BuildConfig 等），分散 LLM 注意力。同时，ISA 方向和外设寄存器方向的提取深度不足以支撑汇编/C 验证代码生成。
+
+**聚焦决策**：
+- **ISA 方向**（汇编代码验证）：Instruction、InstructionGroup、AddressingMode、Operand、ArchitectureState、PipelineStage、FunctionalUnit、Interrupt、Exception、CPU_Mode、CLA_Task
+- **外设寄存器方向**（裸机C代码验证）：Peripheral、Module、Register、RegisterField、ShadowRegister、MemoryRegion、Signal
+- **支撑类型**：Product、Document、Parameter、ClockDomain、ResetDomain
+- **精简移除**：Pin、Package、ElectricalSpec、ApplicationDomain、OrderingInfo、Advisory、Workaround、SiliconRevision、UsageNote、Protocol、ProtocolLayer、TransactionType、Channel、MessageField、Function、DataStructure、Section、BuildConfig、CodeExample、Scenario、TestCase
+
+**Step 1 分类从 9 个聚焦为 8 个**：
+
+```
+Step 1: 内容分类（8 种类型）
+  ├── 寄存器表 → 提取 Register + RegisterField + ShadowRegister + MemoryRegion
+  ├── 外设功能描述 → 提取 Peripheral + Module + Feature + Signal + Parameter
+  ├── ISA 架构描述 → 提取 ArchitectureState + PipelineStage + FunctionalUnit + CPU_Mode + Interrupt + Exception + MemoryRegion
+  ├── 指令详细参考 → 提取 Instruction + InstructionGroup + AddressingMode + Operand + Register
+  ├── 指令集概览 → 提取 Instruction + InstructionGroup + AddressingMode
+  ├── CLA 描述 → 提取 CLA_Task + Instruction + ArchitectureState
+  ├── 概述/介绍 → 提取 Document(类型A/B) + Product
+  └── 其他 → 不提取任何实体
+```
+
+**新增代码生成导向提取要求**：
+- ISA 方向：提取 opcode/format/cycle_count/affected_flags/delay_slots/atomic/repeatable/pipeline_stall_condition，支撑汇编验证代码生成
+- 外设寄存器方向：提取 write_semantics/read_semantics/shadow_of/update_condition/config_sequence/dependency/trigger_condition，支撑裸机C验证代码生成
+
 ### 22.2 代码示例排除规则（零容忍）
 
 **禁止提取的内容**：
@@ -770,6 +798,21 @@ Step 3: 关系链补全 + 去重检查
 4. bits/reset_value 格式是否统一
 5. 是否有孤立节点（无关系的实体）
 6. 跨文档合并后属性冲突是否合理
+
+**Prompt 不测试原则**：
+- **不通过代码测试约束 prompt 内容**：prompt 是策略，策略变化快，静态字符串测试（如 `assert "opcode" in system_msg`）会成为迭代阻力
+- prompt 质量通过完整 Pipeline 运行后的全局节点/边变化、具体实体差异来评估
+- prompt 的约束规范通过 DESIGN.md 本章记录，不通过单元测试断言
+
+### 22.7 变更历史
+
+| 日期 | 变更 | 效果 |
+|------|------|------|
+| 2026-05-18 | 引入 Step 1→2→3 三步提取流程 | 节点 350→151，边 414→164 |
+| 2026-05-18 | 代码示例寄存器字段排除 | 代码示例误提取从 13 个降至 0 个 |
+| 2026-05-18 | 属性格式统一规范 | bits/reset_value/format 格式不一致问题消除 |
+| 2026-05-20 | **聚焦 ISA + 外设寄存器双方向** | 核心实体类型从 35 个精简到 ~18 个；新增 ISA 专属 13 项属性、外设寄存器专属 10 项属性；新增"代码生成导向提取"章节 |
+| 2026-05-20 | **移除 prompt 静态测试** | `test_entity_extractor.py` 从 12 个测试精简到 3 个（仅保留代码逻辑测试）；prompt 约束通过 DESIGN.md 文档化 |
 
 ---
 

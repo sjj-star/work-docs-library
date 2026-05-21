@@ -236,7 +236,8 @@ PDF → Markdown → ChapterParser(树形章节 #/##/###/####) → collect_all_n
 
 **开发约束**：
 - **所有提取策略在 Prompt 中描述**，禁止代码硬编码提取规则
-- **Prompt 变更同步更新测试断言**（`test_entity_extractor.py`）
+- **不通过代码测试约束 prompt 内容**：prompt 是策略，策略变化快，静态字符串测试会成为迭代阻力
+- **Prompt 约束通过 DESIGN.md 记录**：prompt 的实体类型、关系类型、属性规范、提取流程等设计意图和变更历史在 DESIGN.md 中详细记录
 - **宁可漏提也不误提**：代码示例中的变量/标签/寄存器字段访问必须明确排除
 - **表格列映射显式定义**：禁止 LLM 自行推断列含义
 - **属性格式统一**：width/access/reset/address_offset 等高频属性在 Prompt 中给出正例/反例
