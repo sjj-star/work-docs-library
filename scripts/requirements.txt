@@ -1,3 +1,5 @@
+# 依赖已迁移至项目根目录 pyproject.toml [project.dependencies]
+# 保留此文件作为向后兼容的备用安装方式
 PyPDF2>=3.0.0
 pdfplumber>=0.10.0
 pymupdf>=1.23.0

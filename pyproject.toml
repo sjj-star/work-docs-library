@@ -9,6 +9,18 @@ description = "面向 IC 前端设计技术文档的自动化知识提取 pipeli
 readme = "README.md"
 license = {text = "MIT"}
 requires-python = ">=3.11"
+dependencies = [
+    "PyPDF2>=3.0.0",
+    "pdfplumber>=0.10.0",
+    "pymupdf>=1.23.0",
+    "python-docx>=1.1.0",
+    "openpyxl>=3.1.0",
+    "Pillow>=10.0.0",
+    "requests>=2.31.0",
+    "faiss-cpu>=1.7.4",
+    "numpy>=1.24.0",
+    "python-dotenv>=1.0.0",
+]
 
 [tool.ruff]
 target-version = "py311"
