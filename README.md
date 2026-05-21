@@ -182,10 +182,20 @@ work-docs-library/
 
 ### 安装步骤
 
+推荐在虚拟环境中安装，避免与系统包管理冲突：
+
 ```bash
 cd ~/.kimi/plugins/work-docs-library
+
+# 方式一：使用 uv（推荐，自动创建虚环境并安装依赖）
+uv sync
+
+# 方式二：使用 pip（需手动创建虚环境）
 python3 -m venv venv
 source venv/bin/activate
+pip install -e .
+
+# 方式三：手动安装依赖（向后兼容）
 pip install -r scripts/requirements.txt
 ```
 
