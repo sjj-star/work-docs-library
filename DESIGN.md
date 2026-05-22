@@ -623,7 +623,7 @@ graph_query(entity_type="Product", name="TMS320F28379D")
 
 **权衡**：
 - 磁盘占用增加：每个文档额外保存 results.jsonl、incremental.json、embed.jsonl 等（通常总计几十 KB 到几十 MB）
-- stage3/stage4 之间需要保持 `result.md` 不变，否则增量分析结果可能不一致（修改 result.md 后应重新走 stage2→stage3）
+- stage3/stage4 之间由 `_incremental.json` 自动校验一致性：若 `result.md` 在 stage3 之后被修改，stage4 会检测到 hash 或 title 集合不匹配，自动删除旧的 `_incremental.json` 并重新处理，无需用户手动干预
 
 ---
 
