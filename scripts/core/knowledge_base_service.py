@@ -6,6 +6,7 @@
 
 import copy
 import logging
+import shutil
 from typing import NamedTuple
 
 from .config import Config
@@ -168,7 +169,7 @@ class KnowledgeBaseService:
         global_path.parent.mkdir(parents=True, exist_ok=True)
         backup_path = global_path.with_suffix(".json.bak")
         if global_path.exists():
-            global_path.replace(backup_path)
+            shutil.copy2(global_path, backup_path)
         try:
             self.graph.save(global_path)
         except Exception:
@@ -529,7 +530,7 @@ class KnowledgeBaseService:
             doc_id: 可选，指定文档 ID 以获取该文档中的原始属性快照
 
         Returns:
-            匹配的实体列表
+            匹配的实体列表（深拷贝，禁止外部修改全局图）
         """
         results: list[GraphEntity]
         if entity_type and not name_pattern:
@@ -542,7 +543,7 @@ class KnowledgeBaseService:
         if doc_id:
             for e in results:
                 self._apply_doc_properties(e, doc_id)
-        return results
+        return [copy.deepcopy(e) for e in results]
 
     def get_neighbors(
         self,
@@ -557,7 +558,7 @@ class KnowledgeBaseService:
         if doc_id:
             for i, (entity, rt, props) in enumerate(results):
                 self._apply_doc_properties(entity, doc_id)
-        return results
+        return [(copy.deepcopy(entity), rt, copy.deepcopy(props)) for entity, rt, props in results]
 
     def find_path(
         self,
@@ -637,14 +638,26 @@ class KnowledgeBaseService:
 
     def add_entity(self, entity: GraphEntity) -> list[dict]:
         """添加或更新实体. 返回冲突日志列表."""
+        # 保存操作前快照，用于失败时恢复而非删除
+        old_entity = self.graph.get_entity(entity.entity_type, entity.name)
         conflicts = self.graph.add_entity(entity)
         try:
             self._save_global_graph()
             if conflicts:
                 self.db.insert_conflict_logs(conflicts)
         except Exception:
-            # 持久化失败时回滚内存图，避免重启后冲突日志指向不存在的变更
-            self.graph.delete_entity(entity.entity_type, entity.name)
+            # 持久化失败时恢复到操作前状态
+            if old_entity is not None:
+                self.graph.update_entity(
+                    entity.entity_type,
+                    entity.name,
+                    properties=old_entity.properties,
+                    confidence=old_entity.confidence,
+                    verified=old_entity.verified,
+                    feedback_score=old_entity.feedback_score,
+                )
+            else:
+                self.graph.delete_entity(entity.entity_type, entity.name)
             raise
         return conflicts
 
@@ -674,20 +687,41 @@ class KnowledgeBaseService:
 
     def add_relation(self, relation) -> list[dict]:
         """添加或更新关系. 返回冲突日志列表."""
+        # 保存操作前快照，用于失败时恢复而非删除
+        old_relation = self.graph.get_relation(
+            relation.from_type,
+            relation.from_name,
+            relation.to_type,
+            relation.to_name,
+            relation.rel_type,
+        )
         conflicts = self.graph.add_relation(relation)
         try:
             self._save_global_graph()
             if conflicts:
                 self.db.insert_conflict_logs(conflicts)
         except Exception:
-            # 持久化失败时回滚内存图
-            self.graph.delete_relation(
-                relation.from_type,
-                relation.from_name,
-                relation.to_type,
-                relation.to_name,
-                relation.rel_type,
-            )
+            # 持久化失败时恢复到操作前状态
+            if old_relation is not None:
+                self.graph.update_relation(
+                    relation.from_type,
+                    relation.from_name,
+                    relation.to_type,
+                    relation.to_name,
+                    relation.rel_type,
+                    properties=old_relation.properties,
+                    confidence=old_relation.confidence,
+                    verified=old_relation.verified,
+                    feedback_score=old_relation.feedback_score,
+                )
+            else:
+                self.graph.delete_relation(
+                    relation.from_type,
+                    relation.from_name,
+                    relation.to_type,
+                    relation.to_name,
+                    relation.rel_type,
+                )
             raise
         return conflicts
 

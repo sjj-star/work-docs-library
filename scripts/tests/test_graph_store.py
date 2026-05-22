@@ -1649,3 +1649,65 @@ def test_datasheet_entity_crud(graph_store):
     graph_store.add_entity(spec)
     assert graph_store.get_entity("Pin", "GPIO0") is not None
     assert graph_store.get_entity("ElectricalSpec", "VCC Supply Voltage") is not None
+
+
+def test_node_to_entity_returns_deepcopy(graph_store):
+    """_node_to_entity 返回的 GraphEntity 不应持有全局节点的原始引用."""
+    entity = GraphEntity(
+        entity_type="Register",
+        name="PIEIER",
+        properties={"address": "0x0000"},
+        source_doc_ids={"doc1"},
+    )
+    graph_store.add_entity(entity)
+
+    retrieved = graph_store.get_entity("Register", "PIEIER")
+    assert retrieved is not None
+    # 修改返回实体的 properties
+    retrieved.properties["address"] = "0xFFFF"
+    # 全局图中的节点不应被篡改
+    again = graph_store.get_entity("Register", "PIEIER")
+    assert again.properties["address"] == "0x0000"
+
+
+def test_add_entity_mutable_reference_safe(graph_store):
+    """add_entity 后修改传入实体的 properties 不应篡改全局图."""
+    entity = GraphEntity(
+        entity_type="Register",
+        name="PIEIER2",
+        properties={"address": "0x0000"},
+        source_doc_ids={"doc1"},
+    )
+    graph_store.add_entity(entity)
+    # 修改传入的实体对象
+    entity.properties["address"] = "0xFFFF"
+    # 全局图中的节点不应被篡改
+    retrieved = graph_store.get_entity("Register", "PIEIER2")
+    assert retrieved.properties["address"] == "0x0000"
+
+
+def test_edge_to_relation_returns_deepcopy(graph_store):
+    """_edge_to_relation 返回的 GraphRelation 不应持有全局边的原始引用."""
+    e1 = GraphEntity(entity_type="Module", name="A", properties={}, source_doc_ids={"d1"})
+    e2 = GraphEntity(entity_type="Module", name="B", properties={}, source_doc_ids={"d1"})
+    graph_store.add_entity(e1)
+    graph_store.add_entity(e2)
+
+    rel = GraphRelation(
+        rel_type="CONTAINS",
+        from_type="Module",
+        from_name="A",
+        to_type="Module",
+        to_name="B",
+        properties={"weight": 1.0},
+        source_doc_ids={"d1"},
+    )
+    graph_store.add_relation(rel)
+
+    all_rels = graph_store.all_relations()
+    assert len(all_rels) == 1
+    retrieved = all_rels[0]
+    retrieved.properties["weight"] = 99.0
+    # 全局图中的边不应被篡改
+    again = graph_store.all_relations()[0]
+    assert again.properties["weight"] == 1.0

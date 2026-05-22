@@ -839,7 +839,7 @@ class DocGraphPipeline:
 
         file_hash = hashlib.md5(Path(file_path).read_bytes()).hexdigest()
         doc_id = file_hash[:16]
-        parsed_output_dir = Config.DB_PATH.parent / "parsed" / doc_id
+        parsed_output_dir = Config.DB_PATH.parent / Config.PARSE_OUTPUT_DIR / doc_id
         parsed_output_dir.mkdir(parents=True, exist_ok=True)
 
         extracted_text = ""
@@ -888,7 +888,7 @@ class DocGraphPipeline:
         Returns:
             (jsonl_path, batches, requests)
         """
-        parsed_output_dir = Config.DB_PATH.parent / "parsed" / doc_id
+        parsed_output_dir = Config.DB_PATH.parent / Config.PARSE_OUTPUT_DIR / doc_id
         result_md_path = parsed_output_dir / "result.md"
         if not result_md_path.exists():
             raise FileNotFoundError(f"result.md 不存在 | path={result_md_path}")
@@ -931,7 +931,7 @@ class DocGraphPipeline:
         logger.info(f"Requests 构建完成 | requests={len(requests)}")
 
         # 保存 JSONL
-        batch_dir = Config.DB_PATH.parent / "batch"
+        batch_dir = Config.DB_PATH.parent / Config.BATCH_OUTPUT_DIR
         batch_dir.mkdir(parents=True, exist_ok=True)
         jsonl_path = batch_dir / f"{doc_id}.jsonl"
         from core.batch_clients import _build_jsonl
@@ -960,7 +960,7 @@ class DocGraphPipeline:
 
     def _read_result_md(self, doc_id: str) -> str:
         """读取 parsed/{doc_id}/result.md."""
-        result_md_path = Config.DB_PATH.parent / "parsed" / doc_id / "result.md"
+        result_md_path = Config.DB_PATH.parent / Config.PARSE_OUTPUT_DIR / doc_id / "result.md"
         if not result_md_path.exists():
             raise FileNotFoundError(f"result.md 不存在 | path={result_md_path}")
         return result_md_path.read_text(encoding="utf-8")
@@ -1061,7 +1061,7 @@ class DocGraphPipeline:
         Returns:
             results_path: knowledge_base/batch/{doc_id}_results.jsonl
         """
-        batch_dir = Config.DB_PATH.parent / "batch"
+        batch_dir = Config.DB_PATH.parent / Config.BATCH_OUTPUT_DIR
         batch_dir.mkdir(parents=True, exist_ok=True)
         results_path = batch_dir / f"{doc_id}_results.jsonl"
 
@@ -1161,7 +1161,7 @@ class DocGraphPipeline:
                 results_path.write_text("", encoding="utf-8")
                 return results_path
 
-            parsed_output_dir = Config.DB_PATH.parent / "parsed" / doc_id
+            parsed_output_dir = Config.DB_PATH.parent / Config.PARSE_OUTPUT_DIR / doc_id
             doc_title = ""
             tree_chapters = self.chapter_parser.parse_tree(extracted_text)
             if tree_chapters:
@@ -1207,7 +1207,7 @@ class DocGraphPipeline:
             "added_titles": [ch["title"] for ch in added],
             "removed_titles": [ck.chapter_title for ck in removed],
             "result_md_hash": hashlib.md5(
-                (Config.DB_PATH.parent / "parsed" / doc_id / "result.md").read_bytes()
+                (Config.DB_PATH.parent / Config.PARSE_OUTPUT_DIR / doc_id / "result.md").read_bytes()
             ).hexdigest(),
         }
         info_path = batch_dir / f"{doc_id}_incremental.json"
@@ -1310,12 +1310,13 @@ class DocGraphPipeline:
             info = json.loads(info_path.read_text(encoding="utf-8"))
             expected_hash = info.get("result_md_hash", "")
             actual_hash = hashlib.md5(
-                (Config.DB_PATH.parent / "parsed" / doc_id / "result.md").read_bytes()
+                (Config.DB_PATH.parent / Config.PARSE_OUTPUT_DIR / doc_id / "result.md").read_bytes()
             ).hexdigest()
             if expected_hash != actual_hash:
                 logger.warning(
-                    f"result.md 在 stage3 后被修改，增量分析结果可能不一致 | doc_id={doc_id}"
+                    f"result.md 在 stage3 后被修改，删除旧增量分析并重新处理 | doc_id={doc_id}"
                 )
+                info_path.unlink(missing_ok=True)
             else:
                 current_titles = {
                     "unchanged": [ch["title"] for ch, _ in unchanged],
@@ -1327,7 +1328,11 @@ class DocGraphPipeline:
                     expected = set(info.get(key, []))
                     actual = set(current_titles.get(key.replace("_titles", ""), []))
                     if expected != actual:
-                        logger.warning(f"增量分析结果与 stage3 不一致 ({key}) | doc_id={doc_id}")
+                        logger.warning(
+                            f"增量分析结果与 stage3 不一致 ({key})，删除旧增量分析并重新处理 | doc_id={doc_id}"
+                        )
+                        info_path.unlink(missing_ok=True)
+                        break
 
         # --- 实体提取 ---
         all_entities: list[GraphEntity] = []
@@ -1488,7 +1493,7 @@ class DocGraphPipeline:
         Returns:
             embed_jsonl_path: `knowledge_base/batch/{doc_id}_embed.jsonl`
         """
-        batch_dir = Config.DB_PATH.parent / "batch"
+        batch_dir = Config.DB_PATH.parent / Config.BATCH_OUTPUT_DIR
         batch_dir.mkdir(parents=True, exist_ok=True)
         embed_jsonl_path = batch_dir / f"{doc_id}_embed.jsonl"
 
@@ -1545,7 +1550,7 @@ class DocGraphPipeline:
         Returns:
             doc_id
         """
-        batch_dir = Config.DB_PATH.parent / "batch"
+        batch_dir = Config.DB_PATH.parent / Config.BATCH_OUTPUT_DIR
         if embed_jsonl_path is None:
             embed_jsonl_path = batch_dir / f"{doc_id}_embed.jsonl"
 
@@ -1577,21 +1582,23 @@ class DocGraphPipeline:
             if requests:
                 logger.info(f"同步 Embedding | requests={len(requests)} | doc_id={doc_id}")
                 embedder = EmbeddingClient()
-                for req in requests:
-                    custom_id = req.get("custom_id", "")
-                    # custom_id 格式: embed_dbid_{db_id}
-                    try:
-                        db_id = int(custom_id.split("_")[-1])
-                    except (ValueError, IndexError):
-                        logger.warning(f"无法从 custom_id 解析 db_id | custom_id={custom_id}")
-                        continue
-                    text = req.get("body", {}).get("input", "")
-                    if not text:
-                        logger.warning(f"JSONL request 中 input 为空 | custom_id={custom_id}")
-                        continue
-                    emb = embedder.embed_single(text)
-                    all_items.append((db_id, emb))
-                embedder.close()
+                try:
+                    for req in requests:
+                        custom_id = req.get("custom_id", "")
+                        # custom_id 格式: embed_dbid_{db_id}
+                        try:
+                            db_id = int(custom_id.split("_")[-1])
+                        except (ValueError, IndexError):
+                            logger.warning(f"无法从 custom_id 解析 db_id | custom_id={custom_id}")
+                            continue
+                        text = req.get("body", {}).get("input", "")
+                        if not text:
+                            logger.warning(f"JSONL request 中 input 为空 | custom_id={custom_id}")
+                            continue
+                        emb = embedder.embed_single(text)
+                        all_items.append((db_id, emb))
+                finally:
+                    embedder.close()
 
         # 4. 统一写入 SQLite 和 FAISS（带失败回滚）
         if all_items:
@@ -1740,11 +1747,14 @@ class DocGraphPipeline:
             """构建 chunk metadata，包含缓存的实体/关系/embedding."""
             ch_ents = [e for e in entity_dicts if e.get("source_chapter") == ch_title]
             ch_ent_keys = {(e.get("type", ""), e.get("name", "")) for e in ch_ents}
+            ch_names = {e.get("name", "") for e in ch_ents}
             ch_rels = [
                 r
                 for r in relation_dicts
                 if (r.get("from_type", ""), r.get("from", "")) in ch_ent_keys
                 or (r.get("to_type", ""), r.get("to", "")) in ch_ent_keys
+                or r.get("from", "") in ch_names
+                or r.get("to", "") in ch_names
             ]
             ch_images = [img for img in image_descriptions if img.get("chapter_title") == ch_title]
             meta: dict[str, Any] = {
@@ -1885,3 +1895,5 @@ class DocGraphPipeline:
             self.parser_client = None
         if self.llm_batch:
             self.llm_batch.close()
+        if self.llm_chat:
+            self.llm_chat.close()

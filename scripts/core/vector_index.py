@@ -41,9 +41,15 @@ class VectorIndex:
         fcntl.flock(self._lock_fd, fcntl.LOCK_EX)
 
     def _release_lock(self) -> None:
-        """释放文件锁."""
+        """释放文件锁并关闭文件描述符."""
         if self._lock_fd is not None:
             fcntl.flock(self._lock_fd, fcntl.LOCK_UN)
+            os.close(self._lock_fd)
+            self._lock_fd = None
+
+    def close(self) -> None:
+        """关闭 VectorIndex，释放文件锁和文件描述符."""
+        self._release_lock()
 
     def _reload(self) -> None:
         """重新加载磁盘上的最新状态（调用方必须已持有锁）."""

@@ -4,6 +4,7 @@
 所有外部 API 调用均使用 Mock。
 """
 
+import hashlib
 import json
 from pathlib import Path
 
@@ -1040,3 +1041,137 @@ def test_stage3_batch_mode_fallback_to_chat(patched_config, monkeypatch, tmp_pat
     assert result["custom_id"] == "batch_0"
     assert result["response"]["status_code"] == 200
     assert "choices" in result["response"]["body"]
+
+
+def test_stage4_hash_mismatch_deletes_incremental(patched_config, monkeypatch, tmp_path):
+    """result.md hash 不匹配时应删除旧增量分析文件并继续处理."""
+    _mock_external_clients(monkeypatch)
+    monkeypatch.setattr(Config, "LLM_MODE", "batch")
+
+    pipe = DocGraphPipeline()
+    doc_id = "hash_test_doc"
+    batch_dir = Config.DB_PATH.parent / "batch"
+    batch_dir.mkdir(parents=True, exist_ok=True)
+    parsed_dir = Config.DB_PATH.parent / "parsed" / doc_id
+    parsed_dir.mkdir(parents=True, exist_ok=True)
+
+    # 创建 result.md
+    result_md = parsed_dir / "result.md"
+    result_md.write_text("## Section 1\n\nTest content.", encoding="utf-8")
+
+    # 创建增量信息文件，但 hash 是旧的
+    info_path = batch_dir / f"{doc_id}_incremental.json"
+    info_path.write_text(
+        json.dumps({"result_md_hash": "wrong_hash_12345"}),
+        encoding="utf-8",
+    )
+
+    # mock 跳过已有文档检查
+    monkeypatch.setattr(pipe.db, "get_document_by_path", lambda path: None)
+    # mock 增量分析返回空结果
+    monkeypatch.setattr(
+        pipe,
+        "_incremental_analysis",
+        lambda fp, et, force=False: ([], [], [], [], [], None, "abc123"),
+    )
+
+    dummy_pdf = tmp_path / "test.pdf"
+    dummy_pdf.write_bytes(b"dummy")
+    results_path = batch_dir / f"{doc_id}_results.jsonl"
+    results_path.write_text("{}", encoding="utf-8")
+
+    pipe.stage4_ingest_results(
+        doc_id=doc_id,
+        file_path=str(dummy_pdf),
+        results_path=results_path,
+        force=True,
+    )
+    # 旧增量分析文件应被删除
+    assert not info_path.exists()
+
+
+def test_stage4_title_mismatch_deletes_incremental(patched_config, monkeypatch, tmp_path):
+    """增量分析 title 不一致时应删除旧增量分析文件并继续处理."""
+    _mock_external_clients(monkeypatch)
+    monkeypatch.setattr(Config, "LLM_MODE", "batch")
+
+    pipe = DocGraphPipeline()
+    doc_id = "title_test_doc"
+    batch_dir = Config.DB_PATH.parent / "batch"
+    batch_dir.mkdir(parents=True, exist_ok=True)
+    parsed_dir = Config.DB_PATH.parent / "parsed" / doc_id
+    parsed_dir.mkdir(parents=True, exist_ok=True)
+
+    # 创建 result.md
+    result_md = parsed_dir / "result.md"
+    result_md.write_text("## Section 1\n\nTest content.", encoding="utf-8")
+    actual_hash = hashlib.md5(result_md.read_bytes()).hexdigest()
+
+    # 创建增量信息文件，hash 正确但 title 不一致
+    info_path = batch_dir / f"{doc_id}_incremental.json"
+    info_path.write_text(
+        json.dumps(
+            {
+                "result_md_hash": actual_hash,
+                "unchanged_titles": ["Old Section"],
+                "changed_titles": [],
+                "added_titles": [],
+                "removed_titles": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    # mock 跳过已有文档检查
+    monkeypatch.setattr(pipe.db, "get_document_by_path", lambda path: None)
+    # mock 增量分析返回不同的 title
+    monkeypatch.setattr(
+        pipe,
+        "_incremental_analysis",
+        lambda fp, et, force=False: (
+            [{"title": "Section 1", "content": "Test.", "level": 2}],
+            [],
+            [],
+            [],
+            [],
+            None,
+            "abc123",
+        ),
+    )
+
+    dummy_pdf = tmp_path / "test.pdf"
+    dummy_pdf.write_bytes(b"dummy")
+    results_path = batch_dir / f"{doc_id}_results.jsonl"
+    results_path.write_text("{}", encoding="utf-8")
+
+    pipe.stage4_ingest_results(
+        doc_id=doc_id,
+        file_path=str(dummy_pdf),
+        results_path=results_path,
+        force=True,
+    )
+    # 旧增量分析文件应被删除
+    assert not info_path.exists()
+
+
+def test_close_releases_llm_chat(patched_config, monkeypatch):
+    """close() 必须关闭 llm_chat 客户端."""
+    _mock_external_clients(monkeypatch)
+    monkeypatch.setattr("core.doc_graph_pipeline.BaseLLMClient", FakeChatClient)
+    monkeypatch.setattr(Config, "LLM_MODE", "chat")
+
+    pipe = DocGraphPipeline()
+    # 强制初始化 llm_chat
+    fake_chat = FakeChatClient()
+    pipe.llm_chat = fake_chat
+
+    closed = []
+
+    def tracking_close():
+        closed.append(True)
+
+    fake_chat.close = tracking_close
+
+    pipe.close()
+    assert len(closed) == 1
+    assert pipe.llm_chat is not None  # close() 不应将引用置为 None

@@ -174,6 +174,12 @@ class Config:
     GRAPH_MAX_PATH_DEPTH: int = 0  # 将在下方初始化
 
     # --- 目录配置 ---
+    PARSE_OUTPUT_DIR: str = _resolve_config(
+        "WORKDOCS_PARSE_OUTPUT_DIR", "pipeline.parse_output_dir", "parsed"
+    )
+    BATCH_OUTPUT_DIR: str = _resolve_config(
+        "WORKDOCS_BATCH_OUTPUT_DIR", "pipeline.batch_output_dir", "batch"
+    )
     BATCH_TEMP_DIR: str = _resolve_config("WORKDOCS_BATCH_TEMP_DIR", "batch.temp_dir", "batch_temp")
     GRAPH_OUTPUT_DIR: str = _resolve_config(
         "WORKDOCS_GRAPH_OUTPUT_DIR", "graph.output_dir", "graphs"
@@ -296,7 +302,7 @@ class Config:
             if isinstance(val, Path):
                 val = str(val)
             if key in sensitive_keys and mask_sensitive and isinstance(val, str) and val:
-                result[key] = val[:4] + "***" if len(val) > 4 else "***"
+                result[key] = "***"
             else:
                 result[key] = val
         return result

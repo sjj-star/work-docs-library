@@ -92,3 +92,33 @@ def test_load_migrates_old_dict_id_map(make_index, tmp_path):
     ids = [r[0] for r in results]
     assert 100 in ids
     assert 200 in ids
+
+
+def test_close_releases_lock_fd(make_index):
+    """close() 应释放文件锁并关闭文件描述符."""
+    vi = make_index(dim=4)
+    # add() 内部 try/finally 会自动释放锁，所以 add() 后 _lock_fd 应为 None
+    vi.add(1, [1, 0, 0, 0])
+    assert vi._lock_fd is None
+    # 手动获取锁后验证 close() 能正确释放
+    vi._acquire_lock()
+    assert vi._lock_fd is not None
+    vi.close()
+    assert vi._lock_fd is None
+
+
+def test_repeated_create_close_no_fd_leak(make_index):
+    """重复创建和关闭 VectorIndex 不应导致 fd 泄漏."""
+    for _ in range(5):
+        vi = make_index(dim=4)
+        vi.add(1, [1, 0, 0, 0])
+        vi.close()
+        assert vi._lock_fd is None
+
+
+def test_close_idempotent(make_index):
+    """多次调用 close() 不应报错."""
+    vi = make_index(dim=4)
+    vi.close()
+    vi.close()  # 第二次调用不应抛异常
+    assert vi._lock_fd is None
