@@ -60,7 +60,7 @@ exclude = [
     "**/__pycache__",
 ]
 venvPath = "."
-venv = "venv"
+venv = ".venv"
 typeCheckingMode = "standard"
 reportMissingImports = "error"
 reportMissingModuleSource = "warning"

@@ -320,8 +320,8 @@ def test_plugin_json_all_commands_use_venv_python():
     for tool in data["tools"]:
         cmd = tool.get("command", [])
         assert len(cmd) >= 1, f"{tool['name']} has empty command"
-        assert cmd[0] == "venv/bin/python3", (
-            f"{tool['name']} command should start with 'venv/bin/python3', got {cmd[0]}"
+        assert cmd[0] == ".venv/bin/python3", (
+            f"{tool['name']} command should start with '.venv/bin/python3', got {cmd[0]}"
         )
 
 
@@ -485,11 +485,16 @@ def graph_service(monkeypatch, tmp_path):
     """创建一个预填充了测试数据的 KnowledgeBaseService（隔离全局图）."""
     from core.graph_store import GraphEntity, GraphRelation, NetworkXGraphStore
     from core.knowledge_base_service import KnowledgeBaseService
+    from core.vector_index import VectorIndex
 
     monkeypatch.setattr(Config, "GRAPH_OUTPUT_DIR", str(tmp_path / "graphs"))
+    db = KnowledgeDB(db_path=tmp_path / "test.db")
+    vec = VectorIndex(
+        dim=4, index_path=tmp_path / "faiss.index", id_map_path=tmp_path / "id_map.json"
+    )
     svc = KnowledgeBaseService(
-        db=KnowledgeDB(),
-        vec=None,  # graph tools don't need vec
+        db=db,
+        vec=vec,
         graph_store=NetworkXGraphStore(),
     )
     # Build test graph: TOP -> SUB -> REG, TOP -> CLK
