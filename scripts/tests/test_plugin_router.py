@@ -129,8 +129,35 @@ class FakeBatchClient:
         pass
 
 
+class FakeChatClient:
+    """Mock BaseLLMClient for Chat mode fallback."""
+
+    def __init__(self, *args, **kwargs):
+        self.chat_url = "https://test.com/v1/chat/completions"
+        self.user_agent = "KimiCLI/1.44.0"
+
+    def _post(self, url, payload, timeout=None):
+        return {
+            "choices": [
+                {
+                    "message": {
+                        "content": (
+                            '{"entities": [], "relationships": [], "image_descriptions": []}'
+                        )
+                    }
+                }
+            ]
+        }
+
+    def chat(self, messages, temperature=0.3, **kwargs):
+        return '{"entities": [], "relationships": [], "image_descriptions": []}'
+
+    def close(self):
+        pass
+
+
 def _mock_llm_and_embedder(monkeypatch):
-    """Mock EmbeddingClient and BigModelParserClient for DocGraphPipeline."""
+    """Mock EmbeddingClient, BigModelParserClient and BaseLLMClient for DocGraphPipeline."""
     fake_embed = FakeEmbedder()
     fake_file = FakeBigModelParserClient()
     monkeypatch.setattr(
@@ -144,6 +171,10 @@ def _mock_llm_and_embedder(monkeypatch):
     monkeypatch.setattr(
         "core.doc_graph_pipeline.BatchClient",
         FakeBatchClient,
+    )
+    monkeypatch.setattr(
+        "core.doc_graph_pipeline.BaseLLMClient",
+        FakeChatClient,
     )
 
 

@@ -12,10 +12,10 @@ _SKILL_ROOT = Path(__file__).resolve().parent.parent.parent
 
 
 class TestResolveConfig:
-    """测试 _resolve_config 的三层优先级（不依赖模块重载）."""
+    """测试 _resolve_config 的四层优先级（不依赖模块重载）."""
 
-    def test_json_path_env_variable_highest_priority(self, monkeypatch):
-        """Kimi CLI 注入的环境变量（json_path）优先级最高."""
+    def test_env_name_highest_priority(self, monkeypatch):
+        """.env 环境变量（WORKDOCS_xxx）优先级最高."""
         import core.config as cfg
 
         monkeypatch.setenv("llm.api_key", "injected_oauth_token")
@@ -24,22 +24,58 @@ class TestResolveConfig:
         with patch.object(cfg, "_CONFIG_JSON", {"llm": {"api_key": "json_token"}}):
             result = cfg._resolve_config("WORKDOCS_LLM_API_KEY", "llm.api_key", "default")
 
-        assert result == "injected_oauth_token"
+        assert result == "env_api_key"
 
-    def test_config_json_second_priority(self, monkeypatch):
-        """config.json 优先级第二（当没有 Kimi CLI 注入时）."""
+    def test_json_path_env_second_priority(self, monkeypatch):
+        """Kimi CLI 注入的环境变量优先级第二（当 .env 未设置时）."""
         import core.config as cfg
 
+        monkeypatch.delenv("WORKDOCS_LLM_API_KEY", raising=False)
+        monkeypatch.setenv("llm.api_key", "injected_oauth_token")
+
+        with patch.object(cfg, "_CONFIG_JSON", {"llm": {"api_key": "json_token"}}):
+            result = cfg._resolve_config("WORKDOCS_LLM_API_KEY", "llm.api_key", "default")
+
+        assert result == "injected_oauth_token"
+
+    def test_config_json_third_priority(self, monkeypatch):
+        """config.json 优先级第三（当 .env 和 Kimi CLI 注入均未设置时）."""
+        import core.config as cfg
+
+        monkeypatch.delenv("WORKDOCS_LLM_API_KEY", raising=False)
         monkeypatch.delenv("llm.api_key", raising=False)
-        monkeypatch.setenv("WORKDOCS_LLM_API_KEY", "env_api_key")
 
         with patch.object(cfg, "_CONFIG_JSON", {"llm": {"api_key": "json_token"}}):
             result = cfg._resolve_config("WORKDOCS_LLM_API_KEY", "llm.api_key", "default")
 
         assert result == "json_token"
 
-    def test_env_name_variable_third_priority(self, monkeypatch):
-        """.env 环境变量优先级第三（当 config.json 字段为空时）."""
+    def test_env_name_overrides_json_path_and_json(self, monkeypatch):
+        """.env 同时覆盖 Kimi CLI 注入和 config.json."""
+        import core.config as cfg
+
+        monkeypatch.setenv("llm.api_key", "runtime_oauth_token")
+        monkeypatch.setenv("WORKDOCS_LLM_API_KEY", "static_key")
+
+        with patch.object(cfg, "_CONFIG_JSON", {"llm": {"api_key": "persistent_token"}}):
+            result = cfg._resolve_config("WORKDOCS_LLM_API_KEY", "llm.api_key", "")
+
+        assert result == "static_key"
+
+    def test_env_name_empty_continues_fallback(self, monkeypatch):
+        """.env 为空字符串时继续回退到下一优先级."""
+        import core.config as cfg
+
+        monkeypatch.setenv("WORKDOCS_LLM_API_KEY", "")
+        monkeypatch.setenv("llm.api_key", "injected_token")
+
+        with patch.object(cfg, "_CONFIG_JSON", {"llm": {"api_key": "json_token"}}):
+            result = cfg._resolve_config("WORKDOCS_LLM_API_KEY", "llm.api_key", "default")
+
+        assert result == "injected_token"
+
+    def test_config_json_empty_continues_fallback(self, monkeypatch):
+        """config.json 字段为空字符串时继续回退到 .env."""
         import core.config as cfg
 
         monkeypatch.delenv("llm.api_key", raising=False)
@@ -112,18 +148,6 @@ class TestResolveConfig:
             )
 
         assert result == "768"
-
-    def test_json_path_env_overrides_json_content(self, monkeypatch):
-        """运行时注入的环境变量同时覆盖 config.json 和 .env."""
-        import core.config as cfg
-
-        monkeypatch.setenv("llm.api_key", "runtime_oauth_token")
-        monkeypatch.setenv("WORKDOCS_LLM_API_KEY", "static_key")
-
-        with patch.object(cfg, "_CONFIG_JSON", {"llm": {"api_key": "persistent_token"}}):
-            result = cfg._resolve_config("WORKDOCS_LLM_API_KEY", "llm.api_key", "")
-
-        assert result == "runtime_oauth_token"
 
 
 class TestConfigJsonFileLoading:

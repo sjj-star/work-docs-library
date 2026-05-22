@@ -46,18 +46,23 @@ _CONFIG_JSON = _load_config_json()
 def _resolve_config(env_name: str, json_path: str = "", default: str = "") -> str:
     """按优先级解析配置值：.
 
-    1. 环境变量 json_path（Kimi CLI 运行时注入，如 llm.api_key）
-    2. config.json 路径（Kimi CLI 持久化 + 用户手动配置）
-    3. 环境变量 env_name（.env 文件，如 WORKDOCS_LLM_API_KEY）
+    1. 环境变量 env_name（.env 文件，如 WORKDOCS_LLM_API_KEY）— 用户手动配置
+    2. 环境变量 json_path（Kimi CLI 运行时注入，如 llm.api_key）— 工具动态注入
+    3. config.json 路径 — 工具持久化
     4. 默认值.
     """
-    # 1. Kimi CLI 注入的环境变量（运行时动态，最高优先级）
+    # 1. .env 环境变量（用户手动配置，最高优先级）
+    env_val = os.getenv(env_name, "")
+    if env_val:
+        return env_val
+
+    # 2. Kimi CLI 运行时注入的环境变量
     if json_path:
         env_val = os.getenv(json_path, "")
         if env_val:
             return env_val
 
-    # 2. config.json（统一配置入口，用户手动维护的参数）
+    # 3. config.json（工具自动注入/持久化）
     if json_path:
         keys = json_path.split(".")
         data = _CONFIG_JSON
@@ -72,11 +77,6 @@ def _resolve_config(env_name: str, json_path: str = "", default: str = "") -> st
             val = str(data)
             if val:  # 空字符串视为未配置，继续回退
                 return val
-
-    # 3. .env 环境变量（开发/独立运行回退）
-    env_val = os.getenv(env_name, "")
-    if env_val:
-        return env_val
 
     return default
 

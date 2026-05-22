@@ -140,6 +140,10 @@ def _mock_external_clients(monkeypatch):
         FakeBatchClient,
     )
     monkeypatch.setattr(
+        "core.doc_graph_pipeline.BaseLLMClient",
+        FakeChatClient,
+    )
+    monkeypatch.setattr(
         "core.doc_graph_pipeline.EmbeddingClient",
         lambda: type(
             "FakeEmbedder",

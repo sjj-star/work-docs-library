@@ -172,12 +172,12 @@
 
 ## 8. 配置系统：config.json + .env 双轨设计
 
-**选择**：三层优先级配置系统——环境变量（Kimi CLI 注入）> `config.json` > `.env` > 代码默认值。
+**选择**：四层优先级配置系统——`.env`（用户手动配置）> 环境变量（Kimi CLI 注入）> `config.json`（工具持久化）> 代码默认值。
 
 **原因**：
-- **`config.json`**：用户持久化配置，适合存放模型选择、端点地址、维度等不敏感的参数；由 `plugin.json` 的 `config_file` 指定路径，Kimi CLI 可自动管理
-- **`.env`**：适合存放 API Key 等凭证，gitignored，不进入版本控制
-- **环境变量**：Kimi CLI 运行时动态注入，优先级最高，支持用户在不修改文件的情况下临时覆盖配置
+- **`.env`**：用户手动配置，优先级最高，适合存放 API Key 等凭证，gitignored，不进入版本控制。用户手动修改的配置应覆盖工具自动注入的值
+- **环境变量**：Kimi CLI 运行时动态注入，优先级第二，支持在不修改文件的情况下临时覆盖 `config.json`
+- **`config.json`**：工具自动持久化，优先级第三，适合存放模型选择、端点地址等不敏感参数；由 `plugin.json` 的 `config_file` 指定路径，Kimi CLI 安装时自动注入凭证
 
 **实现**：
 - `_resolve_config(env_name, json_path, default)` 统一解析，优先级逻辑集中在一处（`BigModelParserClient` 的 `_resolve_api_key` 为历史遗留独立实现，未复用 `_resolve_config`，后续建议统一）
