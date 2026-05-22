@@ -311,13 +311,21 @@ class KnowledgeDB:
         """Return chunks whose metadata.entities contain the given concept name."""
         sql = """
             SELECT * FROM chunks
-            WHERE doc_id = ? AND metadata LIKE ?
+            WHERE doc_id = ?
             ORDER BY created_at
         """
-        pattern = f'%"name": "{concept_name}"%'
         with self._connect() as conn:
-            rows = conn.execute(sql, (doc_id, pattern)).fetchall()
-        return self._rows_to_chunks(rows)
+            rows = conn.execute(sql, (doc_id,)).fetchall()
+        chunks = self._rows_to_chunks(rows)
+        # 在 Python 中过滤，避免 LIKE 模式拼接的脆弱性
+        results = []
+        for ck in chunks:
+            entities = ck.metadata.get("extracted_entities", [])
+            for ent in entities:
+                if ent.get("name") == concept_name:
+                    results.append(ck)
+                    break
+        return results
 
     def get_chunk_by_db_id(self, db_id: int) -> Chunk | None:
         """get_chunk_by_db_id 函数."""

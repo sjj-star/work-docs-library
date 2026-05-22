@@ -49,9 +49,6 @@
     "subgraph_depth": "",
     "default_limit": ""
   },
-  "pipeline": {
-    "summary_length": ""
-  },
   "graph": {
     "max_path_depth": "",
     "output_dir": ""

@@ -72,7 +72,11 @@ class BaseLLMClient:
         return self._local.session
 
     def _post(self, url: str, payload: dict, timeout: int | None = None) -> dict:
-        """发送 POST 请求，带重试机制."""
+        """发送 POST 请求，带重试机制.
+
+        仅对可重试错误（5xx、429、网络超时）执行指数退避重试，
+        4xx 客户端错误（除 429 外）直接抛出。
+        """
         timeout = timeout or self.DEFAULT_TIMEOUT
         session = self._get_session()
         last_exc = None
@@ -90,6 +94,15 @@ class BaseLLMClient:
                 )
                 resp.raise_for_status()
                 return resp.json()
+            except requests.HTTPError as e:
+                last_exc = e
+                status_code = e.response.status_code if e.response else 0
+                # 4xx 客户端错误（除 429 Too Many Requests 外）不可重试
+                if 400 <= status_code < 500 and status_code != 429:
+                    raise
+                import time
+
+                time.sleep(self.RETRY_BACKOFF_BASE**attempt)
             except Exception as e:
                 last_exc = e
                 import time
@@ -111,7 +124,19 @@ class BaseLLMClient:
         data.update(kwargs)
 
         response_data = self._post(self.chat_url, data)
-        return response_data["choices"][0]["message"]["content"]
+        # 防御性校验 API 响应结构
+        if not isinstance(response_data, dict):
+            raise RuntimeError("Invalid response: not a dict")
+        choices = response_data.get("choices")
+        if not choices or not isinstance(choices, list) or len(choices) == 0:
+            raise RuntimeError("Invalid response: missing or empty choices")
+        message = choices[0].get("message")
+        if not message or not isinstance(message, dict):
+            raise RuntimeError("Invalid response: missing message")
+        content = message.get("content")
+        if content is None:
+            raise RuntimeError("Invalid response: missing content")
+        return content
 
     def close(self) -> None:
         """关闭当前线程的会话."""

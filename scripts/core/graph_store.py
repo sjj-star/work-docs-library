@@ -4,8 +4,10 @@
 预留 Neo4j 迁移接口.
 """
 
+import copy
 import json
 import logging
+import os
 import threading
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
@@ -647,8 +649,8 @@ class NetworkXGraphStore(GraphStore):
         return GraphEntity(
             entity_type=data.get("entity_type", ""),
             name=data.get("name", nid),
-            properties=data.get("properties", {}),
-            doc_properties=data.get("doc_properties", {}),
+            properties=copy.deepcopy(data.get("properties", {})),
+            doc_properties=copy.deepcopy(data.get("doc_properties", {})),
             source_doc_ids=_normalize_sids(data.get("source_doc_ids", set())),
             source_chapter=data.get("source_chapter", ""),
             confidence=data.get("confidence", 1.0),
@@ -668,8 +670,8 @@ class NetworkXGraphStore(GraphStore):
             to_name=v_name,
             from_type=u_type,
             to_type=v_type,
-            properties=data.get("properties", {}),
-            doc_properties=data.get("doc_properties", {}),
+            properties=copy.deepcopy(data.get("properties", {})),
+            doc_properties=copy.deepcopy(data.get("doc_properties", {})),
             source_doc_ids=_normalize_sids(data.get("source_doc_ids", set())),
             confidence=data.get("confidence", 1.0),
             verified=data.get("verified", False),
@@ -749,7 +751,7 @@ class NetworkXGraphStore(GraphStore):
             old_props = dict(existing.get("properties", {}))
             self._remove_from_property_index(nid, entity.entity_type, old_props)
             # 合并 properties，检测冲突
-            merged_props = old_props
+            merged_props = copy.deepcopy(old_props)
             existing_doc_props = existing.get("doc_properties", {})
             for k, v in entity.properties.items():
                 if k in merged_props and merged_props[k] != v:
@@ -791,19 +793,19 @@ class NetworkXGraphStore(GraphStore):
             existing["source_chapter"] = entity.source_chapter or existing.get("source_chapter", "")
             # 保存文档级属性快照
             if doc_id:
-                existing_doc_props[doc_id] = dict(entity.properties)
+                existing_doc_props[doc_id] = copy.deepcopy(entity.properties)
             existing["doc_properties"] = existing_doc_props
             # 更新元数据（取最小 confidence，保持 verified 为 True）
             existing["confidence"] = min(existing.get("confidence", 1.0), entity.confidence)
             existing["verified"] = existing.get("verified", False) or entity.verified
             existing["updated_at"] = now
         else:
-            doc_props = {doc_id: dict(entity.properties)} if doc_id else {}
+            doc_props = {doc_id: copy.deepcopy(entity.properties)} if doc_id else {}
             self._g.add_node(
                 nid,
                 entity_type=entity.entity_type,
                 name=entity.name,
-                properties=entity.properties,
+                properties=copy.deepcopy(entity.properties),
                 doc_properties=doc_props,
                 source_doc_ids=set(entity.source_doc_ids),
                 source_chapter=entity.source_chapter,
@@ -813,7 +815,7 @@ class NetworkXGraphStore(GraphStore):
                 updated_at=now,
                 feedback_score=entity.feedback_score,
             )
-            self._add_to_property_index(nid, entity.entity_type, entity.properties)
+            self._add_to_property_index(nid, entity.entity_type, copy.deepcopy(entity.properties))
         logger.debug(f"添加实体 | {nid} | conflicts={len(conflicts)}")
         return conflicts
 
@@ -998,6 +1000,24 @@ class NetworkXGraphStore(GraphStore):
 
         return results
 
+    def get_relation(
+        self,
+        from_type: str,
+        from_name: str,
+        to_type: str,
+        to_name: str,
+        rel_type: str,
+    ) -> GraphRelation | None:
+        """获取指定关系."""
+        from_nid = self._node_id(from_type, from_name)
+        to_nid = self._node_id(to_type, to_name)
+        if not self._g.has_edge(from_nid, to_nid):
+            return None
+        data = self._g.edges[from_nid, to_nid]
+        if data.get("rel_type") != rel_type:
+            return None
+        return self._edge_to_relation(from_nid, to_nid, data)
+
     def get_entity_relations(
         self,
         entity_type: str,
@@ -1086,12 +1106,14 @@ class NetworkXGraphStore(GraphStore):
             sids = edge.get("source_doc_ids")
             if isinstance(sids, set):
                 edge["source_doc_ids"] = sorted(list(sids))
-        with open(path, "w", encoding="utf-8") as f:
+        tmp_path = path.with_suffix(".json.tmp")
+        with open(tmp_path, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
-            logger.info(
-                f"图谱已保存 | nodes={self._g.number_of_nodes()} | "
-                f"edges={self._g.number_of_edges()} | path={path}"
-            )
+        os.replace(str(tmp_path), str(path))
+        logger.info(
+            f"图谱已保存 | nodes={self._g.number_of_nodes()} | "
+            f"edges={self._g.number_of_edges()} | path={path}"
+        )
 
     def load(self, path: Path) -> None:
         """从 node-link JSON 加载."""
@@ -1343,7 +1365,7 @@ class NetworkXGraphStore(GraphStore):
             return False
         now = _now_iso()
         if properties is not None:
-            data["properties"] = properties
+            data["properties"] = copy.deepcopy(properties)
         if confidence is not None:
             data["confidence"] = confidence
         if verified is not None:
@@ -1412,8 +1434,8 @@ class SubGraphView:
         return GraphEntity(
             entity_type=data.get("entity_type", ""),
             name=data.get("name", nid),
-            properties=data.get("properties", {}),
-            doc_properties=data.get("doc_properties", {}),
+            properties=copy.deepcopy(data.get("properties", {})),
+            doc_properties=copy.deepcopy(data.get("doc_properties", {})),
             source_doc_ids=_normalize_sids(data.get("source_doc_ids", set())),
             source_chapter=data.get("source_chapter", ""),
             confidence=data.get("confidence", 1.0),
@@ -1435,8 +1457,8 @@ class SubGraphView:
             to_name=v_name,
             from_type=u_type,
             to_type=v_type,
-            properties=data.get("properties", {}),
-            doc_properties=data.get("doc_properties", {}),
+            properties=copy.deepcopy(data.get("properties", {})),
+            doc_properties=copy.deepcopy(data.get("doc_properties", {})),
             source_doc_ids=_normalize_sids(data.get("source_doc_ids", set())),
             confidence=data.get("confidence", 1.0),
             verified=data.get("verified", False),

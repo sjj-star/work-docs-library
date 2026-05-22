@@ -153,7 +153,7 @@ class BigModelParserClient:
 
         # 4. 确定输出目录
         if output_dir is None:
-            output_dir = Config.DB_PATH.parent / "parsed" / task_id
+            output_dir = Config.DB_PATH.parent / Config.PARSE_OUTPUT_DIR / task_id
         else:
             output_dir = Path(output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)

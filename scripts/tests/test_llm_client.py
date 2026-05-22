@@ -178,3 +178,72 @@ def test_chat_client_post_includes_user_agent(monkeypatch):
     client._post("https://test.com/chat/completions", {"model": "test"})
     assert len(calls) == 1
     assert calls[0].get("User-Agent") == "KimiCLI/1.44.0"
+
+
+def test_post_retry_eventual_success(monkeypatch):
+    """首次失败、第二次成功时应重试并返回结果."""
+    call_count = [0]
+
+    class FakeSession:
+        def post(self, url, **kwargs):
+            call_count[0] += 1
+            if call_count[0] == 1:
+                raise Exception("Network error")
+
+            class Resp:
+                def raise_for_status(self):
+                    pass
+
+                def json(self):
+                    return {"choices": [{"message": {"content": "ok"}}]}
+
+            return Resp()
+
+    monkeypatch.setattr(ChatClient, "_get_session", lambda self: FakeSession())
+    monkeypatch.setattr(ChatClient, "RETRY_BACKOFF_BASE", 0)
+    client = ChatClient()
+    result = client._post("https://test.com/v1/chat/completions", {})
+    assert call_count[0] == 2
+    assert result["choices"][0]["message"]["content"] == "ok"
+
+
+def test_post_retry_exhausted(monkeypatch):
+    """全部失败时应抛出最后一次异常."""
+    call_count = [0]
+
+    class FakeSession:
+        def post(self, url, **kwargs):
+            call_count[0] += 1
+            raise Exception(f"Fail {call_count[0]}")
+
+    monkeypatch.setattr(ChatClient, "_get_session", lambda self: FakeSession())
+    monkeypatch.setattr(ChatClient, "RETRY_BACKOFF_BASE", 0)
+    client = ChatClient()
+    with pytest.raises(Exception, match="Fail 3"):
+        client._post("https://test.com/v1/chat/completions", {})
+    assert call_count[0] == 3
+
+
+def test_post_no_retry_on_401(monkeypatch):
+    """401 Unauthorized 不应重试."""
+    call_count = [0]
+
+    class FakeResponse:
+        def __init__(self):
+            self.status_code = 401
+
+        def raise_for_status(self):
+            import requests
+
+            raise requests.HTTPError("401 Unauthorized", response=self)
+
+    class FakeSession:
+        def post(self, url, **kwargs):
+            call_count[0] += 1
+            return FakeResponse()
+
+    monkeypatch.setattr(ChatClient, "_get_session", lambda self: FakeSession())
+    client = ChatClient()
+    with pytest.raises(Exception):
+        client._post("https://test.com/v1/chat/completions", {})
+    assert call_count[0] == 1
