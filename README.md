@@ -13,7 +13,7 @@
 
 ---
 
-> ⚠️ **前置要求**：本项目依赖 Python 虚拟环境。首次安装后，请务必执行 [安装步骤](#安装) 创建 `venv` 并安装依赖，否则 Kimi CLI 调用插件工具时会因缺少依赖而失败。
+> ⚠️ **前置要求**：本项目依赖 Python 虚拟环境。首次安装后，请务必执行 [安装步骤](#安装) 创建 `.venv` 并安装依赖，否则 Kimi CLI 调用插件工具时会因缺少依赖而失败。
 
 ---
 
@@ -167,7 +167,7 @@ work-docs-library/
 │   ├── parsed/<doc_id>/          # Stage1 解析输出（result.md + images/）
 │   ├── batch/                    # Stage2/3/5/6 中间产物（*.jsonl, *_info.json）
 │   └── graphs/                   # Stage4 子图快照（{doc_id}.json, global.json）
-├── venv/                         # Python 虚拟环境
+├── .venv/                        # Python 虚拟环境
 └── .gitignore
 ```
 
@@ -191,8 +191,8 @@ cd ~/.kimi/plugins/work-docs-library
 uv sync
 
 # 方式二：使用 pip（需手动创建虚环境）
-python3 -m venv venv
-source venv/bin/activate
+python3 -m venv .venv
+source .venv/bin/activate
 pip install -e .
 
 # 方式三：手动安装依赖（向后兼容）
@@ -438,9 +438,9 @@ Kimi CLI 通过 `plugin.json` 注册以下工具：
 | `WORKDOCS_EMBEDDING_BASE_URL` | `embedding.endpoint` | `https://open.bigmodel.cn/api/paas/v4` | BigModel Base URL |
 | `WORKDOCS_EMBEDDING_MODEL` | `embedding.model` | `embedding-3` | 向量化模型 |
 | `WORKDOCS_EMBEDDING_DIMENSION` | `embedding.dimension` | `1024` | 向量维度 |
-| `WORKDOCS_EMBEDDING_BATCH_ENDPOINT` | `embedding.batch_endpoint` | `/v4/embeddings` | Embedding API endpoint（同步调用） |
-| `WORKDOCS_EMBED_BATCH_TIMEOUT` | `embedding.batch_timeout` | `3600` | Embedding API 超时（秒） |
-| `WORKDOCS_CHUNK_MAX_CHARS` | `chunk.max_chars` | `6000` | **单个 chunk 的最大字符数上限**。在 stage4 入库时，若 chapter content 超过此值，`_maybe_split_chapter` 会将其拆分为多个 sub-chunks |
+| `WORKDOCS_EMBEDDING_BATCH_ENDPOINT` | `embedding.batch_endpoint` | `/v4/embeddings` | ~~Embedding Batch API endpoint~~（已废弃，Embedding 改为同步单文本 API） |
+| `WORKDOCS_EMBED_BATCH_TIMEOUT` | `embedding.batch_timeout` | `3600` | ~~Embedding Batch API 轮询超时（秒）~~（已废弃） |
+| `WORKDOCS_CHUNK_MAX_CHARS` | `chunk.max_chars` | `6000` | **单个 chunk 的最大字符数上限**。在 stage4 入库时，若 chapter content 超过此值，`_maybe_split_chapter` 会将其拆分为多个 sub-chunks。这是一个基于项目文本分布的**经验参数**（自然语言+代码混合内容约对应 2500-2800 actual tokens），不保证对所有文本类型安全 |
 | `WORKDOCS_EMBED_MAX_RETRIES` | `embedding.max_retries` | `3` | Embedding 同步请求最大重试次数 |
 | `WORKDOCS_EMBED_RETRY_BACKOFF` | `embedding.retry_backoff` | `2` | Embedding 重试退避系数（秒） |
 | `WORKDOCS_EMBED_TIMEOUT` | `embedding.timeout` | `120` | Embedding 同步请求超时（秒） |
@@ -456,6 +456,8 @@ Kimi CLI 通过 `plugin.json` 注册以下工具：
 | `WORKDOCS_BATCH_PARALLEL_WORKERS` | `batch.parallel_workers` | `4` | 并行 batch 提交线程数 |
 | `WORKDOCS_BATCH_TEMP_DIR` | `batch.temp_dir` | `batch_temp` | Batch 临时文件目录 |
 | `WORKDOCS_BATCH_FILE_DOWNLOAD_TEMPLATE` | `batch.download_template` | `{base_url}/files/{file_id}/content` | Batch 结果下载 URL 模板 |
+| `WORKDOCS_PARSE_OUTPUT_DIR` | `pipeline.parse_output_dir` | `parsed` | PDF 解析输出目录 |
+| `WORKDOCS_BATCH_OUTPUT_DIR` | `pipeline.batch_output_dir` | `batch` | Batch 产物输出目录 |
 | **Plugin 默认值** | | | |
 | `WORKDOCS_PLUGIN_SEARCH_TOP_K` | `plugin.search_top_k` | `5` | 语义搜索默认返回条数 |
 | `WORKDOCS_PLUGIN_QUERY_TOP_K` | `plugin.query_top_k` | `10` | 查询默认返回条数 |
@@ -609,10 +611,10 @@ pending ────────────────────────
 
 ```bash
 cd /path/to/work-docs-library
-PYTHONPATH=scripts ./venv/bin/python -m pytest scripts/tests/ -v
+PYTHONPATH=scripts ./.venv/bin/python -m pytest scripts/tests/ -v
 ```
 
-**当前状态：304 个测试全部通过。**
+**当前状态：335 passed, 2 skipped, 0 failed。**
 
 ### 常用测试文档
 
@@ -747,6 +749,20 @@ Prompt 中显式规定格式，确保 LLM 输出统一：
 | **跨文档属性合并** | 已修复：全局 `properties` 合并时比较文档信息完整性（非空属性数量），完整性高的文档优先。互补属性始终取并集。平局保留旧值。无法推断来源时保留现有值 | `doc_properties` 保存原始快照，`doc_id` 查询可获取精确属性 | 完整性评分基于属性数量而非语义权重。修改后建议调用 `/rebuild_global_graph` 重建全局图
 
 ---
+
+## 参考资源
+
+### 官方 API 开发文档
+
+- [Kimi Code CLI 插件](https://moonshotai.github.io/kimi-cli/zh/customization/plugins.html)
+- [Kimi API 概述](https://platform.kimi.com/docs/api/overview)
+- [Kimi 模型参数参考](https://platform.kimi.com/docs/api/models-overview)
+- [Kimi 使用 Batch API 批量处理任务](https://platform.kimi.com/docs/guide/use-batch-api)
+- [BigModel API 使用概述](https://docs.bigmodel.cn/cn/api/introduction)
+- [BigModel 结构化输出](https://docs.bigmodel.cn/cn/guide/capabilities/struct-output)
+- [BigModel Embedding-3](https://docs.bigmodel.cn/cn/guide/models/embedding/embedding-3)
+- [BigModel 批量处理](https://docs.bigmodel.cn/cn/guide/tools/batch)
+- [BigModel 新文件解析服务](https://docs.bigmodel.cn/cn/guide/tools/file-parser)
 
 ## 许可证
 

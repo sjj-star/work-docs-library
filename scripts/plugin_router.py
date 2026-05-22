@@ -20,8 +20,8 @@ _SKILL_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_SKILL_ROOT / "scripts"))
 
 # --- Auto-switch to venv Python if available ---
-_VENV_PYTHON = _SKILL_ROOT / "venv" / "bin" / "python3"
-_VENV_PYTHON_ALT = _SKILL_ROOT / "venv" / "bin" / "python"
+_VENV_PYTHON = _SKILL_ROOT / ".venv" / "bin" / "python3"
+_VENV_PYTHON_ALT = _SKILL_ROOT / ".venv" / "bin" / "python"
 _venv_pythons = [p for p in (_VENV_PYTHON, _VENV_PYTHON_ALT) if p.exists()]
 if _venv_pythons and sys.executable not in {str(p) for p in _venv_pythons}:
     os.execv(str(_venv_pythons[0]), [str(_venv_pythons[0])] + sys.argv)
