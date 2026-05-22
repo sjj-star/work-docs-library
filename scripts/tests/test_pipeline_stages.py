@@ -40,6 +40,33 @@ def patched_config(monkeypatch, tmp_path):
     return tmp_path
 
 
+class FakeChatClient:
+    """Mock ChatClient, return fixed entity extraction result."""
+
+    def __init__(self, *args, **kwargs):
+        self.chat_url = "https://test.com/v1/chat/completions"
+        self.user_agent = "KimiCLI/1.44.0"
+
+    def _post(self, url, payload, timeout=None):
+        return {
+            "choices": [
+                {
+                    "message": {
+                        "content": json.dumps(
+                            {
+                                "entities": [
+                                    {"type": "Register", "name": "TBCTL", "properties": {}}
+                                ],
+                                "relationships": [],
+                                "image_descriptions": [],
+                            }
+                        )
+                    }
+                }
+            ]
+        }
+
+
 class FakeBatchClient:
     """Mock BatchClient，返回空实体提取结果."""
 
@@ -788,3 +815,224 @@ def test_split_for_embedding_sentence_fallback():
     # 每部分不超过 15 chars（允许单个句子超长时被保留原样）
     for p in parts:
         assert len(p) <= 20  # 放宽到 20，因为单个短句可能略超 15
+
+
+def test_stage3_chat_mode_writes_batch_format_jsonl(patched_config, monkeypatch, tmp_path):
+    """Chat mode _submit_via_chat output results.jsonl format must match Batch result format."""
+    _mock_external_clients(monkeypatch)
+    monkeypatch.setattr("core.doc_graph_pipeline.BatchClient", FakeBatchClient)
+    monkeypatch.setattr("core.doc_graph_pipeline.BaseLLMClient", FakeChatClient)
+    monkeypatch.setattr(Config, "LLM_MODE", "chat")
+
+    pipe = DocGraphPipeline()
+    # ensure ChatClient is used
+    assert pipe.llm_chat is not None
+
+    # construct mock JSONL requests (same format as Stage2 output)
+    batch_dir = Config.DB_PATH.parent / "batch"
+    batch_dir.mkdir(parents=True, exist_ok=True)
+    requests = [
+        {
+            "custom_id": "batch_0",
+            "method": "POST",
+            "url": "/v1/chat/completions",
+            "body": {
+                "model": "test-model",
+                "messages": [
+                    {"role": "system", "content": "system prompt"},
+                    {"role": "user", "content": "user prompt"},
+                ],
+                "response_format": {"type": "json_object"},
+            },
+        }
+    ]
+    results_path = batch_dir / "chat_test_results.jsonl"
+
+    # call _submit_via_chat
+    results = pipe._submit_via_chat(requests, results_path)
+
+    # verify result file exists
+    assert results_path.exists()
+
+    # verify file content format matches Batch API return format
+    lines = results_path.read_text(encoding="utf-8").strip().split("\n")
+    assert len(lines) == 1
+    result = json.loads(lines[0])
+    assert result["custom_id"] == "batch_0"
+    assert "response" in result
+    assert result["response"]["status_code"] == 200
+    assert "body" in result["response"]
+    assert "choices" in result["response"]["body"]
+
+    # verify Stage 4 _parse_results can parse correctly
+    from core.doc_graph_pipeline import EntityExtractor
+
+    extractor = EntityExtractor()
+    entities, relations, _ = extractor._parse_results(results, [{}], doc_id="chat_test")
+    assert len(entities) == 1
+    assert entities[0].entity_type == "Register"
+    assert entities[0].name == "TBCTL"
+
+
+def test_stage3_chat_mode_body_preserved(patched_config, monkeypatch, tmp_path):
+    """Chat mode req['body'] must be passed as-is without modification or missing fields."""
+    _mock_external_clients(monkeypatch)
+    monkeypatch.setattr("core.doc_graph_pipeline.BatchClient", FakeBatchClient)
+    monkeypatch.setattr("core.doc_graph_pipeline.BaseLLMClient", FakeChatClient)
+    monkeypatch.setattr(Config, "LLM_MODE", "chat")
+
+    pipe = DocGraphPipeline()
+    batch_dir = Config.DB_PATH.parent / "batch"
+    batch_dir.mkdir(parents=True, exist_ok=True)
+
+    original_body = {
+        "model": "kimi-k2.5",
+        "messages": [
+            {"role": "system", "content": "sys"},
+            {"role": "user", "content": "user"},
+        ],
+        "response_format": {"type": "json_object"},
+        "extra_body": {"thinking": {"type": "disabled"}},
+    }
+    requests = [{"custom_id": "batch_0", "body": original_body}]
+    results_path = batch_dir / "body_test_results.jsonl"
+
+    # use FakeChatClient._post to capture received payload
+    captured = []
+    original_post = pipe.llm_chat._post
+
+    def _capture_post(url, payload, timeout=None):
+        captured.append(payload)
+        return original_post(url, payload, timeout)
+
+    pipe.llm_chat._post = _capture_post
+
+    pipe._submit_via_chat(requests, results_path)
+
+    assert len(captured) == 1
+    assert captured[0]["model"] == "kimi-k2.5"
+    assert captured[0]["response_format"] == {"type": "json_object"}
+    assert captured[0]["extra_body"] == {"thinking": {"type": "disabled"}}
+    assert captured[0]["messages"][0]["role"] == "system"
+    assert captured[0]["messages"][1]["role"] == "user"
+
+
+def test_stage3_chat_mode_error_continue(patched_config, monkeypatch, tmp_path):
+    """Chat mode single request failure should not interrupt subsequent requests."""
+    _mock_external_clients(monkeypatch)
+    monkeypatch.setattr("core.doc_graph_pipeline.BatchClient", FakeBatchClient)
+    monkeypatch.setattr("core.doc_graph_pipeline.BaseLLMClient", FakeChatClient)
+    monkeypatch.setattr(Config, "LLM_MODE", "chat")
+
+    pipe = DocGraphPipeline()
+    batch_dir = Config.DB_PATH.parent / "batch"
+    batch_dir.mkdir(parents=True, exist_ok=True)
+
+    call_count = 0
+
+    def _fail_then_succeed(url, payload, timeout=None):
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            raise RuntimeError("simulated failure")
+        return {
+            "choices": [
+                {
+                    "message": {
+                        "content": json.dumps(
+                            {"entities": [], "relationships": [], "image_descriptions": []}
+                        )
+                    }
+                }
+            ]
+        }
+
+    pipe.llm_chat._post = _fail_then_succeed
+
+    requests = [
+        {"custom_id": "batch_0", "body": {}},
+        {"custom_id": "batch_1", "body": {}},
+    ]
+    results_path = batch_dir / "error_test_results.jsonl"
+    results = pipe._submit_via_chat(requests, results_path)
+
+    assert len(results) == 2
+    assert results[0]["response"]["status_code"] == 500
+    assert results[1]["response"]["status_code"] == 200
+
+
+def test_stage3_batch_mode_fallback_to_chat(patched_config, monkeypatch, tmp_path):
+    """Batch mode when BatchClient unavailable should auto fallback to Chat."""
+    _mock_external_clients(monkeypatch)
+    monkeypatch.setattr("core.doc_graph_pipeline.BaseLLMClient", FakeChatClient)
+    monkeypatch.setattr(Config, "LLM_MODE", "batch")
+
+    pipe = DocGraphPipeline()
+    # simulate BatchClient initialization failure
+    pipe.llm_batch = None
+
+    doc_id = "fallback_test_doc"
+    batch_dir = Config.DB_PATH.parent / "batch"
+    batch_dir.mkdir(parents=True, exist_ok=True)
+    parsed_dir = Config.DB_PATH.parent / "parsed" / doc_id
+    parsed_dir.mkdir(parents=True, exist_ok=True)
+
+    # create result.md for _read_result_md
+    result_md = parsed_dir / "result.md"
+    result_md.write_text("## Section 1\n\nTest content.", encoding="utf-8")
+
+    # create JSONL and batch_info for incremental filtering
+    jsonl_path = batch_dir / f"{doc_id}.jsonl"
+    jsonl_path.write_text(
+        json.dumps(
+            {
+                "custom_id": "batch_0",
+                "method": "POST",
+                "url": "/v1/chat/completions",
+                "body": {"model": "test", "messages": [{"role": "user", "content": "hi"}]},
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    batch_info_path = batch_dir / f"{doc_id}_batch_info.json"
+    batch_info_path.write_text(
+        json.dumps([{"custom_id": "batch_0", "chapter_titles": ["Section 1"]}]),
+        encoding="utf-8",
+    )
+
+    # mock db to avoid skip logic
+    monkeypatch.setattr(pipe.db, "get_document_by_path", lambda path: None)
+    # mock incremental analysis to return added chapters
+    monkeypatch.setattr(
+        pipe,
+        "_incremental_analysis",
+        lambda fp, et, force=False: (
+            [{"title": "Section 1", "content": "Test content.", "level": 2}],
+            [],
+            [],
+            [{"title": "Section 1", "content": "Test content.", "level": 2}],
+            [],
+            None,
+            "abc123",
+        ),
+    )
+
+    # create a dummy PDF file for hash calculation
+    dummy_pdf = tmp_path / "test.pdf"
+    dummy_pdf.write_bytes(b"dummy")
+
+    results_path = pipe.stage3_submit_batches(
+        doc_id=doc_id,
+        file_path=str(dummy_pdf),
+        jsonl_path=jsonl_path,
+        force=True,
+    )
+
+    assert results_path.exists()
+    lines = results_path.read_text(encoding="utf-8").strip().split("\n")
+    assert len(lines) == 1
+    result = json.loads(lines[0])
+    assert result["custom_id"] == "batch_0"
+    assert result["response"]["status_code"] == 200
+    assert "choices" in result["response"]["body"]

@@ -23,8 +23,17 @@
 
 **经验**：Batch API 的延迟不是统一的——LLM Batch API（分钟级）与 Embedding Batch API（小时级）有数量级差异。当外部 tokenizer 不透明时，**字符数限制是比 token 估算更可靠的切分策略**。
 
+**Chat 模式回退机制**：
+
+当 Batch API 不可用（如服务商未开通、排队过长）或需要快速调试时，可通过 `WORKDOCS_LLM_MODE=chat` 切换到同步 Chat API 模式：
+
+- **持久化格式一致**：Chat 模式逐条读取 Stage 2 生成的 `batch/{doc_id}.jsonl`，解析 `req["body"]` 后调用同步 Chat API，将结果以与 Batch API 完全一致的格式写入 `batch/{doc_id}_results.jsonl`（`{"custom_id": "...", "response": {"status_code": 200, "body": {...}}}`）
+- **Stage 4 零修改复用**：由于 `results.jsonl` 格式完全一致，`stage4_ingest_results` 和 `EntityExtractor._parse_results()` 无需任何修改即可解析 Chat 模式的输出
+- **单条失败不中断**：某条请求失败时记录 `status_code: 500`，继续处理后续请求，避免整批失败
+- **成本提醒**：Chat 模式价格为 Batch 的 2 倍，仅建议用于调试或 Batch API 不可用的回退场景
+
 **权衡**：
-- 实体提取延迟从秒级变为分钟级，不适合实时交互场景
+- 实体提取延迟从秒级变为分钟级（Batch）或秒级（Chat），不适合实时交互场景
 - 需要实现轮询和超时逻辑（`LLM_BATCH_TIMEOUT` 默认 3600 秒）
 - 单个 JSONL 不能超过 100MB，超大文档需自动拆分
 
@@ -600,7 +609,7 @@ graph_query(entity_type="Product", name="TMS320F28379D")
 | Stage 1 | result.md | `parsed/{doc_id}/result.md` | 解析后的 Markdown（可人工编辑） |
 | Stage 2 | requests.jsonl | `batch/{doc_id}.jsonl` | LLM Batch API 输入请求 |
 | Stage 2 | batch_info.json | `batch/{doc_id}_batch_info.json` | request → chapter 映射 |
-| Stage 3 | results.jsonl | `batch/{doc_id}_results.jsonl` | LLM Batch API 原始返回结果 |
+| Stage 3 | results.jsonl | `batch/{doc_id}_results.jsonl` | LLM Batch API 原始返回结果（Chat 模式下格式完全一致，Stage 4 零修改复用） |
 | Stage 3 | incremental.json | `batch/{doc_id}_incremental.json` | 增量分析摘要 + result.md hash |
 | Stage 4 | 子图谱 | `graphs/{doc_id}.json` | 文档级图谱快照 |
 | Stage 5 | embed.jsonl | `batch/{doc_id}_embed.jsonl` | Embedding 同步 API 输入请求（单文本，custom_id 编码 db_id） |

@@ -264,7 +264,7 @@ cp scripts/.env.example scripts/.env
   - `extra_body.thinking` 会被 stage3 自动补充（无需手动添加）
 - **触发下一阶段**: `/doc_submit_batches {doc_id}`
 
-#### 阶段3: 提交 LLM Batch API
+#### 阶段3: 提交 LLM Batch API（支持 Chat 回退）
 
 ```bash
 /doc_submit_batches {doc_id}
@@ -278,6 +278,7 @@ cp scripts/.env.example scripts/.env
 - **产物格式**: `results.jsonl` 每行是一个 JSON response，`response.body.choices[0].message.content` 是 LLM 提取的 entities/relations/image_descriptions
 - **干预**: 编辑 `results.jsonl`（修正 LLM 提取错误：修改 entity 名称、添加遗漏的关系、修正图片描述）
 - **注意**: `incremental.json` 是机器生成的 hash 校验文件，**不要手动编辑**
+- **模式切换**: 设置 `WORKDOCS_LLM_MODE=chat`（或 `config.json` 中 `"llm.mode": "chat"`）可切换到同步 Chat API 模式。Chat 模式逐条调用同步 API，结果以与 Batch API 完全一致的格式写入 `results.jsonl`，Stage 4 无需任何修改即可复用。单条失败不中断流程，适合调试或 Batch API 不可用时作为回退
 - **触发下一阶段**: `/doc_ingest_results {doc_id}`
 
 #### 阶段4: 解析入库（不含向量化）
@@ -422,6 +423,7 @@ Kimi CLI 通过 `plugin.json` 注册以下工具：
 | `WORKDOCS_LLM_BASE_URL` | `llm.endpoint` | `https://api.moonshot.cn/v1` | Kimi Base URL |
 | `WORKDOCS_LLM_MODEL` | `llm.model` | `kimi-k2.5` | 对话模型 |
 | `WORKDOCS_LLM_THINKING_ENABLED` | `llm.thinking_enabled` | `0` | 是否启用 thinking 模式（`1`=`enabled`，`0`=`disabled`）。Kimi K2.6 等模型 thinking 默认开启，**必须显式传递**才能可靠关闭 |
+| `WORKDOCS_LLM_MODE` | `llm.mode` | `batch` | LLM 实体提取模式：`batch`（Batch API，成本为同步的 50%，默认）或 `chat`（同步 Chat API，逐条调用，适合调试或 Batch API 不可用时回退） |
 | `WORKDOCS_LLM_BATCH_ENDPOINT` | `llm.batch_endpoint` | `/v1/chat/completions` | LLM Batch API endpoint |
 | `WORKDOCS_LLM_BATCH_COMPLETION_WINDOW` | `llm.completion_window` | `24h` | Batch 完成窗口（如 `24h`） |
 | `WORKDOCS_LLM_BATCH_MAX_CHARS` | `llm.batch_max_chars` | `10000` | 每个 LLM batch 最大文本字符数 |

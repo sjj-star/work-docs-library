@@ -4,6 +4,7 @@
     "endpoint": "",
     "model": "",
     "thinking_enabled": false,
+    "mode": "",
     "batch_endpoint": "",
     "completion_window": "",
     "batch_timeout": "",
