@@ -278,7 +278,7 @@ cp scripts/.env.example scripts/.env
 - **产物格式**: `results.jsonl` 每行是一个 JSON response，`response.body.choices[0].message.content` 是 LLM 提取的 entities/relations/image_descriptions
 - **干预**: 编辑 `results.jsonl`（修正 LLM 提取错误：修改 entity 名称、添加遗漏的关系、修正图片描述）
 - **注意**: `incremental.json` 是机器生成的 hash 校验文件，**不要手动编辑**
-- **模式切换**: 设置 `WORKDOCS_LLM_MODE=chat`（或 `config.json` 中 `"llm.mode": "chat"`）可切换到同步 Chat API 模式。Chat 模式逐条调用同步 API，结果以与 Batch API 完全一致的格式写入 `results.jsonl`，Stage 4 无需任何修改即可复用。单条失败不中断流程，适合调试或 Batch API 不可用时作为回退
+- **模式切换**: 设置 `WORKDOCS_LLM_MODE=chat`（`.env` 中）或 `config.json` 中 `"llm.mode": "chat"` 可切换到同步 Chat API 模式。`.env` 优先级高于 `config.json`。Chat 模式逐条调用同步 API，结果以与 Batch API 完全一致的格式写入 `results.jsonl`，Stage 4 无需任何修改即可复用。单条失败不中断流程，适合调试或 Batch API 不可用时作为回退
 - **触发下一阶段**: `/doc_ingest_results {doc_id}`
 
 #### 阶段4: 解析入库（不含向量化）
@@ -400,19 +400,19 @@ Kimi CLI 通过 `plugin.json` 注册以下工具：
 ### 配置优先级架构
 
 ```
-1. 环境变量（Kimi CLI 运行时注入，如 llm.api_key）
+1. 环境变量（.env 文件，如 WORKDOCS_LLM_API_KEY）— 用户手动配置
    ↓
-2. config.json（用户持久化配置，项目根目录）
+2. 环境变量（Kimi CLI 运行时注入，如 llm.api_key）— 工具动态注入
    ↓
-3. 环境变量（.env 文件，如 WORKDOCS_LLM_API_KEY）
+3. config.json（项目根目录）— 工具自动持久化
    ↓
 4. 代码硬编码默认值
 ```
 
 `config.json` 与 `.env` 为双轨配置系统：
-- **`config.json`**：用户持久化配置，适合存放模型选择、端点地址、维度等不敏感的参数。由 `plugin.json` 的 `config_file` 指定路径
-- **`.env`**：适合存放 API Key 等凭证，gitignored，不进入版本控制
-- **环境变量**：Kimi CLI 运行时注入，优先级最高
+- **`.env`**：用户手动配置，优先级最高，适合存放 API Key 等凭证，gitignored，不进入版本控制。`.env` 中的值会覆盖 Kimi CLI 注入和 `config.json`
+- **环境变量**：Kimi CLI 运行时动态注入，优先级第二
+- **`config.json`**：工具自动持久化，优先级第三，适合存放模型选择、端点地址等不敏感参数。由 `plugin.json` 的 `config_file` 指定路径，Kimi CLI 安装时自动注入凭证
 
 ### 完整配置参考
 
@@ -490,7 +490,7 @@ Kimi CLI 通过 `plugin.json` 注册以下工具：
 ### 配置
 | 模块 | 职责 |
 |------|------|
-| `core/config.py` | 统一配置中心，环境变量 / `config.json` / `.env` 三层优先级 |
+| `core/config.py` | 统一配置中心，`.env` / 环境变量 / `config.json` / 默认值 四层优先级 |
 
 ---
 

@@ -26,7 +26,7 @@
 | **Prompt 外部化** | 所有 LLM 提示词在 `scripts/prompts/*.txt` 中，用户可编辑，无需改代码 |
 | **EntityChunkBridge 跨粒度桥接** | 零 schema 变更的内存双向索引 `chunk_db_id ↔ (entity_type, entity_name)`，打通向量空间与图谱空间，支持 O(1) 双向导航 |
 | **Prompt 分步引导提取** | 先内容分类（Step 1）→ 再按类型提取（Step 2）→ 最后关系补全（Step 3），比"表格逐行提取"+"验证导向规则"减少 57% 节点/60% 边误提取 |
-| **config.json + .env 双轨配置** | `config.json` 存非敏感参数（模型、端点），`.env` 存 API Key；三层优先级（环境变量 > config.json > .env > 默认值） |
+| **config.json + .env 双轨配置** | `config.json` 存非敏感参数（模型、端点），`.env` 存 API Key；四层优先级（`.env` > Kimi CLI 注入 > config.json > 默认值） |
 
 ---
 
@@ -346,7 +346,7 @@ PDF → Markdown → ChapterParser(树形章节 #/##/###/####) → collect_all_n
 ### 必须询问用户的事项
 - 修改核心数据模型（`Chunk`、`Document`、`GraphEntity`、`GraphRelation` 的字段）
 - 修改数据库 Schema（新增/删除/修改表或字段）
-- 修改配置系统的优先级或解析逻辑
+- ~~修改配置系统的优先级或解析逻辑~~（已完成：2026-05-22 `.env` 调整为最高优先级）
 - 新增外部依赖（`requirements.txt` 变更）
 - 修改 Pipeline 核心流程（解析 → 章节树 → batch 构建 → 实体提取 → 图谱 → 向量化）
 - 删除已有功能或文件
@@ -412,13 +412,13 @@ monkeypatch.setattr(
 
 ## 配置系统说明
 
-### 三层优先级（高 → 低）
+### 四层优先级（高 → 低）
 ```
+.env 文件（用户手动配置，如 WORKDOCS_LLM_API_KEY）
+  ↓
 环境变量（Kimi CLI 运行时注入，如 llm.api_key）
   ↓
-config.json（用户持久化配置，项目根目录）
-  ↓
-.env 文件（环境变量回退，如 WORKDOCS_LLM_API_KEY）
+config.json（工具自动持久化，项目根目录）
   ↓
 代码硬编码默认值
 ```
@@ -478,7 +478,7 @@ config.json（用户持久化配置，项目根目录）
 | `WORKDOCS_GRAPH_MAX_PATH_DEPTH` | `graph.max_path_depth` | `6` | 图谱路径搜索最大深度 |
 | `WORKDOCS_GRAPH_OUTPUT_DIR` | `graph.output_dir` | `graphs` | 图谱 JSON 输出目录 |
 
-> 注：`config.json` 的 `config_file` 由 `plugin.json` 指定，Kimi CLI 可自动管理。`.env` 文件支持双路径加载：项目根目录和 `scripts/` 目录下的 `.env` 均会被读取（后者优先级更高）。
+> 注：`.env` 优先级最高，覆盖 `config.json` 和 Kimi CLI 注入值。`config.json` 的 `config_file` 由 `plugin.json` 指定，Kimi CLI 可自动管理。`.env` 文件支持双路径加载：项目根目录和 `scripts/` 目录下的 `.env` 均会被读取（后者优先级更高）。
 
 ---
 
