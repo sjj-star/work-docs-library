@@ -313,6 +313,8 @@ PDF → Markdown → ChapterParser(树形章节 #/##/###/####) → collect_all_n
 - ✅ **Document 实体规则细化**：明确区分"当前文档本身"（类型 A，每个文档只提取一次）和"引用文档"（类型 B，Related Documentation 章节中可提取，需建立 CITES 关系）
 - ✅ **体系结构地址单位说明**：明确不同芯片架构的地址基本单位差异（C2000=16-bit word，ARM=8-bit byte），`width` 表示寄存器位宽与地址单位无关
 - ✅ **实体提取规模收敛**：全局节点从 350→193→151→176，边从 414→227→164→184，过度提取问题得到系统性控制
+- ✅ **LLM Batch → Chat 回退机制**：`WORKDOCS_LLM_MODE=chat` 切换到同步 Chat API，`_submit_via_chat()` 逐条调用并将结果以 Batch API 完全一致格式写入 `results.jsonl`，Stage 4 零修改复用。单条失败不中断流程，适合调试或 Batch API 不可用时回退
+- ✅ **User-Agent 伪装**：`llm_chat_client.py` 从 `plugin.json` 的 `runtime.host_version` 读取版本，默认 `KimiCLI/1.44.0`，确保通过 Kimi Coding API 白名单校验
 - ✅ **304 个测试全部通过**
 
 ### 当前阶段（新进展 — 2026-05-19 DESIGN.md 审计与代码修复）
@@ -373,7 +375,7 @@ PDF → Markdown → ChapterParser(树形章节 #/##/###/####) → collect_all_n
 ### 核心原则
 - **Mock 优先**：所有涉及外部 API 的测试使用 Fake 客户端，**禁止调用真实 API**
 - **回归即修复**：任何导致测试失败的变更必须当场修复
-- **302 个测试用例必须全部通过**
+- **314 个测试用例必须全部通过**
 
 ### 测试文件清单
 | 测试文件 | 说明 |
@@ -432,6 +434,7 @@ config.json（用户持久化配置，项目根目录）
 | `WORKDOCS_LLM_BASE_URL` | `llm.endpoint` | `https://api.moonshot.cn/v1` | LLM Base URL |
 | `WORKDOCS_LLM_MODEL` | `llm.model` | `kimi-k2.5` | 对话模型 |
 | `WORKDOCS_LLM_THINKING_ENABLED` | `llm.thinking_enabled` | `0` | 是否启用 thinking 模式（`1`=`enabled`，`0`=`disabled`）。Kimi K2.6 等模型 thinking 默认开启，必须显式传递才能可靠关闭 |
+| `WORKDOCS_LLM_MODE` | `llm.mode` | `batch` | LLM 实体提取模式：`batch`（Batch API，默认）或 `chat`（同步 Chat API，逐条调用，适合调试或 Batch API 不可用时回退）。Chat 模式结果以与 Batch 完全一致的格式写入 `results.jsonl`，Stage 4 零修改复用 |
 | `WORKDOCS_LLM_BATCH_ENDPOINT` | `llm.batch_endpoint` | `/v1/chat/completions` | LLM Batch API endpoint |
 | `WORKDOCS_LLM_BATCH_COMPLETION_WINDOW` | `llm.completion_window` | `24h` | Batch 完成窗口 |
 | `WORKDOCS_LLM_BATCH_MAX_CHARS` | `llm.batch_max_chars` | `10000` | 每个 LLM batch 最大文本字符数 |

@@ -86,3 +86,95 @@ def test_chat_client_chat(monkeypatch):
     client = ChatClient()
     text = client.chat([{"role": "user", "content": "summarize"}])
     assert "Summary: hello" in text
+
+
+def test_chat_client_user_agent_from_plugin_json(monkeypatch):
+    """_load_user_agent 应正确解析 plugin.json 中的 runtime.host_version."""
+
+    class MockPath:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        @property
+        def parent(self):
+            return self
+
+        def resolve(self):
+            return self
+
+        def __truediv__(self, other):
+            return self
+
+        def exists(self):
+            return True
+
+        def read_text(self, **kwargs):
+            return '{"runtime": {"host_version": "2.0.0"}}'
+
+    monkeypatch.setattr("core.llm_chat_client.Path", MockPath)
+    ua = ChatClient._load_user_agent()
+    assert ua == "KimiCLI/2.0.0"
+
+
+def test_chat_client_user_agent_empty_version_fallback(monkeypatch):
+    """plugin.json 中 host_version 为空时应 fallback 到默认值."""
+
+    class MockPath:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        @property
+        def parent(self):
+            return self
+
+        def resolve(self):
+            return self
+
+        def __truediv__(self, other):
+            return self
+
+        def exists(self):
+            return True
+
+        def read_text(self, **kwargs):
+            return '{"runtime": {}}'
+
+    monkeypatch.setattr("core.llm_chat_client.Path", MockPath)
+    ua = ChatClient._load_user_agent()
+    assert ua == "KimiCLI/1.44.0"
+
+
+def test_chat_client_user_agent_default():
+    """plugin.json 不存在时 User-Agent 使用默认值."""
+    # 当测试环境中项目根目录无 plugin.json 时，_load_user_agent 回退到默认值
+    ua = ChatClient._load_user_agent()
+    assert ua.startswith("KimiCLI/")
+
+
+def test_chat_client_post_includes_user_agent(monkeypatch):
+    """_post 发送的 headers 必须包含 User-Agent."""
+
+    def _fake_post(self, url, payload, timeout=None):
+        # 通过 monkeypatch 的 _get_session 捕获 headers
+        pass
+
+    calls = []
+
+    class FakeSession:
+        def post(self, url, headers, json, timeout):
+            calls.append(headers)
+
+            class Resp:
+                def raise_for_status(self):
+                    pass
+
+                def json(self):
+                    return {"choices": [{"message": {"content": "ok"}}]}
+
+            return Resp()
+
+    monkeypatch.setattr(ChatClient, "_get_session", lambda self: FakeSession())
+    client = ChatClient(user_agent="KimiCLI/1.44.0")
+    client._post("https://test.com/chat/completions", {"model": "test"})
+    assert len(calls) == 1
+    assert calls[0].get("User-Agent") == "KimiCLI/1.44.0"

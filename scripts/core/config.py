@@ -98,6 +98,7 @@ class Config:
     LLM_THINKING_ENABLED: bool = (
         _resolve_config("WORKDOCS_LLM_THINKING_ENABLED", "llm.thinking_enabled", "0") == "1"
     )
+    LLM_MODE: str = _resolve_config("WORKDOCS_LLM_MODE", "llm.mode", "batch")
 
     # Embedding 模型配置（向量化用）- 完全独立
     EMBEDDING_API_KEY: str = _resolve_config("WORKDOCS_EMBEDDING_API_KEY", "embedding.api_key", "")

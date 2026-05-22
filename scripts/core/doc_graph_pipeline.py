@@ -40,6 +40,7 @@ from .graph_store import (
     GraphStore,
     NetworkXGraphStore,
 )
+from .llm_chat_client import BaseLLMClient
 from .models import Chunk, Document
 from .vector_index import VectorIndex
 
@@ -753,12 +754,27 @@ class DocGraphPipeline:
             logger.warning(f"BigModelParserClient 初始化失败: {e}")
             self.parser_client = None
 
-        try:
-            self.llm_batch = BatchClient()
-            logger.info("LLM BatchClient 已初始化")
-        except RuntimeError as e:
-            logger.warning(f"LLM BatchClient 初始化失败: {e}")
-            self.llm_batch = None
+        # LLM 客户端：根据 LLM_MODE 初始化 Batch 或 Chat
+        self.llm_batch = None
+        self.llm_chat = None
+        if Config.LLM_MODE == "batch":
+            try:
+                self.llm_batch = BatchClient()
+                logger.info("LLM BatchClient 已初始化")
+            except RuntimeError as e:
+                logger.warning(f"LLM BatchClient 初始化失败: {e}")
+            # Batch 模式下也初始化 ChatClient 作为失败回退
+            try:
+                self.llm_chat = BaseLLMClient()
+                logger.info("LLM ChatClient 已初始化（Batch 回退备用）")
+            except RuntimeError as e:
+                logger.warning(f"LLM ChatClient 初始化失败: {e}")
+        else:  # chat 模式
+            try:
+                self.llm_chat = BaseLLMClient()
+                logger.info("LLM ChatClient 已初始化（Chat 模式）")
+            except RuntimeError as e:
+                logger.error(f"LLM ChatClient 初始化失败: {e}")
 
         # Embedding 已改为同步 API，不再使用 BatchClient
         self.embed_batch = None
@@ -998,10 +1014,10 @@ class DocGraphPipeline:
             if ch["title"] in old_chunk_map:
                 old_cks = old_chunk_map[ch["title"]]
                 # sub-chunks 共享 content_hash，只要有一个匹配即认为整个 chapter 未变
-                if any(
-                    old_ck.metadata.get("content_hash", "") == ch_hash
-                    for old_ck in old_cks
-                ) and not force:
+                if (
+                    any(old_ck.metadata.get("content_hash", "") == ch_hash for old_ck in old_cks)
+                    and not force
+                ):
                     unchanged.append((ch, old_cks))
                 else:
                     changed.append(ch)
@@ -1114,11 +1130,13 @@ class DocGraphPipeline:
                 body = req.get("body", {})
                 if "extra_body" not in body:
                     body["extra_body"] = {"thinking": {"type": thinking_type}}
-                elif "thinking" not in body.get("extra_body", {}):
-                    body.setdefault("extra_body", {})["thinking"] = {"type": thinking_type}
+                else:
+                    extra_body = body.get("extra_body") or {}
+                    if "thinking" not in extra_body:
+                        body["extra_body"] = {**extra_body, "thinking": {"type": thinking_type}}
 
-            if not self.llm_batch:
-                logger.info("BatchClient 不可用，跳过 API 提交")
+            if not self.llm_batch and not self.llm_chat:
+                logger.info("BatchClient 和 ChatClient 均不可用，跳过 API 提交")
                 results_path.write_text("", encoding="utf-8")
                 return results_path
 
@@ -1133,8 +1151,13 @@ class DocGraphPipeline:
                 else []
             )
 
-            if not batches or not self.llm_batch:
-                logger.info("无变更章节或 BatchClient 不可用，跳过 API 提交")
+            if not batches:
+                logger.info("无变更章节，跳过 API 提交")
+                results_path.write_text("", encoding="utf-8")
+                return results_path
+
+            if Config.LLM_MODE == "chat" and not self.llm_chat:
+                logger.error("Chat 模式但 ChatClient 不可用，跳过 API 提交")
                 results_path.write_text("", encoding="utf-8")
                 return results_path
 
@@ -1164,15 +1187,19 @@ class DocGraphPipeline:
             results_path.unlink()
 
         # 提交并保存结果
-        logger.info(f"提交 Batch | requests={len(requests)} | output={results_path}")
-        results = self.llm_batch.submit_parallel_batches(requests, output_path=results_path)
-        # fallback：如果 BatchClient 未写入文件（如 Mock 客户端），手动写入
-        if results and (not results_path.exists() or results_path.stat().st_size == 0):
-            results_path.parent.mkdir(parents=True, exist_ok=True)
-            with open(results_path, "w", encoding="utf-8") as f:
-                for r in results:
-                    f.write(json.dumps(r, ensure_ascii=False) + "\n")
-        logger.info(f"Batch 结果已保存 | path={results_path}")
+        if Config.LLM_MODE == "chat" or not self.llm_batch:
+            logger.info(f"提交 Chat | requests={len(requests)} | output={results_path}")
+            results = self._submit_via_chat(requests, results_path)
+        else:
+            logger.info(f"提交 Batch | requests={len(requests)} | output={results_path}")
+            results = self.llm_batch.submit_parallel_batches(requests, output_path=results_path)
+            # fallback：如果 BatchClient 未写入文件（如 Mock 客户端），手动写入
+            if results and (not results_path.exists() or results_path.stat().st_size == 0):
+                results_path.parent.mkdir(parents=True, exist_ok=True)
+                with open(results_path, "w", encoding="utf-8") as f:
+                    for r in results:
+                        f.write(json.dumps(r, ensure_ascii=False) + "\n")
+        logger.info(f"结果已保存 | path={results_path}")
         # 保存增量分析结果摘要，供 stage4 校验一致性
         incremental_info = {
             "unchanged_titles": [ch["title"] for ch, _ in unchanged],
@@ -1191,6 +1218,44 @@ class DocGraphPipeline:
 
         self.db.update_document_status(doc_id, DocumentStatus.BATCH_SUBMITTED)
         return results_path
+
+    def _submit_via_chat(
+        self, requests: list[dict[str, Any]], results_path: Path
+    ) -> list[dict[str, Any]]:
+        """Chat 模式：从 JSONL requests 逐个调用同步 Chat API，结果以 Batch 格式写入 results.jsonl.
+
+        写入格式与 Batch API 返回格式完全一致：
+        {"custom_id": "...", "response": {"status_code": 200, "body": {"choices": [...]}}}
+
+        保证 Stage 4 的 _parse_results 和 extract_from_results_file 可以零修改复用。
+        """
+        assert self.llm_chat is not None, "ChatClient 未初始化"
+        results: list[dict[str, Any]] = []
+        with open(results_path, "w", encoding="utf-8") as f:
+            for req in requests:
+                body = req.get("body", {})
+                custom_id = req.get("custom_id", "")
+                try:
+                    response_data = self.llm_chat._post(self.llm_chat.chat_url, body)
+                    result = {
+                        "custom_id": custom_id,
+                        "response": {
+                            "status_code": 200,
+                            "body": response_data,
+                        },
+                    }
+                except Exception as e:
+                    logger.error(f"Chat API 调用失败 | custom_id={custom_id} | error={e}")
+                    result = {
+                        "custom_id": custom_id,
+                        "response": {
+                            "status_code": 500,
+                            "body": {"error": str(e)},
+                        },
+                    }
+                f.write(json.dumps(result, ensure_ascii=False) + "\n")
+                results.append(result)
+        return results
 
     def stage4_ingest_results(
         self,
@@ -1534,9 +1599,7 @@ class DocGraphPipeline:
             try:
                 self.vec.add_batch(all_items)
             except Exception as e:
-                logger.error(
-                    f"FAISS 添加失败，回滚 SQLite embedding | doc_id={doc_id} | error={e}"
-                )
+                logger.error(f"FAISS 添加失败，回滚 SQLite embedding | doc_id={doc_id} | error={e}")
                 for chunk_db_id, _ in all_items:
                     ck = self.db.get_chunk_by_db_id(chunk_db_id)
                     if ck:

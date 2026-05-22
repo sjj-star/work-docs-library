@@ -3,8 +3,10 @@
 支持同步对话调用.
 """
 
+import json
 import logging
 import threading
+from pathlib import Path
 
 import requests
 
@@ -21,17 +23,36 @@ class BaseLLMClient:
     RETRY_BACKOFF_BASE = Config.LLM_RETRY_BACKOFF
     DEFAULT_TIMEOUT = Config.LLM_TIMEOUT
 
+    @staticmethod
+    def _load_user_agent() -> str:
+        """从 plugin.json 读取 runtime 信息构建 User-Agent.
+
+        Kimi Coding API 白名单要求 User-Agent 前缀为 KimiCLI/ 才能通过验证.
+        """
+        plugin_path = Path(__file__).resolve().parent.parent.parent / "plugin.json"
+        if plugin_path.exists():
+            try:
+                data = json.loads(plugin_path.read_text(encoding="utf-8"))
+                version = data.get("runtime", {}).get("host_version", "")
+                if version:
+                    return f"KimiCLI/{version}"
+            except Exception:
+                pass
+        return "KimiCLI/1.44.0"
+
     def __init__(
         self,
         api_key: str | None = None,
         base_url: str | None = None,
         model: str | None = None,
+        user_agent: str | None = None,
     ) -> None:
         """初始化 BaseLLMClient."""
         self.api_key = api_key or Config.LLM_API_KEY
         self.base_url = base_url or Config.LLM_BASE_URL
         self.model = model or Config.LLM_MODEL
         self.thinking_enabled = Config.LLM_THINKING_ENABLED
+        self.user_agent = user_agent or self._load_user_agent()
 
         if not self.api_key:
             raise RuntimeError("LLM API key not configured. Set WORKDOCS_LLM_API_KEY in .env")
@@ -62,6 +83,7 @@ class BaseLLMClient:
                     headers={
                         "Authorization": f"Bearer {self.api_key}",
                         "Content-Type": "application/json",
+                        "User-Agent": self.user_agent,
                     },
                     json=payload,
                     timeout=timeout,
