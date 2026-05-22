@@ -374,8 +374,9 @@ PDF → Markdown → ChapterParser(树形章节 #/##/###/####) → collect_all_n
 
 ### 核心原则
 - **Mock 优先**：所有涉及外部 API 的测试使用 Fake 客户端，**禁止调用真实 API**
+- **环境隔离**：`scripts/tests/conftest.py` 在模块级别清除所有 `WORKDOCS_` 和带点名环境变量，确保测试不依赖外部 `.env` 或 Kimi CLI 注入值。每个测试必须显式声明所需配置（`monkeypatch.setattr(Config, ...)`）
 - **回归即修复**：任何导致测试失败的变更必须当场修复
-- **314 个测试用例必须全部通过**
+- **317 个测试用例必须全部通过**
 
 ### 测试文件清单
 | 测试文件 | 说明 |
@@ -407,6 +408,17 @@ monkeypatch.setattr(
     lambda self, reqs: [{"entities": [], "relationships": [], "image_descriptions": {}}]
 )
 ```
+
+### 环境隔离实现
+`conftest.py` 在**模块导入时**（而非 fixture 中）清除环境变量，避免 `config.py` 等模块在 fixture 运行前就被 `.env` 值固化：
+```python
+# conftest.py 模块级别
+for _key in list(os.environ.keys()):
+    if _key.startswith("WORKDOCS_") or "." in _key:
+        _TEST_ENV_BACKUP[_key] = os.environ[_key]
+        del os.environ[_key]
+```
+测试会话结束后通过 `session` 级 fixture 恢复原始环境。
 
 ---
 
