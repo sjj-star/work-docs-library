@@ -283,7 +283,7 @@ PDF → Markdown → ChapterParser(树形章节 #/##/###/####) → collect_all_n
 - ✅ **跨粒度桥接索引**：`_EntityChunkBridge` 机制层实现 `chunk_db_id ↔ (entity_type, entity_name)` 双向映射。`graph_provenance` 从 O(N) 暴力扫描优化为 O(1) 反向查询。`search_with_graph` / `get_content_with_entities` 重构为原子操作组合
 - ✅ **Pipeline 六阶段拆分**（中间产物持久化原则的具体实践）：`_process_one` 拆分为 `stage1_parse` / `stage2_build_jsonl` / `stage3_submit_batches` / `stage4_ingest_results` / `stage5_build_embed_jsonl` / `stage6_submit_embed_batches`，每个中间产物（result.md / requests.jsonl / batch_info.json / results.jsonl / 子图谱 JSON / embed.jsonl / embed_results.jsonl）均可独立执行、人为干预、重新执行
 - ✅ **Chunk 粒度与向量化粒度统一**：`_save_chunks_to_db`（stage4）中，超长 chapter 通过 `_maybe_split_chapter` 拆分为独立 sub-chunks（`ch_N_part_0`/`ch_N_part_1`），继承父 chapter 的 entities/relations/content_hash。Stage 5/6 不再处理 split/average，数据库一行 = 一个向量化单位，彻底解决 batch 路径 split-chunk 未聚合导致 FAISS 重复向量的问题
-- ✅ 302 个测试全部通过
+- ✅ 341 个测试全部通过
 
 ### 当前阶段（新进展 — 2026-05-08 BigModel Embedding Token 估算问题研究与修复）
 - ✅ **实验验证 BigModel embedding-3 tokenizer 与 tiktoken 差异**：系统性对照实验证实两者不存在固定比例关系。BigModel embedding-3 对数字/单独字母接近字符级别编码，对自然语言使用子词编码（与 tiktoken 接近），对重复字符压缩率低于 tiktoken
@@ -376,7 +376,7 @@ PDF → Markdown → ChapterParser(树形章节 #/##/###/####) → collect_all_n
 - **Mock 优先**：所有涉及外部 API 的测试使用 Fake 客户端，**禁止调用真实 API**
 - **环境隔离**：`scripts/tests/conftest.py` 在模块级别清除所有 `WORKDOCS_` 和带点名环境变量，确保测试不依赖外部 `.env` 或 Kimi CLI 注入值。每个测试必须显式声明所需配置（`monkeypatch.setattr(Config, ...)`）
 - **回归即修复**：任何导致测试失败的变更必须当场修复
-- **317 个测试用例必须全部通过**
+- **341 个测试用例必须全部通过**
 
 ### 测试文件清单
 | 测试文件 | 说明 |
@@ -394,6 +394,8 @@ PDF → Markdown → ChapterParser(树形章节 #/##/###/####) → collect_all_n
 | `test_graph_store.py` | NetworkX 图谱存储 CRUD、冲突检测、属性索引、子图、路径搜索、持久化、`doc_properties` 测试 |
 | `test_batch_clients.py` | Batch API 客户端（Kimi + BigModel）Mock 测试 |
 | `test_knowledge_base_service.py` | KnowledgeBaseService 统一服务层测试 |
+| `test_knowledge_base_service_queries.py` | 语义-图谱联合查询、chunk+实体联合返回测试 |
+| `test_bigmodel_parser_client.py` | BigModel 解析客户端全路径覆盖测试 |
 | `test_entity_extractor.py` | EntityExtractor multimodal batch 请求构建测试 |
 | `test_batch_builder.py` | BatchBuilder 切分保护与空 content 过滤测试 |
 | `test_parsed_docs_jsonl.py` | 真实文档端到端 JSONL 生成测试 |
@@ -479,6 +481,8 @@ config.json（工具自动持久化，项目根目录）
 | `WORKDOCS_BATCH_PARALLEL_WORKERS` | `batch.parallel_workers` | `4` | 并行 batch 提交线程数 |
 | `WORKDOCS_BATCH_TEMP_DIR` | `batch.temp_dir` | `batch_temp` | Batch 临时文件目录 |
 | `WORKDOCS_BATCH_FILE_DOWNLOAD_TEMPLATE` | `batch.download_template` | `{base_url}/files/{file_id}/content` | Batch 结果下载 URL 模板 |
+| `WORKDOCS_PARSE_OUTPUT_DIR` | `pipeline.parse_output_dir` | `parsed` | PDF 解析输出目录 |
+| `WORKDOCS_BATCH_OUTPUT_DIR` | `pipeline.batch_output_dir` | `batch` | Batch 产物输出目录 |
 | **Plugin 默认值** | | | |
 | `WORKDOCS_PLUGIN_SEARCH_TOP_K` | `plugin.search_top_k` | `5` | 语义搜索默认返回条数 |
 | `WORKDOCS_PLUGIN_QUERY_TOP_K` | `plugin.query_top_k` | `10` | 查询默认返回条数 |
