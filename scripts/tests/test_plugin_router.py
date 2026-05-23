@@ -475,6 +475,34 @@ def test_image_analysis_persisted_to_chunk_metadata(patched_config, monkeypatch)
     assert chunks[0].status == "done"
 
 
+def test_tool_ingest_chat_mode_end_to_end(patched_config, monkeypatch):
+    """Chat 模式下 tool_ingest 应完整通过（端到端覆盖）."""
+    monkeypatch.setattr(Config, "LLM_API_KEY", "fake-llm-key")
+    monkeypatch.setattr(Config, "LLM_MODEL", "gpt-4o-mini")
+    monkeypatch.setattr(Config, "EMBEDDING_API_KEY", "fake-emb-key")
+    monkeypatch.setattr(Config, "EMBEDDING_MODEL", "text-embedding-3-small")
+    monkeypatch.setattr(Config, "LLM_MODE", "chat")
+
+    fake_embed = FakeEmbedder()
+    fake_file = FakeBigModelParserClient()
+    monkeypatch.setattr("core.doc_graph_pipeline.EmbeddingClient", lambda: fake_embed)
+    monkeypatch.setattr("core.doc_graph_pipeline.BigModelParserClient", lambda: fake_file)
+    monkeypatch.setattr("core.doc_graph_pipeline.BaseLLMClient", FakeChatClient)
+
+    pdf = patched_config / "doc.pdf"
+    _make_pdf(pdf, ["Page one content", "Page two content"])
+
+    result = plugin_router.tool_ingest({"path": str(pdf)})
+    assert result["success"] is True
+    doc_id = result["doc_ids"][0]
+
+    db = KnowledgeDB()
+    chunks = db.query_by_doc(doc_id)
+    assert len(chunks) > 0
+    for ck in chunks:
+        assert ck.status == "done"
+
+
 # ---------------------------------------------------------------------------
 # Graph tools
 # ---------------------------------------------------------------------------

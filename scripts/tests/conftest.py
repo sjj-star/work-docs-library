@@ -41,6 +41,17 @@ Config.FAISS_INDEX_PATH = _TEST_TMP_DIR / "faiss.index"
 Config.ID_MAP_PATH = _TEST_TMP_DIR / "id_map.json"
 Config.GRAPH_OUTPUT_DIR = str(_TEST_TMP_DIR / "graphs")
 
+# 将版本控制的样本文档复制到临时 parsed 目录，供集成测试使用
+import shutil  # noqa: E402
+
+_SAMPLE_SRC = Path(__file__).parent / "data" / "parsed"
+_SAMPLE_DST = _TEST_TMP_DIR / "parsed"
+if _SAMPLE_SRC.exists():
+    _SAMPLE_DST.mkdir(parents=True, exist_ok=True)
+    for _d in _SAMPLE_SRC.iterdir():
+        if _d.is_dir():
+            shutil.copytree(_d, _SAMPLE_DST / _d.name, dirs_exist_ok=True)
+
 
 @pytest.fixture(autouse=True, scope="session")
 def _restore_test_env():
