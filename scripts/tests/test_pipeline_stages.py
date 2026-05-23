@@ -1043,6 +1043,190 @@ def test_stage3_batch_mode_fallback_to_chat(patched_config, monkeypatch, tmp_pat
     assert "choices" in result["response"]["body"]
 
 
+def test_stage3_both_clients_unavailable_skips(patched_config, monkeypatch, tmp_path):
+    """BatchClient 和 ChatClient 均初始化失败时应返回空 results.jsonl."""
+    monkeypatch.setattr(Config, "LLM_MODE", "batch")
+    monkeypatch.setattr(
+        "core.doc_graph_pipeline.BatchClient",
+        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("no batch key")),
+    )
+    monkeypatch.setattr(
+        "core.doc_graph_pipeline.BaseLLMClient",
+        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("no chat key")),
+    )
+
+    pipe = DocGraphPipeline()
+    assert pipe.llm_batch is None
+    assert pipe.llm_chat is None
+
+    doc_id = "both_unavailable_doc"
+    batch_dir = Config.DB_PATH.parent / "batch"
+    batch_dir.mkdir(parents=True, exist_ok=True)
+    parsed_dir = Config.DB_PATH.parent / "parsed" / doc_id
+    parsed_dir.mkdir(parents=True, exist_ok=True)
+
+    # 创建 result.md
+    result_md = parsed_dir / "result.md"
+    result_md.write_text("## Section 1\n\nTest content.", encoding="utf-8")
+
+    # 创建 JSONL 和 batch_info
+    jsonl_path = batch_dir / f"{doc_id}.jsonl"
+    jsonl_path.write_text(
+        json.dumps(
+            {
+                "custom_id": "batch_0",
+                "method": "POST",
+                "url": "/v1/chat/completions",
+                "body": {"model": "test", "messages": [{"role": "user", "content": "hi"}]},
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    batch_info_path = batch_dir / f"{doc_id}_batch_info.json"
+    batch_info_path.write_text(
+        json.dumps([{"custom_id": "batch_0", "chapter_titles": ["Section 1"]}]),
+        encoding="utf-8",
+    )
+
+    # mock db 和增量分析
+    monkeypatch.setattr(pipe.db, "get_document_by_path", lambda path: None)
+    monkeypatch.setattr(
+        pipe,
+        "_incremental_analysis",
+        lambda fp, et, force=False: (
+            [{"title": "Section 1", "content": "Test content.", "level": 2}],
+            [],
+            [],
+            [{"title": "Section 1", "content": "Test content.", "level": 2}],
+            [],
+            None,
+            "abc123",
+        ),
+    )
+
+    dummy_pdf = tmp_path / "test.pdf"
+    dummy_pdf.write_bytes(b"dummy")
+
+    results_path = pipe.stage3_submit_batches(
+        doc_id=doc_id,
+        file_path=str(dummy_pdf),
+        jsonl_path=jsonl_path,
+        force=True,
+    )
+
+    assert results_path.exists()
+    assert results_path.stat().st_size == 0
+
+
+def test_stage3_batch_fallback_writes_file(patched_config, monkeypatch, tmp_path):
+    """BatchClient 返回结果但未写入文件时，fallback 手动写入."""
+    monkeypatch.setattr(Config, "LLM_MODE", "batch")
+    monkeypatch.setattr("core.doc_graph_pipeline.BaseLLMClient", FakeChatClient)
+
+    class WriteNothingBatchClient:
+        """Mock BatchClient：返回结果但不写入 output_path."""
+
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def submit_parallel_batches(self, requests, output_path=None):
+            return [
+                {
+                    "custom_id": req.get("custom_id", f"batch_{i}"),
+                    "response": {
+                        "body": {
+                            "choices": [
+                                {
+                                    "message": {
+                                        "content": json.dumps(
+                                            {
+                                                "entities": [],
+                                                "relationships": [],
+                                                "image_descriptions": [],
+                                            }
+                                        )
+                                    }
+                                }
+                            ]
+                        }
+                    },
+                }
+                for i, req in enumerate(requests)
+            ]
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(
+        "core.doc_graph_pipeline.BatchClient", WriteNothingBatchClient
+    )
+
+    pipe = DocGraphPipeline()
+    assert pipe.llm_batch is not None
+
+    doc_id = "fallback_write_doc"
+    batch_dir = Config.DB_PATH.parent / "batch"
+    batch_dir.mkdir(parents=True, exist_ok=True)
+    parsed_dir = Config.DB_PATH.parent / "parsed" / doc_id
+    parsed_dir.mkdir(parents=True, exist_ok=True)
+
+    result_md = parsed_dir / "result.md"
+    result_md.write_text("## Section 1\n\nTest content.", encoding="utf-8")
+
+    jsonl_path = batch_dir / f"{doc_id}.jsonl"
+    jsonl_path.write_text(
+        json.dumps(
+            {
+                "custom_id": "batch_0",
+                "method": "POST",
+                "url": "/v1/chat/completions",
+                "body": {"model": "test", "messages": [{"role": "user", "content": "hi"}]},
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    batch_info_path = batch_dir / f"{doc_id}_batch_info.json"
+    batch_info_path.write_text(
+        json.dumps([{"custom_id": "batch_0", "chapter_titles": ["Section 1"]}]),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(pipe.db, "get_document_by_path", lambda path: None)
+    monkeypatch.setattr(
+        pipe,
+        "_incremental_analysis",
+        lambda fp, et, force=False: (
+            [{"title": "Section 1", "content": "Test content.", "level": 2}],
+            [],
+            [],
+            [{"title": "Section 1", "content": "Test content.", "level": 2}],
+            [],
+            None,
+            "abc123",
+        ),
+    )
+
+    dummy_pdf = tmp_path / "test.pdf"
+    dummy_pdf.write_bytes(b"dummy")
+
+    results_path = pipe.stage3_submit_batches(
+        doc_id=doc_id,
+        file_path=str(dummy_pdf),
+        jsonl_path=jsonl_path,
+        force=True,
+    )
+
+    assert results_path.exists()
+    assert results_path.stat().st_size > 0
+    lines = results_path.read_text(encoding="utf-8").strip().split("\n")
+    assert len(lines) == 1
+    result = json.loads(lines[0])
+    assert result["custom_id"] == "batch_0"
+    assert "response" in result
+
+
 def test_stage4_hash_mismatch_deletes_incremental(patched_config, monkeypatch, tmp_path):
     """result.md hash 不匹配时应删除旧增量分析文件并继续处理."""
     _mock_external_clients(monkeypatch)
