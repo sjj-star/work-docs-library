@@ -75,13 +75,14 @@ def test_split_by_sentences_paragraph_boundary_split():
         assert len(c) <= 200 + 50  # 允许少量超限（单个段落超过 max_len 时）
 
 
-def test_split_by_sentences_single_long_paragraph_preserved():
-    """无空行的超长段落应作为一个整体保留（段落边界不切分同一段落内）."""
+def test_split_by_sentences_single_long_paragraph_split():
+    """无空行的超长普通文本段落按句子边界二次切分."""
     text = "A. " * 200  # 约 600 chars，无空行
     chunks = BatchBuilder._split_by_sentences(text, max_len=200)
-    # 段落边界不切分同一段落，整个文本作为一个 chunk
-    assert len(chunks) == 1
-    assert len(chunks[0]) > 200  # 超过 max_len 但保持完整
+    # 普通文本超长时应按句子边界切分，不再保留为单个 chunk
+    assert len(chunks) == 3
+    for c in chunks:
+        assert len(c) <= 200
 
 
 def test_split_by_sentences_html_table_case_insensitive():
@@ -92,6 +93,54 @@ def test_split_by_sentences_html_table_case_insensitive():
     assert len(table_chunk) == 1
     assert "<TR><TD>X</TD></TR>" in table_chunk[0]
     assert "<TR><TD>Y</TD></TR>" in table_chunk[0]
+
+
+def test_split_html_table_long():
+    """超长 HTML table 按 <tr> 切分并保留表头."""
+    table = (
+        "<table><thead><tr><th>A</th><th>B</th></tr></thead><tbody>"
+        + "".join(f"<tr><td>Row{i}</td><td>Data{i}</td></tr>" for i in range(100))
+        + "</tbody></table>"
+    )
+    chunks = BatchBuilder._split_by_sentences(table, max_len=1000)
+    assert len(chunks) > 1
+    for c in chunks:
+        # 允许表头开销导致的少量溢出（max_len * 1.2）
+        assert len(c) <= 1200
+        # 每个 sub-chunk 应包含完整 table 结构
+        assert "<table>" in c
+        assert "</table>" in c
+        # 表头应保留
+        assert "<th>A</th>" in c
+
+
+def test_split_md_table_long():
+    """超长 Markdown table 按数据行切分并保留表头."""
+    md_table = "| A | B |\n|---|---|\n" + "\n".join(
+        f"| {i} | {i} |" for i in range(200)
+    )
+    chunks = BatchBuilder._split_by_sentences(md_table, max_len=1000)
+    assert len(chunks) > 1
+    for c in chunks:
+        assert len(c) <= 1000
+        # 每个 sub-chunk 应保留表头行和分隔行
+        lines = c.splitlines()
+        assert "| A | B |" in lines[0]
+        assert "|---|---|" in lines[1]
+
+
+def test_split_code_block_long():
+    """超长代码块按空行切分并保留围栏."""
+    code = "```c\n" + "\n\n".join(
+        f"void func{i}() {{ body; }}" for i in range(50)
+    ) + "\n```"
+    chunks = BatchBuilder._split_by_sentences(code, max_len=1000)
+    assert len(chunks) > 1
+    for c in chunks:
+        assert len(c) <= 1000
+        # 每个 sub-chunk 应包含完整围栏
+        assert c.startswith("```")
+        assert c.endswith("```")
 
 
 class TestBatchBuilderFiltersEmptyContent:

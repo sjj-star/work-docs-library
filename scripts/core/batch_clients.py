@@ -70,25 +70,28 @@ class BaseBatchClient(ABC):
         self.MAX_FILE_SIZE_MB = Config.BATCH_MAX_FILE_SIZE_MB
 
     def _post(
-        self, url: str, payload: dict | None = None, files: dict | None = None, timeout: int = 120
+        self, url: str, payload: dict | None = None, files: dict | None = None, data: dict | None = None, timeout: int | None = None
     ) -> dict[str, Any]:
+        timeout = timeout or Config.LLM_TIMEOUT
         """发送 POST 请求."""
         if files:
             # 文件上传时不设置 Content-Type（requests 会自动设置 multipart）
             headers = {k: v for k, v in self.headers.items() if k.lower() != "content-type"}
-            resp = self._session.post(url, headers=headers, files=files, timeout=timeout)
+            resp = self._session.post(url, headers=headers, files=files, data=data, timeout=timeout)
         else:
-            resp = self._session.post(url, headers=self.headers, json=payload, timeout=timeout)
+            resp = self._session.post(url, headers=self.headers, json=payload, data=data, timeout=timeout)
         resp.raise_for_status()
         return resp.json()
 
-    def _get(self, url: str, timeout: int = 120) -> dict[str, Any]:
+    def _get(self, url: str, timeout: int | None = None) -> dict[str, Any]:
+        timeout = timeout or Config.LLM_TIMEOUT
         """发送 GET 请求."""
         resp = self._session.get(url, headers=self.headers, timeout=timeout)
         resp.raise_for_status()
         return resp.json()
 
-    def _delete(self, url: str, timeout: int = 60) -> dict[str, Any]:
+    def _delete(self, url: str, timeout: int | None = None) -> dict[str, Any]:
+        timeout = timeout or Config.LLM_TIMEOUT
         """发送 DELETE 请求."""
         resp = self._session.delete(url, headers=self.headers, timeout=timeout)
         resp.raise_for_status()
@@ -389,12 +392,10 @@ class BatchClient(BaseBatchClient):
             else:
                 files = {"file": (file_path.name, f)}
             headers = {k: v for k, v in self.headers.items() if k.lower() != "content-type"}
-            resp = self._session.post(
+            resp = self._post(
                 self.files_url,
-                headers=headers,
                 files=files,
                 data={"purpose": "batch"},
-                timeout=120,
             )
             resp.raise_for_status()
         return resp.json()["id"]
@@ -408,11 +409,11 @@ class BatchClient(BaseBatchClient):
             payload["completion_window"] = self.completion_window
         if self.auto_delete_input_file:
             payload["auto_delete_input_file"] = True
-        resp = self._post(self.batches_url, payload=payload, timeout=60)
+        resp = self._post(self.batches_url, payload=payload)
         return resp["id"]
 
     def _get_batch_status(self, batch_id: str) -> dict[str, Any]:
-        return self._get(f"{self.batches_url}/{batch_id}", timeout=60)
+        return self._get(f"{self.batches_url}/{batch_id}")
 
     def _download_file(self, file_id: str) -> str:
         url = self.download_url_template.format(base_url=self.base_url, file_id=file_id)

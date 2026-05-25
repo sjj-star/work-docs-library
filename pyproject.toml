@@ -20,6 +20,7 @@ dependencies = [
     "faiss-cpu>=1.7.4",
     "numpy>=1.24.0",
     "python-dotenv>=1.0.0",
+    "networkx>=3.0",
 ]
 
 [tool.ruff]
@@ -69,3 +70,8 @@ reportMissingModuleSource = "warning"
 testpaths = ["scripts/tests"]
 pythonpath = ["scripts"]
 addopts = "-q --tb=short"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.0.3",
+]
