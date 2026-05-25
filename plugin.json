@@ -1,7 +1,7 @@
 {
   "name": "work-docs-library",
   "version": "1.1.0",
-  "description": "通用化技术文档知识库管理插件，支持 PDF 提取、知识图谱构建、向量索引与语义搜索。优化后的 API 设计：21 个工具覆盖文档导入、语义搜索、图谱查询与修改、来源溯源与调试。",
+  "description": "通用化技术文档知识库管理插件，支持 PDF 提取、知识图谱构建、向量索引与语义搜索。优化后的 API 设计：24 个工具覆盖文档导入、语义搜索、图谱查询与修改、来源溯源与调试。",
   "config_file": "config.json",
   "runtime": {
     "host": "kimi-code",
@@ -14,7 +14,7 @@
   "tools": [
     {
       "name": "ingest",
-      "description": "提取并存储文档到知识库，生成 embedding 和 chunk。一键式完成全部四阶段处理。",
+      "description": "提取并存储文档到知识库，生成 embedding 和 chunk。一键式完成全部六阶段处理。",
       "command": [
         ".venv/bin/python3",
         "scripts/plugin_router.py",
@@ -167,7 +167,7 @@
     },
     {
       "name": "get_content",
-      "description": "获取文档的完整章节或 chunk 原始内容（不截断），可选同时返回关联的图谱实体和关系",
+      "description": "获取文档的完整章节或 chunk 原始内容（不截断），可选同时返回关联的图谱实体和关系。with_entities=true 时必须同时提供 chunk_db_id",
       "command": [
         ".venv/bin/python3",
         "scripts/plugin_router.py",
@@ -190,7 +190,7 @@
           },
           "with_entities": {
             "type": "boolean",
-            "description": "是否同时返回关联的图谱实体和关系（默认 false）",
+            "description": "是否同时返回关联的图谱实体和关系（默认 false）。为 true 时必须同时提供 chunk_db_id",
             "default": false
           }
         }
@@ -514,9 +514,7 @@
             "default": 100
           }
         },
-        "required": [
-          "action"
-        ]
+        "required": []
       }
     },
     {

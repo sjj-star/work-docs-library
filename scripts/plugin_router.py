@@ -641,7 +641,7 @@ def tool_graph_path(params: dict) -> dict:
     参数:
         from_type, from_name: 起点实体
         to_type, to_name: 终点实体
-        max_depth: 最大搜索深度（默认 3，最大 6）
+        max_depth: 最大搜索深度（默认 3）
     """
     from_type = params.get("from_type")
     from_name = params.get("from_name")
@@ -715,8 +715,8 @@ def tool_graph_upsert_entity(params: dict) -> dict:
     entity = GraphEntity(
         entity_type=entity_type,
         name=name,
-        properties=params.get("properties", {}),
-        source_doc_ids=set(params.get("source_doc_ids", [])),
+        properties=params.get("properties") or {},
+        source_doc_ids=set(params.get("source_doc_ids") or []),
         confidence=params.get("confidence", 1.0),
         verified=params.get("verified", False),
     )
@@ -774,7 +774,7 @@ def tool_graph_upsert_relation(params: dict) -> dict:
         from_name=str(from_name),
         to_type=str(to_type),
         to_name=str(to_name),
-        properties=params.get("properties", {}),
+        properties=params.get("properties") or {},
         confidence=params.get("confidence", 1.0),
         verified=params.get("verified", False),
     )
