@@ -74,12 +74,31 @@ class BaseLLMClient:
     def _post(self, url: str, payload: dict, timeout: int | None = None) -> dict:
         """发送 POST 请求，带重试机制.
 
-        仅对可重试错误（5xx、429、网络超时）执行指数退避重试，
-        4xx 客户端错误（除 429 外）直接抛出。
+        仅对可重试错误（5xx、429）执行指数退避重试，
+        4xx 客户端错误（除 429 外）直接抛出，
+        超时异常直接抛出（重试使用相同 timeout 无法解决请求过大的超时问题）。
         """
+        import time
+
         timeout = timeout or self.DEFAULT_TIMEOUT
         session = self._get_session()
         last_exc = None
+
+        # 计算请求大小用于日志和诊断
+        messages = payload.get("messages", [])
+        text_len = sum(len(str(m.get("content", ""))) for m in messages)
+        img_count = sum(
+            1
+            for m in messages
+            if isinstance(m.get("content"), list)
+            for item in m["content"]
+            if isinstance(item, dict) and item.get("type") == "image_url"
+        )
+        logger.info(
+            f"LLM 请求开始 | text_len={text_len} | images={img_count} | timeout={timeout}s"
+        )
+        start_time = time.time()
+
         for attempt in range(self.MAX_RETRY_ATTEMPTS):
             try:
                 resp = session.post(
@@ -93,20 +112,31 @@ class BaseLLMClient:
                     timeout=timeout,
                 )
                 resp.raise_for_status()
+                elapsed = time.time() - start_time
+                logger.info(f"LLM 请求成功 | elapsed={elapsed:.1f}s | status=ok")
                 return resp.json()
+            except requests.Timeout as e:
+                elapsed = time.time() - start_time
+                suggested = max(timeout * 2, 300)
+                logger.warning(
+                    f"LLM 请求超时 | elapsed={elapsed:.1f}s | timeout={timeout}s | "
+                    f"text_len={text_len} | images={img_count} | "
+                    f"建议增大 WORKDOCS_LLM_TIMEOUT 至 {suggested}s 以上"
+                )
+                raise RuntimeError(
+                    f"LLM 请求超时 ({timeout}s)。请求大小: text_len={text_len}, "
+                    f"images={img_count}。建议: export WORKDOCS_LLM_TIMEOUT={suggested} "
+                    f"或在 config.json 中设置 'llm.timeout'={suggested}"
+                ) from e
             except requests.HTTPError as e:
                 last_exc = e
                 status_code = e.response.status_code if e.response else 0
                 # 4xx 客户端错误（除 429 Too Many Requests 外）不可重试
                 if 400 <= status_code < 500 and status_code != 429:
                     raise
-                import time
-
                 time.sleep(self.RETRY_BACKOFF_BASE**attempt)
             except Exception as e:
                 last_exc = e
-                import time
-
                 time.sleep(self.RETRY_BACKOFF_BASE**attempt)
         assert last_exc is not None
         raise last_exc

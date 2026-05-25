@@ -269,10 +269,147 @@ class ChapterParser:
 # ---------------------------------------------------------------------------
 
 
+def _split_structured_block(text: str, max_len: int) -> list[str]:
+    """识别结构化块类型并按其语义边界切分.
+
+    支持代码块、HTML table、Markdown table 的语义保护切分。
+    无法识别时回退到字符边界硬切分并记录 warning。
+    """
+    # 代码块
+    if text.startswith("```") or text.startswith("~~~"):
+        return _split_code_block(text, max_len)
+
+    # HTML table
+    if text.lower().startswith("<table"):
+        return _split_html_table(text, max_len)
+
+    # Markdown table
+    lines = text.splitlines()
+    if lines and "|" in lines[0]:
+        return _split_md_table(text, max_len)
+
+    # 无法识别的文本，按字符边界硬切分
+    logger.warning(f"文本硬切分 | chars={len(text)} | max_len={max_len}")
+    return [text[i : i + max_len] for i in range(0, len(text), max_len)]
+
+
+def _split_code_block(text: str, max_len: int) -> list[str]:
+    """按空行切分代码块，保留代码围栏."""
+    fence_match = re.match(r"(```[^\n]*\n|~~~[^\n]*\n)", text)
+    fence_start = fence_match.group(1) if fence_match else "```\n"
+    fence_end = "```" if "```" in fence_start else "~~~"
+
+    inner = text[len(fence_start) : -len(fence_end)].strip()
+    parts = re.split(r"\n\s*\n", inner)
+
+    result = []
+    current = fence_start
+    for part in parts:
+        part = part.strip()
+        if not part:
+            continue
+        test = current + part + "\n" + fence_end
+        if len(test) > max_len and current != fence_start:
+            result.append(current + fence_end)
+            current = fence_start + part + "\n"
+        else:
+            current += part + "\n"
+    if current:
+        result.append(current + fence_end)
+    return result if result else [text]
+
+
+def _split_html_table(text: str, max_len: int) -> list[str]:
+    """按 <tr> 行切分 HTML table，保留完整表头."""
+    thead_match = re.search(r"<thead[^>]*>[\s\S]*?</thead>", text, re.IGNORECASE)
+    tbody_match = re.search(r"<tbody[^>]*>[\s\S]*?</tbody>", text, re.IGNORECASE)
+
+    thead = thead_match.group(0) if thead_match else ""
+    tbody = tbody_match.group(0) if tbody_match else text
+
+    tr_matches = list(re.finditer(r"<tr[^>]*>[\s\S]*?</tr>", tbody, re.IGNORECASE))
+    if not tr_matches:
+        return [text[i : i + max_len] for i in range(0, len(text), max_len)]
+
+    result = []
+    current = f"<table>{thead}<tbody>"
+    for m in tr_matches:
+        row = m.group(0)
+        if len(current) + len(row) > max_len and current != f"<table>{thead}<tbody>":
+            result.append(current + "</tbody></table>")
+            current = f"<table>{thead}<tbody>" + row
+        else:
+            current += row
+    if current:
+        result.append(current + "</tbody></table>")
+    return result if result else [text]
+
+
+def _split_md_table(text: str, max_len: int) -> list[str]:
+    """按行切分 Markdown table，保留表头行."""
+    lines = text.splitlines()
+    if len(lines) < 2:
+        return [text[i : i + max_len] for i in range(0, len(text), max_len)]
+
+    header_lines = lines[:2]
+    header = "\n".join(header_lines)
+    data_lines = lines[2:]
+
+    result = []
+    current = list(header_lines)
+    for line in data_lines:
+        test = "\n".join(current + [line])
+        if len(test) > max_len and len(current) > 2:
+            result.append("\n".join(current))
+            current = list(header_lines) + [line]
+        else:
+            current.append(line)
+    if current:
+        result.append("\n".join(current))
+    return result if result else [text]
+
+
+def _split_long_text_safe(text: str, max_len: int) -> list[str]:
+    """对超长文本进行安全切分，优先保护结构化块.
+
+    1. 先按句子边界切分（适用于普通文本）
+    2. 若仍有 sub-chunk 超过 max_len，按结构化块类型二次切分
+    3. 极端情况按字符边界硬切分
+    """
+    # 步骤 1：按句子边界切分
+    sentences = re.split(r"(?<=[.!?。！？])\s+", text)
+    result: list[str] = []
+    current = ""
+    for s in sentences:
+        s = s.strip()
+        if not s:
+            continue
+        if current and len(current) + len(s) + 1 > max_len:
+            result.append(current)
+            current = s
+        else:
+            current = (current + " " + s).strip() if current else s
+    if current:
+        result.append(current)
+
+    # 步骤 2：检查是否有 sub-chunk 仍超过 max_len，按结构化块切分
+    final: list[str] = []
+    for chunk in result:
+        if len(chunk) <= max_len:
+            final.append(chunk)
+            continue
+        sub = _split_structured_block(chunk, max_len)
+        final.extend(sub)
+
+    return final
+
+
 def split_text_by_paragraphs(text: str, max_len: int) -> list[str]:
     """按句子/段落边界切分文本，保护结构化块不被截断.
 
     提取为模块级函数，供 LLM Batch 和 Embedding Batch 共用。
+    若单个段落（含被恢复的结构化块）超过 max_len，
+    按句子/结构化块语义边界进行二次切分，确保不硬截断普通文本。
     """
     blocks: list[str] = []
 
@@ -306,16 +443,19 @@ def split_text_by_paragraphs(text: str, max_len: int) -> list[str]:
             continue
         for i, block in enumerate(blocks):
             s = s.replace(f"\x00BLOCK{i}\x00", block)
-        if len(current) + len(s) + 2 > max_len:
-            if current:
-                chunks.append(current)
-            if len(s) > max_len:
-                chunks.append(s)
-                current = ""
-            else:
-                current = s
+        # 若 s 超过 max_len，先安全切分
+        if len(s) > max_len:
+            sub_chunks = _split_long_text_safe(s, max_len)
         else:
-            current = (current + "\n\n" + s).strip() if current else s
+            sub_chunks = [s]
+        for sub in sub_chunks:
+            if current and len(current) + len(sub) + 2 > max_len:
+                chunks.append(current)
+                current = sub
+            elif not current:
+                current = sub
+            else:
+                current = (current + "\n\n" + sub).strip()
     if current:
         chunks.append(current)
 
@@ -1230,11 +1370,29 @@ class DocGraphPipeline:
         保证 Stage 4 的 _parse_results 和 extract_from_results_file 可以零修改复用。
         """
         assert self.llm_chat is not None, "ChatClient 未初始化"
+        total = len(requests)
+        logger.info(
+            f"Chat 模式提交 | requests={total} | timeout={Config.LLM_TIMEOUT}s | "
+            f"output={results_path}"
+        )
         results: list[dict[str, Any]] = []
         with open(results_path, "w", encoding="utf-8") as f:
-            for req in requests:
+            for idx, req in enumerate(requests):
                 body = req.get("body", {})
                 custom_id = req.get("custom_id", "")
+                messages = body.get("messages", [])
+                text_len = sum(len(str(m.get("content", ""))) for m in messages)
+                img_count = sum(
+                    1
+                    for m in messages
+                    if isinstance(m.get("content"), list)
+                    for item in m["content"]
+                    if isinstance(item, dict) and item.get("type") == "image_url"
+                )
+                logger.info(
+                    f"Chat 请求 {idx + 1}/{total} | {custom_id} | "
+                    f"text_len={text_len} | images={img_count}"
+                )
                 try:
                     response_data = self.llm_chat._post(self.llm_chat.chat_url, body)
                     result = {
@@ -1245,7 +1403,9 @@ class DocGraphPipeline:
                         },
                     }
                 except Exception as e:
-                    logger.error(f"Chat API 调用失败 | custom_id={custom_id} | error={e}")
+                    logger.error(
+                        f"Chat API 调用失败 | {custom_id} ({idx + 1}/{total}) | error={e}"
+                    )
                     result = {
                         "custom_id": custom_id,
                         "response": {

@@ -468,6 +468,49 @@ Kimi CLI 通过 `plugin.json` 注册以下工具：
 | `WORKDOCS_GRAPH_MAX_PATH_DEPTH` | `graph.max_path_depth` | `6` | 图谱路径搜索最大深度 |
 | `WORKDOCS_GRAPH_OUTPUT_DIR` | `graph.output_dir` | `graphs` | 图谱 JSON 输出目录 |
 
+### 超时调节指南
+
+处理长文档或多图文档时，若遇到 `Read timed out. (read timeout=120)` 错误，需要调大同步请求超时参数。
+
+**什么情况下需要调节？**
+- 使用 Chat 模式（`LLM_MODE=chat`）处理长文档
+- 请求包含 multimodal 图片（图片越多、越大，模型处理时间越长）
+- 单个 chapter 的文本超过 500KB
+- 当前默认 120 秒不足以完成模型推理
+
+**超时后会发生什么？**
+- Chat 模式下，`_post()` 在超时后**不再进行无意义重试**（重试使用相同 timeout 无法解决请求过大的问题）
+- 失败请求会以 500 状态码记录到 `results.jsonl`，Stage 4 会跳过该请求（对应 chapter 无实体提取结果）
+- 日志会输出当前超时值和建议调节值
+
+**如何调节？**
+
+环境变量方式（即时生效，重启后保留需写入 `.env`）：
+```bash
+export WORKDOCS_LLM_TIMEOUT=300
+```
+
+config.json 方式（持久化）：
+```json
+{
+  "llm": {
+    "timeout": 300
+  }
+}
+```
+
+**建议值参考**：
+| 文档类型 | 建议 timeout |
+|---------|-------------|
+| 纯文本短文档（<100KB） | 120s（默认） |
+| 中等文档（100KB~500KB，少量图片） | 180~300s |
+| 长文档（>500KB 或大量图片） | 300~600s |
+
+**其他相关超时参数**：
+- `WORKDOCS_LLM_BATCH_TIMEOUT=3600`：Batch API 轮询超时（通常无需调节）
+- `WORKDOCS_EMBED_TIMEOUT=120`：Embedding 同步请求超时（纯文本向量化，通常无需调节）
+- `WORKDOCS_PARSER_TIMEOUT=60`：PDF 解析超时（BigModel Expert 解析通常很快，无需调节）
+
 ---
 
 ## 核心模块说明
