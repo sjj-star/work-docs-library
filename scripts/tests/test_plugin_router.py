@@ -686,6 +686,31 @@ def test_graph_upsert_entity_create(monkeypatch, graph_service):
     assert result["mode"] == "created"
 
 
+def test_graph_upsert_entity_null_properties(monkeypatch, graph_service):
+    """graph_upsert_entity 创建模式下显式传入 null 值不崩溃."""
+    monkeypatch.setattr(plugin_router, "_get_service", lambda: graph_service)
+
+    # properties=None 应被安全处理为 {}
+    result = plugin_router.tool_graph_upsert_entity(
+        {"entity_type": "Module", "name": "NULL_PROP", "properties": None}
+    )
+    assert result["success"] is True
+    assert result["mode"] == "created"
+    e = graph_service.graph.get_entity("Module", "NULL_PROP")
+    assert e is not None
+    assert e.properties == {}
+
+    # source_doc_ids=None 应被安全处理为 set()
+    result2 = plugin_router.tool_graph_upsert_entity(
+        {"entity_type": "Module", "name": "NULL_DOCIDS", "source_doc_ids": None}
+    )
+    assert result2["success"] is True
+    assert result2["mode"] == "created"
+    e2 = graph_service.graph.get_entity("Module", "NULL_DOCIDS")
+    assert e2 is not None
+    assert e2.source_doc_ids == set()
+
+
 def test_graph_upsert_entity_update(monkeypatch, graph_service):
     """graph_upsert_entity 更新已有实体（含 verify 功能）."""
     monkeypatch.setattr(plugin_router, "_get_service", lambda: graph_service)
@@ -732,6 +757,29 @@ def test_graph_upsert_relation(monkeypatch, graph_service):
     )
     assert result["success"] is True
     assert result["conflicts"] == []
+
+
+def test_graph_upsert_relation_null_properties(monkeypatch, graph_service):
+    """graph_upsert_relation 显式传入 null 值不崩溃."""
+    monkeypatch.setattr(plugin_router, "_get_service", lambda: graph_service)
+
+    plugin_router.tool_graph_upsert_entity({"entity_type": "Module", "name": "C"})
+    plugin_router.tool_graph_upsert_entity({"entity_type": "Module", "name": "D"})
+
+    result = plugin_router.tool_graph_upsert_relation(
+        {
+            "rel_type": "CONTAINS",
+            "from_type": "Module",
+            "from_name": "C",
+            "to_type": "Module",
+            "to_name": "D",
+            "properties": None,
+        }
+    )
+    assert result["success"] is True
+    rel = graph_service.graph.get_relation("Module", "C", "Module", "D", "CONTAINS")
+    assert rel is not None
+    assert rel.properties == {}
 
 
 def test_graph_delete_relation(monkeypatch, graph_service):
