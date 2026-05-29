@@ -1,6 +1,6 @@
 """BatchBuilder 单元测试."""
 
-from core.doc_graph_pipeline import BatchBuilder, ChapterNode
+from core.doc_graph_pipeline import BatchBuilder
 
 
 def test_split_by_sentences_protects_html_table():
@@ -116,9 +116,7 @@ def test_split_html_table_long():
 
 def test_split_md_table_long():
     """超长 Markdown table 按数据行切分并保留表头."""
-    md_table = "| A | B |\n|---|---|\n" + "\n".join(
-        f"| {i} | {i} |" for i in range(200)
-    )
+    md_table = "| A | B |\n|---|---|\n" + "\n".join(f"| {i} | {i} |" for i in range(200))
     chunks = BatchBuilder._split_by_sentences(md_table, max_len=1000)
     assert len(chunks) > 1
     for c in chunks:
@@ -131,9 +129,7 @@ def test_split_md_table_long():
 
 def test_split_code_block_long():
     """超长代码块按空行切分并保留围栏."""
-    code = "```c\n" + "\n\n".join(
-        f"void func{i}() {{ body; }}" for i in range(50)
-    ) + "\n```"
+    code = "```c\n" + "\n\n".join(f"void func{i}() {{ body; }}" for i in range(50)) + "\n```"
     chunks = BatchBuilder._split_by_sentences(code, max_len=1000)
     assert len(chunks) > 1
     for c in chunks:
@@ -146,45 +142,41 @@ def test_split_code_block_long():
 class TestBatchBuilderFiltersEmptyContent:
     """测试 BatchBuilder 过滤空 content 节点."""
 
-    def test_filters_root_with_empty_content(self):
-        """无子节点且 content 为空的 root 应被过滤."""
-        empty_root = ChapterNode(level=1, title="Empty Root", content="")
-        real_root = ChapterNode(level=1, title="Real Root", content="Real content here.")
-        batches = BatchBuilder.build_batches([empty_root, real_root], max_chars=1000)
+    def test_filters_empty_block(self):
+        """Content 为空的 block 应被过滤."""
+        blocks = [
+            {"block_id": "b_0", "seq_index": 0, "content": "", "section_title": "Empty"},
+            {
+                "block_id": "b_1",
+                "seq_index": 1,
+                "content": "Real content.",
+                "section_title": "Real",
+            },
+        ]
+        batches = BatchBuilder.build_batches(blocks, max_chars=1000)
         assert len(batches) == 1
-        assert batches[0][0]["title"] == "Real Root"
+        assert batches[0][0]["title"] == "Real"
 
-    def test_filters_empty_node_in_flat_list(self):
-        """扁平节点列表中 content 为空的节点应被过滤."""
-        batches = BatchBuilder.build_batches(
-            [
-                ChapterNode(level=1, title="Empty Section", content=""),
-                ChapterNode(level=1, title="Real Section", content="Real content."),
-            ],
-            max_chars=1000,
-        )
+    def test_filters_empty_block_in_list(self):
+        """Block 列表中 content 为空的应被过滤，不影响后续 block."""
+        blocks = [
+            {"block_id": "b_0", "seq_index": 0, "content": "", "section_title": "Empty"},
+            {
+                "block_id": "b_1",
+                "seq_index": 1,
+                "content": "Real content.",
+                "section_title": "Real",
+            },
+        ]
+        batches = BatchBuilder.build_batches(blocks, max_chars=1000)
         assert len(batches) == 1
-        assert batches[0][0]["title"] == "Real Section"
+        assert batches[0][0]["title"] == "Real"
 
-    def test_filters_empty_chunk_in_flat_list(self):
-        """扁平节点列表中 content 为空的 chunk 应被过滤，不影响后续 chunk."""
-        batches = BatchBuilder.build_batches(
-            [
-                ChapterNode(level=1, title="Empty Chunk", content=""),
-                ChapterNode(level=1, title="Real Chunk", content="Real content."),
-            ],
-            max_chars=1000,
-        )
-        assert len(batches) == 1
-        assert batches[0][0]["title"] == "Real Chunk"
-
-    def test_all_empty_nodes_yield_empty_batches(self):
-        """全部节点都为空时应返回空列表."""
-        batches = BatchBuilder.build_batches(
-            [
-                ChapterNode(level=1, title="Doc", content=""),
-                ChapterNode(level=1, title="Section", content=""),
-            ],
-            max_chars=1000,
-        )
+    def test_all_empty_blocks_yield_empty_batches(self):
+        """全部 block 都为空时应返回空列表."""
+        blocks = [
+            {"block_id": "b_0", "seq_index": 0, "content": "", "section_title": "A"},
+            {"block_id": "b_1", "seq_index": 1, "content": "", "section_title": "B"},
+        ]
+        batches = BatchBuilder.build_batches(blocks, max_chars=1000)
         assert batches == []

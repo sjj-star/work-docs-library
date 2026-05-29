@@ -2,7 +2,6 @@
 
 import io
 import zipfile
-from pathlib import Path
 
 import pytest
 from core.bigmodel_parser_client import BigModelParserClient

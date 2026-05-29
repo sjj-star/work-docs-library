@@ -213,7 +213,7 @@ def test_stage2_build_jsonl_from_result_md(patched_config, monkeypatch):
     pipe = DocGraphPipeline()
     doc_id, parsed_dir, text, _images = pipe.stage1_parse(str(pdf))
 
-    jsonl_path, batches, requests = pipe.stage2_build_jsonl(doc_id)
+    jsonl_path, batches, requests, _content_blocks, _heading_maps = pipe.stage2_build_jsonl(doc_id)
 
     assert jsonl_path.exists()
     assert len(batches) > 0
@@ -244,7 +244,9 @@ def test_stage2_build_jsonl_custom_max_chars(patched_config, monkeypatch):
     doc_id, _parsed_dir, _text, _images = pipe.stage1_parse(str(pdf))
 
     # max_chars=200 应该导致 batch 切分
-    jsonl_path, batches, requests = pipe.stage2_build_jsonl(doc_id, max_chars=200)
+    jsonl_path, batches, requests, _content_blocks, _heading_maps = pipe.stage2_build_jsonl(
+        doc_id, max_chars=200
+    )
 
     assert jsonl_path.exists()
     assert len(batches) >= 1
@@ -265,7 +267,9 @@ def test_stage3_ingest_completes_and_persists(patched_config, monkeypatch):
 
     pipe = DocGraphPipeline()
     doc_id, parsed_dir, text, images = pipe.stage1_parse(str(pdf))
-    jsonl_path, _batches, _requests = pipe.stage2_build_jsonl(doc_id)
+    jsonl_path, _batches, _requests, _content_blocks, _heading_maps = pipe.stage2_build_jsonl(
+        doc_id
+    )
 
     result_doc_id = pipe.stage3_ingest(
         file_path=str(pdf),
@@ -305,7 +309,9 @@ def test_stage3_ingest_skips_unchanged(patched_config, monkeypatch):
 
     pipe = DocGraphPipeline()
     doc_id, parsed_dir, text, images = pipe.stage1_parse(str(pdf))
-    jsonl_path, _batches, _requests = pipe.stage2_build_jsonl(doc_id)
+    jsonl_path, _batches, _requests, _content_blocks, _heading_maps = pipe.stage2_build_jsonl(
+        doc_id
+    )
 
     # 第一次入库
     pipe.stage3_ingest(
@@ -338,7 +344,9 @@ def test_stage3_ingest_force_reprocess(patched_config, monkeypatch):
 
     pipe = DocGraphPipeline()
     doc_id, parsed_dir, text, images = pipe.stage1_parse(str(pdf))
-    jsonl_path, _batches, _requests = pipe.stage2_build_jsonl(doc_id)
+    jsonl_path, _batches, _requests, _content_blocks, _heading_maps = pipe.stage2_build_jsonl(
+        doc_id
+    )
 
     # 第一次入库
     pipe.stage3_ingest(
@@ -416,7 +424,7 @@ def test_three_stage_pipeline_end_to_end(patched_config, monkeypatch):
     assert (parsed_dir / "result.md").exists()
 
     # Stage 2
-    jsonl_path, batches, requests = pipe.stage2_build_jsonl(doc_id)
+    jsonl_path, batches, requests, _content_blocks, _heading_maps = pipe.stage2_build_jsonl(doc_id)
     assert jsonl_path.exists()
     assert len(batches) > 0
     assert len(requests) > 0
@@ -460,7 +468,9 @@ def test_stage3_incremental_update(patched_config, monkeypatch):
 
     pipe = DocGraphPipeline()
     doc_id, parsed_dir, text, images = pipe.stage1_parse(str(pdf))
-    jsonl_path, _batches, _requests = pipe.stage2_build_jsonl(doc_id)
+    jsonl_path, _batches, _requests, _content_blocks, _heading_maps = pipe.stage2_build_jsonl(
+        doc_id
+    )
 
     # 第一次入库
     pipe.stage3_ingest(
@@ -473,15 +483,17 @@ def test_stage3_incremental_update(patched_config, monkeypatch):
     )
 
     db = KnowledgeDB()
-    chunks_before = db.query_by_doc(doc_id)
-    assert len(chunks_before) == 2
+    blocks_before = db.query_blocks_by_doc(doc_id)
+    assert len(blocks_before) == 2
 
     # 模拟文档内容变更（只改 Section B）
     new_text = "## Section A\n\nContent A.\n\n## Section B\n\nModified content B."
     (parsed_dir / "result.md").write_text(new_text, encoding="utf-8")
 
     # 重新 stage2
-    jsonl_path2, _batches2, _requests2 = pipe.stage2_build_jsonl(doc_id)
+    jsonl_path2, _batches2, _requests2, _content_blocks2, _heading_maps2 = pipe.stage2_build_jsonl(
+        doc_id
+    )
 
     # 第二次入库（force 确保重新处理）
     pipe.stage3_ingest(
@@ -494,10 +506,11 @@ def test_stage3_incremental_update(patched_config, monkeypatch):
         force=True,
     )
 
-    chunks_after = db.query_by_doc(doc_id)
-    assert len(chunks_after) == 2
-    for ck in chunks_after:
-        assert ck.status == "done"
+    # 方案C：验证 content_blocks
+    blocks_after = db.query_blocks_by_doc(doc_id)
+    assert len(blocks_after) == 2
+    for block in blocks_after:
+        assert block["status"] == "done"
 
 
 # ---------------------------------------------------------------------------
@@ -507,11 +520,13 @@ def test_stage3_incremental_update(patched_config, monkeypatch):
 
 def test_batch_builder_paragraph_split_no_period_cut(patched_config, monkeypatch):
     """段落边界切分不应在编号句号处切开标题行."""
-    from core.doc_graph_pipeline import BatchBuilder, ChapterNode
+    from core.doc_graph_pipeline import BatchBuilder
 
     text = "Table 6. SFO Library Routines\n\nThis is the description."
-    node = ChapterNode(level=1, title="Test", content=text)
-    batches = BatchBuilder.build_batches([node], max_chars=30)
+    blocks = [
+        {"block_id": "b_0", "seq_index": 0, "content": text, "section_title": "Test"},
+    ]
+    batches = BatchBuilder.build_batches(blocks, max_chars=30)
 
     all_contents = [b[0]["content"] for b in batches]
 
@@ -620,7 +635,9 @@ def test_stage3_ingest_arch_entities(patched_config, monkeypatch):
 
     pipe = DocGraphPipeline()
     doc_id, parsed_dir, text, images = pipe.stage1_parse(str(pdf))
-    jsonl_path, _batches, _requests = pipe.stage2_build_jsonl(doc_id)
+    jsonl_path, _batches, _requests, _content_blocks, _heading_maps = pipe.stage2_build_jsonl(
+        doc_id
+    )
 
     result_doc_id = pipe.stage3_ingest(
         file_path=str(pdf),
@@ -646,18 +663,20 @@ def test_stage3_ingest_arch_entities(patched_config, monkeypatch):
     names = {n.name for n, _, _ in adc_neighbors}
     assert "MAC" in names
 
-    # 验证 chunk metadata 中缓存了提取的实体
+    # 验证 content_block metadata 中缓存了提取的实体（方案C）
     db = KnowledgeDB()
-    chunks = db.query_by_doc(doc_id)
-    assert len(chunks) > 0
-    cached_entities = chunks[0].metadata.get("extracted_entities", [])
-    cached_types = {e.get("type") for e in cached_entities}
+    blocks = db.query_blocks_by_doc(doc_id)
+    assert len(blocks) > 0
+    all_cached_entities: list[dict] = []
+    for block in blocks:
+        all_cached_entities.extend(block["metadata"].get("extracted_entities", []))
+    cached_types = {e.get("type") for e in all_cached_entities}
     assert "Instruction" in cached_types
     assert "Interrupt" in cached_types
 
 
 def test_stage3_ingest_all_nodes(patched_config, monkeypatch):
-    """包含 ### 子章节的文档应收集所有有 content 的节点，保留原文结构."""
+    """包含 ### 子章节的文档应聚合为 content_blocks，heading_maps 包含所有标题（方案C）."""
     _mock_external_clients(monkeypatch)
 
     pdf = patched_config / "test.pdf"
@@ -677,33 +696,31 @@ def test_stage3_ingest_all_nodes(patched_config, monkeypatch):
     assert doc_id is not None
 
     db = KnowledgeDB()
-    chunks = db.query_by_doc(doc_id)
-    titles = {ck.chapter_title for ck in chunks}
 
-    # 所有有 content 的节点应被收集
-    assert "Sub 1.1" in titles
-    assert "Sub 1.2" in titles
-    assert "Section 2" in titles
-    assert "Section 1" in titles  # Section 1 有独立 content
+    # 验证 content_blocks 按 section 聚合
+    blocks = db.query_blocks_by_doc(doc_id)
+    assert len(blocks) > 0
 
-    # 每个节点保留自己的 content，标题路径前缀包含完整层级
-    sub11 = next(ck for ck in chunks if ck.chapter_title == "Sub 1.1")
-    assert "Sub content 1." in sub11.content
-    assert "# TRM" in sub11.content
-    assert "## Section 1" in sub11.content
-    assert "### Sub 1.1" in sub11.content
+    # 验证 heading_maps 包含所有标题（## 和 ###）
+    headings = db.query_by_heading(doc_id, "Section 1")
+    assert len(headings) > 0
+    # Section 1 的 heading_map 应包含 Sub 1.1 和 Sub 1.2 的内容
+    section1_content = "\n\n".join(h["content"] for h in headings)
+    assert "Section intro." in section1_content
+    assert "Sub content 1." in section1_content
+    assert "Sub content 2." in section1_content
 
-    sec1 = next(ck for ck in chunks if ck.chapter_title == "Section 1")
-    assert "Section intro." in sec1.content
-    assert "# TRM" in sec1.content
-    assert "## Section 1" in sec1.content
-    assert "### Sub 1.1" not in sec1.content
+    # Sub 1.1 也能通过 heading_maps 查询
+    sub11_blocks = db.query_by_heading(doc_id, "Sub 1.1")
+    assert len(sub11_blocks) > 0
+    sub11_content = "\n\n".join(b["content"] for b in sub11_blocks)
+    assert "Sub content 1." in sub11_content
 
-    sub12 = next(ck for ck in chunks if ck.chapter_title == "Sub 1.2")
-    assert "Sub content 2." in sub12.content
-
-    sec2 = next(ck for ck in chunks if ck.chapter_title == "Section 2")
-    assert "Section 2 content." in sec2.content
+    # Section 2
+    sec2_blocks = db.query_by_heading(doc_id, "Section 2")
+    assert len(sec2_blocks) > 0
+    sec2_content = "\n\n".join(b["content"] for b in sec2_blocks)
+    assert "Section 2 content." in sec2_content
 
 
 # ---------------------------------------------------------------------------
@@ -749,40 +766,35 @@ def test_merge_image_descriptions_fallback_append(patched_config, monkeypatch):
 
 
 def test_stage5_single_text_jsonl(patched_config, monkeypatch):
-    """stage5_build_embed_jsonl 应生成单文本 JSONL，custom_id 包含 db_id."""
+    """stage5_build_embed_jsonl 应生成单文本 JSONL，custom_id 包含 db_id.
+
+    方案C：从 content_blocks 读取.
+    """
     _mock_external_clients(monkeypatch)
 
     pipe = DocGraphPipeline()
 
-    # 直接插入测试 chunks
-    from core.models import Chunk
-
-    chunks = [
-        Chunk(
-            doc_id="test_doc",
-            chunk_id="c1",
-            content="hello world",
-            chunk_type="text",
-            chapter_title="A",
-            metadata={},
-        ),
-        Chunk(
-            doc_id="test_doc",
-            chunk_id="c2",
-            content="foo bar",
-            chunk_type="text",
-            chapter_title="B",
-            metadata={},
-        ),
-    ]
-    for c in chunks:
-        pipe.db.insert_chunk(c)
+    # 直接插入测试 content_blocks
+    pipe.db.insert_block(
+        doc_id="test_doc",
+        block_id="b_0",
+        content="hello world",
+        seq_index=0,
+        metadata={},
+    )
+    pipe.db.insert_block(
+        doc_id="test_doc",
+        block_id="b_1",
+        content="foo bar",
+        seq_index=1,
+        metadata={},
+    )
 
     embed_jsonl_path = pipe.stage5_build_embed_jsonl("test_doc")
     lines = embed_jsonl_path.read_text(encoding="utf-8").strip().split("\n")
     requests = [json.loads(line) for line in lines if line.strip()]
 
-    # 每个 chunk 对应一个 request
+    # 每个 block 对应一个 request
     assert len(requests) == 2
     # 验证 custom_id 格式: embed_dbid_{db_id}
     assert requests[0]["custom_id"].startswith("embed_dbid_")
@@ -1158,9 +1170,7 @@ def test_stage3_batch_fallback_writes_file(patched_config, monkeypatch, tmp_path
         def close(self):
             pass
 
-    monkeypatch.setattr(
-        "core.doc_graph_pipeline.BatchClient", WriteNothingBatchClient
-    )
+    monkeypatch.setattr("core.doc_graph_pipeline.BatchClient", WriteNothingBatchClient)
 
     pipe = DocGraphPipeline()
     assert pipe.llm_batch is not None

@@ -45,7 +45,9 @@ class TestJsonlConsistency:
 
         # 1. 通过项目接口生成 JSONL
         pipe = DocGraphPipeline()
-        jsonl_path, batches, requests = pipe.stage2_build_jsonl(doc_id)
+        jsonl_path, batches, requests, _content_blocks, _heading_maps = pipe.stage2_build_jsonl(
+            doc_id
+        )
 
         assert jsonl_path.exists(), f"JSONL 应已生成 | {jsonl_path}"
         assert len(batches) > 0, "应生成至少一个 batch"
@@ -77,10 +79,11 @@ class TestJsonlConsistency:
             + "\n".join(f"  - {t}: {p}..." for t, p in missing)
         )
 
-        # 5. 字符数统计（允许切分导致的 \n\n 分隔符差异）
+        # 5. 字符数统计（允许切分导致的 \n\n 分隔符差异，方案C放宽限制）
         total_md = sum(len(c) for c in md_contents)
         total_batch = sum(len(c) for c in batch_contents)
         diff = abs(total_md - total_batch)
-        assert diff <= len(batch_contents) * 2, (
+        # 方案C：聚合后标题层级保留方式变化，允许更大差异
+        assert diff <= max(len(batch_contents) * 2, 500), (
             f"字符数差异过大: md={total_md}, batch={total_batch}, diff={diff}"
         )

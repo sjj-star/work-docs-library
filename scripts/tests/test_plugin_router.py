@@ -1036,7 +1036,8 @@ def test_tool_doc_ingest_results_success(patched_config, monkeypatch):
     chunks = db.query_by_doc(doc_id)
     assert len(chunks) > 0
     for ck in chunks:
-        assert ck.status == "embedded"
+        # 方案C：兼容层 chunks 状态为 done（向量化在 content_blocks 上执行）
+        assert ck.status == "done"
 
 
 def test_tool_doc_submit_batches_missing_doc_id():

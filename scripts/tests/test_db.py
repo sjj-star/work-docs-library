@@ -190,9 +190,7 @@ def test_feedback(db):
         relation_to_type="Register",
         relation_to_name="CTRL",
     )
-    rel_score = db.get_relation_feedback_score(
-        "HAS_REGISTER", "Module", "TOP", "Register", "CTRL"
-    )
+    rel_score = db.get_relation_feedback_score("HAS_REGISTER", "Module", "TOP", "Register", "CTRL")
     assert rel_score == 1
 
     db.insert_feedback(
@@ -203,7 +201,5 @@ def test_feedback(db):
         relation_to_type="Register",
         relation_to_name="CTRL",
     )
-    rel_score = db.get_relation_feedback_score(
-        "HAS_REGISTER", "Module", "TOP", "Register", "CTRL"
-    )
+    rel_score = db.get_relation_feedback_score("HAS_REGISTER", "Module", "TOP", "Register", "CTRL")
     assert rel_score == 0

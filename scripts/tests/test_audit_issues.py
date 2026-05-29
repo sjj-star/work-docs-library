@@ -3,7 +3,6 @@
 所有测试使用临时目录（tmp_path + monkeypatch），不触碰项目数据库。
 """
 
-
 import pytest
 from core.config import Config
 from core.db import KnowledgeDB
@@ -60,12 +59,18 @@ def test_bridge_sync_failure_graceful(tmp_path, monkeypatch):
 
     # 手动插入文档和 chunks
     doc = Document(
-        doc_id="doc1", title="t", source_path="/tmp/1.pdf",
-        file_type="pdf", total_pages=1, file_hash="h1",
+        doc_id="doc1",
+        title="t",
+        source_path="/tmp/1.pdf",
+        file_type="pdf",
+        total_pages=1,
+        file_hash="h1",
     )
     db.upsert_document(doc)
     ck = Chunk(
-        doc_id="doc1", chunk_id="ch_0", content="hello",
+        doc_id="doc1",
+        chunk_id="ch_0",
+        content="hello",
         metadata={"extracted_entities": [{"type": "Module", "name": "M1"}]},
     )
     db_id = db.insert_chunk(ck)
@@ -122,8 +127,10 @@ def test_kbservice_add_entity_rollback_on_save_failure(tmp_path, monkeypatch):
     kb._save_global_graph = failing_save
 
     entity = GraphEntity(
-        entity_type="Module", name="TestRollback",
-        properties={"addr": "0x1000"}, source_doc_ids={"doc1"},
+        entity_type="Module",
+        name="TestRollback",
+        properties={"addr": "0x1000"},
+        source_doc_ids={"doc1"},
     )
 
     with pytest.raises(RuntimeError, match="disk full"):
@@ -163,9 +170,7 @@ def test_apply_doc_properties_deep_copy():
     result.source_doc_ids.add("doc2")
 
     # 修复后：原始实体不应被污染
-    assert "doc2" not in entity.source_doc_ids, (
-        "浅拷贝导致全局图节点被污染"
-    )
+    assert "doc2" not in entity.source_doc_ids, "浅拷贝导致全局图节点被污染"
 
 
 # ---------------------------------------------------------------------------
@@ -197,10 +202,14 @@ def test_ingest_partial_merge_rollback(tmp_path, monkeypatch):
 
     # 子图 1：有效
     g1 = NetworkXGraphStore()
-    g1.add_entity(GraphEntity(
-        entity_type="Module", name="M1", properties={},
-        source_doc_ids={"doc1"},
-    ))
+    g1.add_entity(
+        GraphEntity(
+            entity_type="Module",
+            name="M1",
+            properties={},
+            source_doc_ids={"doc1"},
+        )
+    )
     g1.save(graphs_dir / "doc1.json")
 
     # 子图 2：损坏的 JSON

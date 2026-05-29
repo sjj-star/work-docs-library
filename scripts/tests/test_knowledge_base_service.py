@@ -257,7 +257,7 @@ def test_bridge_attach_detach_idempotent():
     ref_c = _EntityRef("Signal", "S1")
     bridge.attach(1, {ref_c})
     assert bridge.get_entities(1) == {ref_c}
-    assert bridge.get_chunks(ref_a) == set()   # 旧引用已清理
+    assert bridge.get_chunks(ref_a) == set()  # 旧引用已清理
     assert bridge.get_chunks(ref_b) == set()
     assert bridge.get_chunks(ref_c) == {1}
 
