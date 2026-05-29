@@ -441,3 +441,46 @@ def test_submit_feedback_syncs_relation_score(tmp_path, monkeypatch):
 
     rels = svc.graph.all_relations()
     assert rels[0].feedback_score == 0
+
+
+def test_bridge_rebuild_with_content_blocks(tmp_path, monkeypatch):
+    """Bridge rebuild 应同时加载 content_blocks 和 chunks 的实体映射."""
+    from core.knowledge_base_service import _EntityRef
+
+    monkeypatch.setattr("core.config.Config.DB_PATH", tmp_path / "test.db")
+    monkeypatch.setattr("core.config.Config.FAISS_INDEX_PATH", tmp_path / "faiss.index")
+    monkeypatch.setattr("core.config.Config.ID_MAP_PATH", tmp_path / "id_map.json")
+
+    svc = KnowledgeBaseService()
+    svc.db.upsert_document(Document(doc_id="d1", title="T", source_path="/x.pdf", file_type="pdf"))
+
+    # 插入 content_block（方案C主存储）
+    # 先插入一个占位的 block，确保后续 block_id 与 chunk_id 不冲突
+    svc.db.insert_block(doc_id="d1", block_id="b_placeholder", content="x", seq_index=0)
+    block_id = svc.db.insert_block(
+        doc_id="d1",
+        block_id="b_0",
+        content="reg A desc",
+        seq_index=1,
+        metadata={
+            "extracted_entities": [
+                {"type": "Register", "name": "A"},
+                {"type": "Module", "name": "M1"},
+            ]
+        },
+    )
+
+    # 插入兼容层 chunk（id 从 1 开始，与 block_id=2 不冲突）
+    ck = _make_chunk_with_entities("d1", "c0", "reg B desc", [("Register", "B")])
+    chunk_id = svc.db.insert_chunk(ck)
+
+    # 重建后验证
+    svc._bridge.rebuild(svc.db)
+
+    # content_blocks 的映射应被加载
+    assert svc._bridge.get_entities(block_id) == {_EntityRef("Register", "A"), _EntityRef("Module", "M1")}
+    assert svc._bridge.get_chunks(_EntityRef("Register", "A")) == {block_id}
+
+    # chunks 的映射也应被加载
+    assert svc._bridge.get_entities(chunk_id) == {_EntityRef("Register", "B")}
+    assert svc._bridge.get_chunks(_EntityRef("Register", "B")) == {chunk_id}

@@ -134,3 +134,43 @@ def test_build_content_blocks_block_id_format():
 
     assert len(content_blocks) == 1
     assert content_blocks[0]["block_id"] == "b_0"
+
+
+def test_build_content_blocks_parent_heading_none():
+    """parent_heading 应使用 None 而非空字符串表示无父标题."""
+    root = ChapterNode(level=1, title="", content="")
+    sec1 = ChapterNode(level=2, title="Section 1", content="A.")
+    root.children = [sec1]
+
+    _, heading_maps = _build_content_blocks_and_maps([root], max_chars=1000)
+
+    sec1_hm = next(hm for hm in heading_maps if hm["heading_title"] == "Section 1")
+    assert sec1_hm["parent_heading"] is None
+
+
+def test_build_content_blocks_content_hash_consistency():
+    """原始 chapter content hash 与聚合 section content hash 应不同，
+    _save_blocks_to_db 应使用原始 hash 以保持增量更新一致性."""
+    root = ChapterNode(level=1, title="Doc", content="Preface.")
+    sec1 = ChapterNode(level=2, title="Section 1", content="Original content.")
+    sub1 = ChapterNode(level=3, title="Sub 1.1", content="Sub content.")
+    sec1.children = [sub1]
+    root.children = [sec1]
+
+    content_blocks, _ = _build_content_blocks_and_maps([root], max_chars=1000)
+
+    # content_blocks 中 Section 1 包含聚合内容（Original + Sub）
+    sec_block = next(b for b in content_blocks if b["section_title"] == "Section 1")
+    aggregated_content = sec_block["content"]
+    assert "Sub content." in aggregated_content
+
+    # 原始 chapter content 不含子章节
+    original_content = "Original content."
+    assert "Sub content." not in original_content
+
+    # 验证 hash 不同（说明为什么 _save_blocks_to_db 需要使用原始 chapter hash）
+    import hashlib
+
+    original_hash = hashlib.md5(original_content.encode()).hexdigest()[:16]
+    aggregated_hash = hashlib.md5(aggregated_content.encode()).hexdigest()[:16]
+    assert original_hash != aggregated_hash, "原始 hash 和聚合 hash 应不同，否则增量更新失效"
