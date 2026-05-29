@@ -44,7 +44,7 @@ class Chunk:
 
 @dataclass
 class Document:
-    """Document 类 — 文档元数据（不含 chunks，chunks 独立存储于 SQLite）."""
+    """Document 类 — 文档元数据（不含内容块，content_blocks 独立存储于 SQLite）."""
 
     doc_id: str
     title: str

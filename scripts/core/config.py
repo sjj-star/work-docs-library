@@ -152,7 +152,6 @@ class Config:
     EMBED_RETRY_BACKOFF: int = 0  # 将在下方初始化
     EMBED_TIMEOUT: int = 0  # 将在下方初始化
     EMBED_BATCH_TIMEOUT: int = 0  # 将在下方初始化
-    CHUNK_MAX_CHARS: int = 0  # 将在下方初始化
 
     # --- LLM 客户端参数 ---
     LLM_MAX_RETRIES: int = 0  # 将在下方初始化
@@ -232,14 +231,6 @@ class Config:
         cls.EMBED_BATCH_TIMEOUT = int(
             _resolve_config("WORKDOCS_EMBED_BATCH_TIMEOUT", "embedding.batch_timeout", "3600")
         )
-        cls.CHUNK_MAX_CHARS = int(
-            _resolve_config(
-                "WORKDOCS_CHUNK_MAX_CHARS",
-                "chunk.max_chars",
-                "6000",
-            )
-        )
-
         # LLM 客户端
         cls.LLM_MAX_RETRIES = int(
             _resolve_config("WORKDOCS_LLM_MAX_RETRIES", "llm.max_retries", "3")

@@ -196,6 +196,5 @@ class TestConfigIntegration:
         from core.config import Config
 
         assert Config.EMBEDDING_DIMENSION > 0
-        assert Config.CHUNK_MAX_CHARS > 0
         assert isinstance(Config.LLM_THINKING_ENABLED, bool)
         assert Config.LLM_MODE in ("batch", "chat")
