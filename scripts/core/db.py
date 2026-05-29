@@ -8,7 +8,7 @@ from contextlib import contextmanager
 from pathlib import Path
 
 from .config import Config
-from .models import Chapter, Chunk, Document
+from .models import Chapter, Document
 
 logger = logging.getLogger(__name__)
 
@@ -51,22 +51,6 @@ class KnowledgeDB:
             file_hash TEXT,
             status TEXT DEFAULT 'pending'
         );
-        CREATE TABLE IF NOT EXISTS chunks (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            doc_id TEXT,
-            chunk_id TEXT,
-            content TEXT,
-            chunk_type TEXT,
-            chapter_title TEXT,
-            metadata TEXT,
-            status TEXT DEFAULT 'pending',
-            created_at TEXT DEFAULT CURRENT_TIMESTAMP,
-            FOREIGN KEY (doc_id) REFERENCES documents(doc_id)
-        );
-        CREATE INDEX IF NOT EXISTS idx_chunks_doc ON chunks(doc_id);
-        CREATE INDEX IF NOT EXISTS idx_chunks_type ON chunks(chunk_type);
-        CREATE INDEX IF NOT EXISTS idx_chunks_chapter ON chunks(doc_id, chapter_title);
-
         -- v3: content_blocks + heading_maps (方案C: 内容块-标题映射解耦架构)
         CREATE TABLE IF NOT EXISTS content_blocks (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -238,139 +222,6 @@ class KnowledgeDB:
         if not doc:
             return []
         return doc.chapters
-
-    def insert_chunk(self, chunk: Chunk) -> int:
-        """insert_chunk 函数."""
-        with self._connect() as conn:
-            cur = conn.execute(
-                """
-                INSERT INTO chunks
-                (
-                    doc_id, chunk_id, content, chunk_type, chapter_title,
-                    metadata, status
-                )
-                VALUES (?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    chunk.doc_id,
-                    chunk.chunk_id,
-                    chunk.content,
-                    str(chunk.chunk_type),
-                    chunk.chapter_title,
-                    json.dumps(chunk.metadata, ensure_ascii=False),
-                    str(chunk.status),
-                ),
-            )
-            assert cur.lastrowid is not None
-            return cur.lastrowid
-
-    def update_chunk_status(self, chunk_db_id: int, status: str) -> None:
-        """update_chunk_status 函数."""
-        with self._connect() as conn:
-            conn.execute(
-                "UPDATE chunks SET status = ? WHERE id = ?",
-                (status, chunk_db_id),
-            )
-
-    def update_chunks_embedded_batch(self, items: list[tuple]) -> None:
-        """批量更新 chunk embedding 和状态（在一个连接中完成）."""
-        with self._connect() as conn:
-            for chunk_db_id, embedding in items:
-                row = conn.execute(
-                    "SELECT metadata FROM chunks WHERE id = ?", (chunk_db_id,)
-                ).fetchone()
-                meta = json.loads(row["metadata"] or "{}") if row else {}
-                meta["embedding"] = embedding
-                conn.execute(
-                    "UPDATE chunks SET metadata = ?, status = 'embedded' WHERE id = ?",
-                    (json.dumps(meta, ensure_ascii=False), chunk_db_id),
-                )
-
-    def get_pending_chunks(self, doc_id: str | None = None) -> list[tuple]:
-        """get_pending_chunks 函数."""
-        sql = (
-            "SELECT id, doc_id, chunk_id, content, chunk_type, "
-            "chapter_title FROM chunks WHERE status = 'pending'"
-        )
-        params = ()
-        if doc_id:
-            sql += " AND doc_id = ?"
-            params = (doc_id,)
-        with self._connect() as conn:
-            rows = conn.execute(sql, params).fetchall()
-        return [
-            (
-                r["id"],
-                r["doc_id"],
-                r["chunk_id"],
-                r["content"],
-                r["chunk_type"],
-                r["chapter_title"],
-            )
-            for r in rows
-        ]
-
-    def query_by_doc(self, doc_id: str) -> list[Chunk]:
-        """获取文档的所有 chunks."""
-        sql = "SELECT * FROM chunks WHERE doc_id = ? ORDER BY created_at"
-        with self._connect() as conn:
-            rows = conn.execute(sql, (doc_id,)).fetchall()
-        return self._rows_to_chunks(rows)
-
-    def query_by_chapter(self, doc_id: str, chapter_title: str) -> list[Chunk]:
-        """query_by_chapter 函数."""
-        sql = "SELECT * FROM chunks WHERE doc_id = ? AND chapter_title LIKE ? ORDER BY created_at"
-        with self._connect() as conn:
-            rows = conn.execute(sql, (doc_id, f"%{chapter_title}%")).fetchall()
-        return self._rows_to_chunks(rows)
-
-    def query_by_chapter_regex(self, doc_id: str, pattern: str) -> list[Chunk]:
-        """query_by_chapter_regex 函数."""
-        import re
-
-        compiled = re.compile(pattern)
-        with self._connect() as conn:
-            rows = conn.execute(
-                "SELECT * FROM chunks WHERE doc_id = ? ORDER BY created_at", (doc_id,)
-            ).fetchall()
-        chunks = self._rows_to_chunks(rows)
-        return [ck for ck in chunks if compiled.search(ck.chapter_title)]
-
-    def query_by_concept(self, doc_id: str, concept_name: str) -> list[Chunk]:
-        """Return chunks whose metadata.entities contain the given concept name."""
-        sql = """
-            SELECT * FROM chunks
-            WHERE doc_id = ?
-            ORDER BY created_at
-        """
-        with self._connect() as conn:
-            rows = conn.execute(sql, (doc_id,)).fetchall()
-        chunks = self._rows_to_chunks(rows)
-        # 在 Python 中过滤，避免 LIKE 模式拼接的脆弱性
-        results = []
-        for ck in chunks:
-            entities = ck.metadata.get("extracted_entities", [])
-            for ent in entities:
-                if ent.get("name") == concept_name:
-                    results.append(ck)
-                    break
-        return results
-
-    def get_chunk_by_db_id(self, db_id: int) -> Chunk | None:
-        """get_chunk_by_db_id 函数."""
-        with self._connect() as conn:
-            row = conn.execute("SELECT * FROM chunks WHERE id = ?", (db_id,)).fetchone()
-        return self._rows_to_chunks([row])[0] if row else None
-
-    def delete_chunks_by_doc(self, doc_id: str) -> None:
-        """delete_chunks_by_doc 函数."""
-        with self._connect() as conn:
-            conn.execute("DELETE FROM chunks WHERE doc_id = ?", (doc_id,))
-
-    def delete_chunk_by_id(self, db_id: int) -> None:
-        """按 ID 删除单个 chunk."""
-        with self._connect() as conn:
-            conn.execute("DELETE FROM chunks WHERE id = ?", (db_id,))
 
     # -- v3: content_blocks + heading_maps (方案C) --
 
@@ -708,18 +559,3 @@ class KnowledgeDB:
                 ),
             ).fetchone()
         return row["score"] or 0
-
-    def _rows_to_chunks(self, rows: list[sqlite3.Row]) -> list[Chunk]:
-        return [
-            Chunk(
-                id=r["id"],
-                doc_id=r["doc_id"],
-                chunk_id=r["chunk_id"],
-                content=r["content"],
-                chunk_type=r["chunk_type"],
-                chapter_title=r["chapter_title"],
-                status=r["status"] or "pending",
-                metadata=json.loads(r["metadata"] or "{}"),
-            )
-            for r in rows
-        ]

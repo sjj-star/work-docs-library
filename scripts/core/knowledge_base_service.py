@@ -51,18 +51,14 @@ class _EntityChunkBridge:
         return refs
 
     def rebuild(self, db: KnowledgeDB) -> None:
-        """全量重建：遍历 SQLite 所有 content_blocks 和 chunks 的 metadata."""
+        """全量重建：遍历 SQLite 所有 content_blocks 的 metadata."""
         self._forward.clear()
         self._reverse.clear()
         for doc in db.list_documents():
-            # 优先遍历 content_blocks（方案C主存储）
             for block in db.query_blocks_by_doc(doc.doc_id):
                 self.attach(block["id"], self._extract_refs(block))
-            # 兼容层 chunks
-            for ck in db.query_by_doc(doc.doc_id):
-                self.attach(ck.id, self._extract_refs(ck))
         logger.info(
-            f"Bridge 重建完成 | entities={len(self._reverse)} | chunks={len(self._forward)}"
+            f"Bridge 重建完成 | entities={len(self._reverse)} | blocks={len(self._forward)}"
         )
 
     def attach(self, chunk_db_id: int, entity_refs: set[_EntityRef]) -> None:
@@ -275,53 +271,30 @@ class KnowledgeBaseService:
         return self.db.get_document(doc_id)
 
     def get_document_progress(self, doc_id: str) -> dict[str, int]:
-        """获取文档处理进度统计（方案C：优先查询 content_blocks）.
+        """获取文档处理进度统计（基于 content_blocks）.
 
         Returns:
             {"total": int, "done": int, "embedded": int,
              "skipped": int, "pending": int, "failed": int}
         """
         with self.db._connect() as conn:
-            # 优先查询 content_blocks
             block_count = conn.execute(
                 "SELECT COUNT(*) as c FROM content_blocks WHERE doc_id = ?", (doc_id,)
             ).fetchone()["c"]
 
-            if block_count > 0:
-
-                def _block_count(status: str) -> int:
-                    return conn.execute(
-                        "SELECT COUNT(*) as c FROM content_blocks WHERE doc_id = ? AND status = ?",
-                        (doc_id, status),
-                    ).fetchone()["c"]
-
-                return {
-                    "total": block_count,
-                    "done": _block_count("done"),
-                    "embedded": _block_count("embedded"),
-                    "skipped": _block_count("skipped"),
-                    "pending": _block_count("pending"),
-                    "failed": _block_count("failed"),
-                }
-
-            # 回退到 chunks 表
-            total = conn.execute(
-                "SELECT COUNT(*) as c FROM chunks WHERE doc_id = ?", (doc_id,)
-            ).fetchone()["c"]
-
-            def _count(status: str) -> int:
+            def _block_count(status: str) -> int:
                 return conn.execute(
-                    "SELECT COUNT(*) as c FROM chunks WHERE doc_id = ? AND status = ?",
+                    "SELECT COUNT(*) as c FROM content_blocks WHERE doc_id = ? AND status = ?",
                     (doc_id, status),
                 ).fetchone()["c"]
 
             return {
-                "total": total,
-                "done": _count("done"),
-                "embedded": _count("embedded"),
-                "skipped": _count("skipped"),
-                "pending": _count("pending"),
-                "failed": _count("failed"),
+                "total": block_count,
+                "done": _block_count("done"),
+                "embedded": _block_count("embedded"),
+                "skipped": _block_count("skipped"),
+                "pending": _block_count("pending"),
+                "failed": _block_count("failed"),
             }
 
     def reprocess_document(self, doc_id: str) -> str:
@@ -386,23 +359,15 @@ class KnowledgeBaseService:
 
         在 ingest / reprocess 完成后调用，确保 bridge 与 SQLite 一致.
         """
-        # 先 detach 该文档所有已索引的 blocks/chunks
+        # 先 detach 该文档所有已索引的 blocks
         for db_id in list(self._bridge._forward.keys()):
             block = self.db.get_block_by_db_id(db_id)
             if block and block.get("doc_id") == doc_id:
                 self._bridge.detach(db_id)
-                continue
-            ck = self.db.get_chunk_by_db_id(db_id)
-            if ck and ck.doc_id == doc_id:
-                self._bridge.detach(db_id)
-        # 再 attach 该文档当前的所有 content_blocks（优先）
+        # 再 attach 该文档当前的所有 content_blocks
         for block in self.db.query_blocks_by_doc(doc_id):
             refs = self._bridge._extract_refs(block)
             self._bridge.attach(block["id"], refs)
-        # 同时 attach chunks（兼容层）
-        for ck in self.db.query_by_doc(doc_id):
-            refs = self._bridge._extract_refs(ck)
-            self._bridge.attach(ck.id, refs)
         logger.debug(f"Bridge 已同步 | doc_id={doc_id}")
 
     # ------------------------------------------------------------------
@@ -410,7 +375,7 @@ class KnowledgeBaseService:
     # ------------------------------------------------------------------
 
     def search_semantic(self, text: str, top_k: int = Config.PLUGIN_SEARCH_TOP_K) -> list[dict]:
-        """语义向量搜索（方案C：适配 content_blocks 偏移量）.
+        """语义向量搜索（基于 content_blocks 偏移量）.
 
         Returns:
             每个结果包含 score 和 chunk 基本信息
@@ -423,7 +388,6 @@ class KnowledgeBaseService:
         hits = self.vec.search(emb, top_k=top_k)
         results = []
         for db_id, score in hits:
-            # 检查是否是 content_block 的偏移 id
             if db_id >= _BLOCK_FAISS_OFFSET:
                 block_db_id = db_id - _BLOCK_FAISS_OFFSET
                 block = self.db.get_block_by_db_id(block_db_id)
@@ -439,11 +403,6 @@ class KnowledgeBaseService:
                         status=block["status"],
                     )
                     results.append({"score": round(float(score), 4), "chunk": chunk})
-                continue
-            # 回退到 chunks 表
-            chunk = self.db.get_chunk_by_db_id(db_id)
-            if chunk:
-                results.append({"score": round(float(score), 4), "chunk": chunk})
         return results
 
     def query_chunks(
@@ -454,7 +413,7 @@ class KnowledgeBaseService:
         concept: str | None = None,
         top_k: int = Config.PLUGIN_QUERY_TOP_K,
     ) -> list[Chunk]:
-        """统一 chunk 结构化查询（方案C：优先使用 content_blocks + heading_maps）.
+        """统一 chunk 结构化查询（基于 content_blocks + heading_maps）.
 
         Args:
             doc_id: 文档 ID（chapter/concept 查询必需）
@@ -464,7 +423,7 @@ class KnowledgeBaseService:
             top_k: 最大返回数量
 
         Returns:
-            Chunk 列表（兼容旧接口）
+            Chunk 列表
 
         Raises:
             ValueError: 缺少必需参数
@@ -473,10 +432,29 @@ class KnowledgeBaseService:
         if chapter is not None:
             if not doc_id:
                 raise ValueError("chapter query requires doc_id")
-            # 优先使用 heading_maps 查询 content_blocks
             blocks = self.db.query_by_heading(doc_id, chapter)
-            if blocks:
-                for block in blocks:
+            for block in blocks:
+                results.append(
+                    Chunk(
+                        id=block["id"],
+                        doc_id=block["doc_id"],
+                        chunk_id=block["block_id"],
+                        content=block["content"],
+                        chunk_type="text",
+                        chapter_title=block["metadata"].get("section_title", ""),
+                        metadata=block["metadata"],
+                        status=block["status"],
+                    )
+                )
+        elif chapter_regex:
+            if not doc_id:
+                raise ValueError("chapter_regex query requires doc_id")
+            # 基于 content_blocks 的正则查询
+            import re
+
+            compiled = re.compile(chapter_regex)
+            for block in self.db.query_blocks_by_doc(doc_id):
+                if compiled.search(block["metadata"].get("section_title", "")):
                     results.append(
                         Chunk(
                             id=block["id"],
@@ -489,17 +467,27 @@ class KnowledgeBaseService:
                             status=block["status"],
                         )
                     )
-            else:
-                # 回退到 chunks 表
-                results = self.db.query_by_chapter(doc_id, chapter)
-        elif chapter_regex:
-            if not doc_id:
-                raise ValueError("chapter_regex query requires doc_id")
-            results = self.db.query_by_chapter_regex(doc_id, chapter_regex)
         elif concept:
             if not doc_id:
                 raise ValueError("concept query requires doc_id")
-            results = self.db.query_by_concept(doc_id, concept)
+            # 基于 content_blocks 的概念查询
+            for block in self.db.query_blocks_by_doc(doc_id):
+                entities = block["metadata"].get("extracted_entities", [])
+                for ent in entities:
+                    if ent.get("name") == concept:
+                        results.append(
+                            Chunk(
+                                id=block["id"],
+                                doc_id=block["doc_id"],
+                                chunk_id=block["block_id"],
+                                content=block["content"],
+                                chunk_type="text",
+                                chapter_title=block["metadata"].get("section_title", ""),
+                                metadata=block["metadata"],
+                                status=block["status"],
+                            )
+                        )
+                        break
         else:
             raise ValueError("Provide chapter, chapter_regex, or concept")
 
@@ -511,10 +499,10 @@ class KnowledgeBaseService:
         doc_id: str | None = None,
         chapter: str | None = None,
     ) -> dict:
-        """获取 chunk 完整内容（方案C：优先使用 content_blocks + heading_maps）.
+        """获取 chunk 完整内容（基于 content_blocks + heading_maps）.
 
         Args:
-            chunk_db_id: 直接按 chunk DB ID 查询
+            chunk_db_id: 直接按 block DB ID 查询
             doc_id: 文档 ID（配合 chapter）
             chapter: 章节标题
 
@@ -525,27 +513,19 @@ class KnowledgeBaseService:
             ValueError: 参数不合法或找不到内容
         """
         if chunk_db_id is not None:
-            # 优先查询 content_blocks
             block = self.db.get_block_by_db_id(int(chunk_db_id))
-            if block:
-                chunk = Chunk(
-                    id=block["id"],
-                    doc_id=block["doc_id"],
-                    chunk_id=block["block_id"],
-                    content=block["content"],
-                    chunk_type="text",
-                    chapter_title=block["metadata"].get("section_title", ""),
-                    metadata=block["metadata"],
-                    status=block["status"],
-                )
-                return {
-                    "query_type": "chunk",
-                    "chunks": [chunk],
-                    "content": chunk.content,
-                }
-            chunk = self.db.get_chunk_by_db_id(int(chunk_db_id))
-            if not chunk:
-                raise ValueError(f"Chunk {chunk_db_id} not found")
+            if not block:
+                raise ValueError(f"Block {chunk_db_id} not found")
+            chunk = Chunk(
+                id=block["id"],
+                doc_id=block["doc_id"],
+                chunk_id=block["block_id"],
+                content=block["content"],
+                chunk_type="text",
+                chapter_title=block["metadata"].get("section_title", ""),
+                metadata=block["metadata"],
+                status=block["status"],
+            )
             return {
                 "query_type": "chunk",
                 "chunks": [chunk],
@@ -556,27 +536,22 @@ class KnowledgeBaseService:
             raise ValueError("Provide chunk_db_id, or doc_id with chapter")
 
         if chapter is not None:
-            # 优先使用 heading_maps 查询 content_blocks
             blocks = self.db.query_by_heading(doc_id, chapter)
-            if blocks:
-                chunks = []
-                for block in blocks:
-                    chunks.append(
-                        Chunk(
-                            id=block["id"],
-                            doc_id=block["doc_id"],
-                            chunk_id=block["block_id"],
-                            content=block["content"],
-                            chunk_type="text",
-                            chapter_title=block["metadata"].get("section_title", ""),
-                            metadata=block["metadata"],
-                            status=block["status"],
-                        )
+            chunks = []
+            for block in blocks:
+                chunks.append(
+                    Chunk(
+                        id=block["id"],
+                        doc_id=block["doc_id"],
+                        chunk_id=block["block_id"],
+                        content=block["content"],
+                        chunk_type="text",
+                        chapter_title=block["metadata"].get("section_title", ""),
+                        metadata=block["metadata"],
+                        status=block["status"],
                     )
-                query_type = "chapter"
-            else:
-                chunks = self.db.query_by_chapter(doc_id, chapter)
-                query_type = "chapter"
+                )
+            query_type = "chapter"
         else:
             raise ValueError("Provide chapter with doc_id")
 
@@ -707,8 +682,7 @@ class KnowledgeBaseService:
         return self._bridge.get_chunks(_EntityRef(entity_type, entity_name))
 
     def _get_chunk(self, chunk_db_id: int) -> Chunk | None:
-        """按 ID 获取 chunk 或 content_block（深拷贝隔离）."""
-        # 优先查询 content_blocks
+        """按 ID 获取 content_block（深拷贝隔离）."""
         block = self.db.get_block_by_db_id(chunk_db_id)
         if block:
             chunk = Chunk(
@@ -722,10 +696,7 @@ class KnowledgeBaseService:
                 status=block["status"],
             )
             return copy.deepcopy(chunk)
-        ck = self.db.get_chunk_by_db_id(chunk_db_id)
-        if ck is None:
-            return None
-        return copy.deepcopy(ck)
+        return None
 
     def _semantic_hits(self, query_text: str, top_k: int) -> list[tuple[int, float]]:
         """语义搜索原子操作：返回 [(chunk_db_id, score), ...]."""
@@ -736,12 +707,12 @@ class KnowledgeBaseService:
     def find_chunks_by_entity(
         self, entity_type: str, name: str, doc_id: str | None = None
     ) -> list[Chunk]:
-        """查找包含指定实体的所有 chunks/blocks（通过桥接索引，O(1) 反向查询）.
+        """查找包含指定实体的所有 blocks（通过桥接索引，O(1) 反向查询）.
 
         Args:
             entity_type: 实体类型
             name: 实体名称
-            doc_id: 可选，限定只查某文档的 chunks
+            doc_id: 可选，限定只查某文档的 blocks
 
         Returns:
             Chunk 列表（深拷贝，按 doc_id, chunk_id 排序）
@@ -749,7 +720,6 @@ class KnowledgeBaseService:
         chunk_ids = self._entity_to_chunks(entity_type, name)
         chunks: list[Chunk] = []
         for cid in chunk_ids:
-            # 优先查询 content_blocks
             block = self.db.get_block_by_db_id(cid)
             if block:
                 if doc_id is None or block.get("doc_id") == doc_id:
@@ -767,10 +737,6 @@ class KnowledgeBaseService:
                             )
                         )
                     )
-                continue
-            ck = self.db.get_chunk_by_db_id(cid)
-            if ck and (doc_id is None or ck.doc_id == doc_id):
-                chunks.append(copy.deepcopy(ck))
         chunks.sort(key=lambda c: (c.doc_id, c.chunk_id))
         return chunks
 
@@ -992,7 +958,7 @@ class KnowledgeBaseService:
         """
         chunk = self._get_chunk(chunk_db_id)
         if not chunk:
-            raise ValueError(f"Chunk {chunk_db_id} not found")
+            raise ValueError(f"Block {chunk_db_id} not found")
 
         entities: list[GraphEntity] = []
         relations: list[GraphRelation] = []

@@ -263,7 +263,7 @@ def tool_doc_ingest_results(params: dict) -> dict:
 
 
 def tool_doc_build_embed_jsonl(params: dict) -> dict:
-    """阶段5: 从 SQLite chunks 构建 Embedding Batch JSONL（本地，不调用 API）."""
+    """阶段5: 从 SQLite content_blocks 构建 Embedding Batch JSONL（本地，不调用 API）."""
     doc_id = params.get("doc_id")
     if not doc_id:
         return {"success": False, "error": "Missing required parameter: doc_id"}

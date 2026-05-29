@@ -41,7 +41,7 @@ from .graph_store import (
     NetworkXGraphStore,
 )
 from .llm_chat_client import BaseLLMClient
-from .models import Chunk, Document
+from .models import Document
 from .vector_index import VectorIndex
 
 logger = logging.getLogger(__name__)
@@ -1004,7 +1004,7 @@ class DocGraphPipeline:
 
         # LLM 客户端：根据 LLM_MODE 初始化 Batch 或 Chat
         self.llm_batch = None
-        self.llm_chat = None
+        self.llm_chat: BaseLLMClient | None = None
         if Config.LLM_MODE == "batch":
             try:
                 self.llm_batch = BatchClient()
@@ -1228,14 +1228,14 @@ class DocGraphPipeline:
         force: bool = False,
     ) -> tuple[
         list[dict[str, Any]],
-        list[tuple[dict[str, Any], list[Chunk]]],
+        list[tuple[dict[str, Any], list[dict]]],
         list[dict[str, Any]],
         list[dict[str, Any]],
-        list[Chunk],
+        list[dict],
         Document | None,
         str,
     ]:
-        """章节级增量分析.
+        """章节级增量分析（方案C：基于 content_blocks）.
 
         Returns:
             (new_chapters_flat, unchanged, changed, added, removed, old_doc, file_hash)
@@ -1248,41 +1248,42 @@ class DocGraphPipeline:
         for root in tree_chapters:
             new_chapters_flat.extend(ChapterParser.collect_all_nodes(root))
 
-        # 与旧数据比较
+        # 与旧数据比较（基于 content_blocks）
         old_doc = self.db.get_document_by_path(file_path)
-        old_chunks: list[Chunk] = []
+        old_blocks: list[dict] = []
         if old_doc:
-            old_chunks = self.db.query_by_doc(old_doc.doc_id)
+            old_blocks = self.db.query_blocks_by_doc(old_doc.doc_id)
 
         from collections import defaultdict
 
-        old_chunk_map: dict[str, list[Chunk]] = defaultdict(list)
-        for ck in old_chunks:
-            old_chunk_map[ck.chapter_title].append(ck)
-        unchanged: list[tuple[dict[str, Any], list[Chunk]]] = []
+        old_block_map: dict[str, list[dict]] = defaultdict(list)
+        for block in old_blocks:
+            section_title = block["metadata"].get("section_title", "")
+            old_block_map[section_title].append(block)
+        unchanged: list[tuple[dict[str, Any], list[dict]]] = []
         changed: list[dict[str, Any]] = []
         added: list[dict[str, Any]] = []
-        removed: list[Chunk] = []
+        removed: list[dict] = []
 
         for ch in new_chapters_flat:
             ch_hash = hashlib.md5(ch["content"].encode()).hexdigest()[:16]
             ch["content_hash"] = ch_hash
-            if ch["title"] in old_chunk_map:
-                old_cks = old_chunk_map[ch["title"]]
-                # sub-chunks 共享 content_hash，只要有一个匹配即认为整个 chapter 未变
+            if ch["title"] in old_block_map:
+                old_bks = old_block_map[ch["title"]]
+                # 只要有一个 block 的 section_content_hash 匹配即认为整个 chapter 未变
                 if (
-                    any(old_ck.metadata.get("content_hash", "") == ch_hash for old_ck in old_cks)
+                    any(b["metadata"].get("section_content_hash", "") == ch_hash for b in old_bks)
                     and not force
                 ):
-                    unchanged.append((ch, old_cks))
+                    unchanged.append((ch, old_bks))
                 else:
                     changed.append(ch)
             else:
                 added.append(ch)
 
-        for title, old_cks in old_chunk_map.items():
+        for title, old_bks in old_block_map.items():
             if title not in {c["title"] for c in new_chapters_flat}:
-                removed.extend(old_cks)
+                removed.extend(old_bks)
 
         logger.info(
             f"章节增量分析 | 未变={len(unchanged)} | "
@@ -1475,7 +1476,9 @@ class DocGraphPipeline:
             "unchanged_titles": [ch["title"] for ch, _ in unchanged],
             "changed_titles": [ch["title"] for ch in changed],
             "added_titles": [ch["title"] for ch in added],
-            "removed_titles": [ck.chapter_title for ck in removed],
+            "removed_titles": [
+                b["metadata"].get("section_title", "") for b in removed
+            ],
             "result_md_hash": hashlib.md5(
                 (
                     Config.DB_PATH.parent / Config.PARSE_OUTPUT_DIR / doc_id / "result.md"
@@ -1614,7 +1617,7 @@ class DocGraphPipeline:
                     "unchanged": [ch["title"] for ch, _ in unchanged],
                     "changed": [ch["title"] for ch in changed],
                     "added": [ch["title"] for ch in added],
-                    "removed": [ck.chapter_title for ck in removed],
+                    "removed": [b["metadata"].get("section_title", "") for b in removed],
                 }
                 for key in ("unchanged_titles", "changed_titles", "added_titles", "removed_titles"):
                     expected = set(info.get(key, []))
@@ -1633,12 +1636,12 @@ class DocGraphPipeline:
         all_image_descriptions: list[dict[str, Any]] = []
 
         # 复用未变章节的实体缓存
-        for ch, old_cks in unchanged:
-            # sub-chunks 共享相同的缓存元数据，从第一个取即可
-            old_ck = old_cks[0]
-            cached_ents = old_ck.metadata.get("extracted_entities", [])
-            cached_rels = old_ck.metadata.get("extracted_relations", [])
-            cached_imgs = old_ck.metadata.get("image_descriptions", [])
+        for ch, old_bks in unchanged:
+            # 同一 section 的 blocks 共享相同的缓存元数据，从第一个取即可
+            old_bk = old_bks[0]
+            cached_ents = old_bk["metadata"].get("extracted_entities", [])
+            cached_rels = old_bk["metadata"].get("extracted_relations", [])
+            cached_imgs = old_bk["metadata"].get("image_descriptions", [])
             for e in cached_ents:
                 all_entities.append(
                     GraphEntity(
@@ -1894,8 +1897,6 @@ class DocGraphPipeline:
 
         # 1. 收集复用 embedding
         db_blocks = self.db.query_blocks_by_doc(doc_id)
-        all_items: list[tuple[int, list[float]]] = []
-        reembed_db_ids: set[int] = set()
 
         # 1. 收集复用 embedding（统一使用 block_db_id，无偏移）
         sqlite_items: list[tuple[int, list[float]]] = []
@@ -2066,10 +2067,10 @@ class DocGraphPipeline:
         heading_maps: list[dict],
         chapters: list[dict[str, Any]],
         full_text: str,
-        unchanged: list[tuple[dict[str, Any], list[Chunk]]] | None = None,
+        unchanged: list[tuple[dict[str, Any], list[dict]]] | None = None,
         changed: list[dict[str, Any]] | None = None,
         added: list[dict[str, Any]] | None = None,
-        removed: list[Chunk] | None = None,
+        removed: list[dict] | None = None,
         image_descriptions: list[dict[str, Any]] | None = None,
         all_entities: list[GraphEntity] | None = None,
         all_relations: list[GraphRelation] | None = None,
@@ -2086,19 +2087,22 @@ class DocGraphPipeline:
         # 1. 清理旧数据
         old_doc = self.db.get_document_by_path(file_path)
         if old_doc:
-            # 清理旧 chunks 的向量索引
-            all_old = self.db.query_by_doc(old_doc.doc_id)
-            if all_old:
-                self.vec.remove_doc([c.id for c in all_old])
+            # 清理旧 blocks 的向量索引（使用偏移 ID）
+            old_blocks = self.db.query_blocks_by_doc(old_doc.doc_id)
+            if old_blocks:
+                self.vec.remove_doc([b["id"] + _BLOCK_FAISS_OFFSET for b in old_blocks])
             # 清理旧 blocks 和 heading_maps
             self.db.delete_blocks_by_doc(old_doc.doc_id)
             self.db.delete_heading_maps_by_doc(old_doc.doc_id)
-            # 保留旧 chunks 用于增量分析兼容（可选清理）
-            self.db.delete_chunks_by_doc(old_doc.doc_id)
 
         # 2. 准备实体/关系缓存序列化
         entity_dicts = [e.to_dict() for e in all_entities]
         relation_dicts = [r.to_dict() for r in all_relations]
+
+        # 预计算 chapter 级别的 content_hash，用于增量分析
+        chapter_hash_map: dict[str, str] = {}
+        for ch in chapters:
+            chapter_hash_map[ch["title"]] = hashlib.md5(ch["content"].encode()).hexdigest()[:16]
 
         def _build_metadata(
             section_title: str, block_hash: str, old_meta: dict | None
@@ -2120,6 +2124,7 @@ class DocGraphPipeline:
             ]
             meta: dict[str, Any] = {
                 "section_title": section_title,
+                "section_content_hash": chapter_hash_map.get(section_title, block_hash),
                 "content_hash": block_hash,
                 "extracted_entities": section_ents,
                 "extracted_relations": section_rels,
@@ -2161,64 +2166,32 @@ class DocGraphPipeline:
                     content_summary=hm.get("content_summary") or None,
                 )
 
-        # 5. 兼容层：同时写入 chunks 表（用于增量分析和现有测试）
-        # 按 section_title 聚合 blocks，每个 section 写入一个 chunk
-        # 使用原始 chapter content hash（与 _incremental_analysis 一致）
-        chapter_hash_map: dict[str, str] = {}
-        for ch in chapters:
-            chapter_hash_map[ch["title"]] = hashlib.md5(ch["content"].encode()).hexdigest()[:16]
-
-        chunk_db_ids: list[int] = []
-        section_groups: dict[str, list[dict]] = {}
-        for block in content_blocks:
-            st = block.get("section_title", "")
-            section_groups.setdefault(st, []).append(block)
-
-        for section_title, blocks in section_groups.items():
-            section_content = "\n\n".join(b["content"] for b in blocks)
-            # 优先使用原始 chapter content hash（与增量分析一致），fallback 到聚合内容 hash
-            section_hash = chapter_hash_map.get(
-                section_title, hashlib.md5(section_content.encode()).hexdigest()[:16]
-            )
-            meta = _build_metadata(section_title, section_hash, None)
-            ck = Chunk(
-                doc_id=doc_id,
-                chunk_id=f"section_{section_title}"[:64],
-                content=section_content,
-                chunk_type="text",
-                chapter_title=section_title,
-                metadata=meta,
-            )
-            db_id = self.db.insert_chunk(ck)
-            chunk_db_ids.append(db_id)
-
+        # 5. 无内容时的兜底处理
         if not content_blocks and not chapters:
             merged = self._merge_image_descriptions(full_text, "", image_descriptions)
-            ck = Chunk(
+            block_hash = hashlib.md5(merged.encode()).hexdigest()[:16]
+            meta = {
+                "section_title": "",
+                "section_content_hash": block_hash,
+                "content_hash": block_hash,
+                "extracted_entities": entity_dicts,
+                "extracted_relations": relation_dicts,
+                "image_descriptions": image_descriptions,
+            }
+            db_id = self.db.insert_block(
                 doc_id=doc_id,
-                chunk_id="full",
+                block_id="full",
                 content=merged,
-                chunk_type="text",
-                chapter_title="",
-                metadata={
-                    "content_hash": "",
-                    "extracted_entities": entity_dicts,
-                    "extracted_relations": relation_dicts,
-                    "image_descriptions": image_descriptions,
-                },
+                seq_index=0,
+                metadata=meta,
             )
-            db_id = self.db.insert_chunk(ck)
-            chunk_db_ids.append(db_id)
+            block_id_to_db_id["full"] = db_id
 
-        # 6. 更新 content_blocks 状态为 embedded
+        # 6. 更新 content_blocks 状态为 embedded（等待 stage6 向量化）
         for block in content_blocks:
             block_db_id = block_id_to_db_id.get(block["block_id"])
             if block_db_id:
                 self.db.update_block_status(block_db_id, "embedded")
-
-        # 7. 更新 chunk 状态为 done（兼容层，不向量化）
-        for db_id in chunk_db_ids:
-            self.db.update_chunk_status(db_id, "done")
 
     def _merge_image_descriptions(
         self,
