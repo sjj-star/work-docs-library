@@ -149,8 +149,10 @@ def test_build_content_blocks_parent_heading_none():
 
 
 def test_build_content_blocks_content_hash_consistency():
-    """原始 chapter content hash 与聚合 section content hash 应不同，
-    _save_blocks_to_db 应使用原始 hash 以保持增量更新一致性."""
+    """原始 chapter content hash 与聚合 section content hash 应不同.
+
+    _save_blocks_to_db 应使用原始 hash 以保持增量更新一致性.
+    """
     root = ChapterNode(level=1, title="Doc", content="Preface.")
     sec1 = ChapterNode(level=2, title="Section 1", content="Original content.")
     sub1 = ChapterNode(level=3, title="Sub 1.1", content="Sub content.")

@@ -200,10 +200,10 @@ def test_ingest_with_llm_config_uses_doc_graph_pipeline(patched_config, monkeypa
     doc_id = result["doc_ids"][0]
 
     db = KnowledgeDB()
-    chunks = db.query_by_doc(doc_id)
+    chunks = db.query_blocks_by_doc(doc_id)
     assert len(chunks) > 0
-    for ck in chunks:
-        assert ck.status == "done"
+    for block in chunks:
+        assert block["status"] == "done"
 
 
 def test_reprocess_doc_graph_pipeline(patched_config, monkeypatch):
@@ -227,8 +227,8 @@ def test_reprocess_doc_graph_pipeline(patched_config, monkeypatch):
     assert result["success"] is True
 
     db = KnowledgeDB()
-    chunks = db.query_by_doc(doc_id)
-    assert chunks[0].status == "done"
+    chunks = db.query_blocks_by_doc(doc_id)
+    assert chunks[0]["status"] == "done"
 
 
 # ---------------------------------------------------------------------------
@@ -250,7 +250,7 @@ def test_get_content_by_chapter(patched_config, monkeypatch):
     import sqlite3
 
     with sqlite3.connect(str(Config.DB_PATH)) as conn:
-        row = conn.execute("SELECT id FROM chunks WHERE doc_id = ?", (doc_id,)).fetchone()
+        row = conn.execute("SELECT id FROM content_blocks WHERE doc_id = ?", (doc_id,)).fetchone()
         chunk_db_id = row[0]
     result = plugin_router.tool_get_content({"chunk_db_id": chunk_db_id})
     assert result["success"] is True
@@ -261,7 +261,7 @@ def test_get_content_by_chapter(patched_config, monkeypatch):
 
 
 def test_get_content_by_chapter_empty_title(patched_config, monkeypatch):
-    """Test get content by chapter with empty title (fallback chunk)."""
+    """Test get content by chapter with empty title returns no match."""
     _mock_llm_and_embedder(monkeypatch)
 
     pdf = patched_config / "doc.pdf"
@@ -270,11 +270,9 @@ def test_get_content_by_chapter_empty_title(patched_config, monkeypatch):
     result = plugin_router.tool_ingest({"path": str(pdf)})
     doc_id = result["doc_ids"][0]
 
-    # Query by empty chapter title should match fallback chunks
+    # Query by empty chapter title: 新架构下精确匹配，空标题无记录应返回失败
     result = plugin_router.tool_get_content({"doc_id": doc_id, "chapter": ""})
-    assert result["success"] is True
-    assert result["query_type"] == "chapter"
-    assert "Page one" in result["content"]
+    assert result["success"] is False
 
 
 def test_get_content_by_chunk_db_id(patched_config, monkeypatch):
@@ -290,7 +288,7 @@ def test_get_content_by_chunk_db_id(patched_config, monkeypatch):
     import sqlite3
 
     with sqlite3.connect(str(Config.DB_PATH)) as conn:
-        row = conn.execute("SELECT id FROM chunks WHERE doc_id = ?", (doc_id,)).fetchone()
+        row = conn.execute("SELECT id FROM content_blocks WHERE doc_id = ?", (doc_id,)).fetchone()
         chunk_db_id = row[0]
 
     result = plugin_router.tool_get_content({"chunk_db_id": chunk_db_id})
@@ -393,9 +391,9 @@ def test_ingest_failure_sets_status_failed(patched_config, monkeypatch):
     doc = db.get_document_by_path(str(pdf))
     assert doc is not None
     assert doc.status == "done"
-    chunks = db.query_by_doc(doc.doc_id)
+    chunks = db.query_blocks_by_doc(doc.doc_id)
     assert len(chunks) == 1
-    assert chunks[0].status == "done"
+    assert chunks[0]["status"] == "done"
 
 
 def test_ingest_resume_skips_phase_a(patched_config, monkeypatch):
@@ -422,22 +420,22 @@ def test_ingest_resume_skips_phase_a(patched_config, monkeypatch):
     db = KnowledgeDB()
     with db._connect() as conn:
         conn.execute(
-            "UPDATE chunks SET status = 'embedded' WHERE doc_id = ?",
+            "UPDATE content_blocks SET status = 'embedded' WHERE doc_id = ?",
             (doc_id,),
         )
         conn.execute("UPDATE documents SET status = 'embedded' WHERE doc_id = ?", (doc_id,))
 
-    before_count = len(db.query_by_doc(doc_id))
+    before_count = len(db.query_blocks_by_doc(doc_id))
 
     # Second ingest - should resume Phase B only
     result = plugin_router.tool_ingest({"path": str(pdf)})
     assert result["success"] is True
 
-    after_count = len(db.query_by_doc(doc_id))
+    after_count = len(db.query_blocks_by_doc(doc_id))
     assert after_count == before_count, "Phase A should be skipped, no new chunks inserted"
 
-    chunks = db.query_by_doc(doc_id)
-    assert chunks[0].status == "done"
+    chunks = db.query_blocks_by_doc(doc_id)
+    assert chunks[0]["status"] == "done"
 
 
 # ---------------------------------------------------------------------------
@@ -470,9 +468,9 @@ def test_image_analysis_persisted_to_chunk_metadata(patched_config, monkeypatch)
     doc_id = result["doc_ids"][0]
 
     db = KnowledgeDB()
-    chunks = db.query_by_doc(doc_id)
+    chunks = db.query_blocks_by_doc(doc_id)
     assert len(chunks) == 1
-    assert chunks[0].status == "done"
+    assert chunks[0]["status"] == "done"
 
 
 def test_tool_ingest_chat_mode_end_to_end(patched_config, monkeypatch):
@@ -497,10 +495,10 @@ def test_tool_ingest_chat_mode_end_to_end(patched_config, monkeypatch):
     doc_id = result["doc_ids"][0]
 
     db = KnowledgeDB()
-    chunks = db.query_by_doc(doc_id)
+    chunks = db.query_blocks_by_doc(doc_id)
     assert len(chunks) > 0
-    for ck in chunks:
-        assert ck.status == "done"
+    for block in chunks:
+        assert block["status"] == "done"
 
 
 # ---------------------------------------------------------------------------
@@ -1033,11 +1031,11 @@ def test_tool_doc_ingest_results_success(patched_config, monkeypatch):
     assert doc is not None
     assert doc.status == "done"
 
-    chunks = db.query_by_doc(doc_id)
+    chunks = db.query_blocks_by_doc(doc_id)
     assert len(chunks) > 0
-    for ck in chunks:
-        # 方案C：兼容层 chunks 状态为 done（向量化在 content_blocks 上执行）
-        assert ck.status == "done"
+    for block in chunks:
+        # 方案C：stage4 完成后 block 状态为 embedded，stage6 后变为 done
+        assert block["status"] == "embedded"
 
 
 def test_tool_doc_submit_batches_missing_doc_id():

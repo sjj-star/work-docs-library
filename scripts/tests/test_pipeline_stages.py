@@ -13,6 +13,7 @@ import pytest
 from core.config import Config
 from core.db import KnowledgeDB
 from core.doc_graph_pipeline import DocGraphPipeline
+from core.llm_chat_client import BaseLLMClient
 
 
 def _make_pdf(path: Path, pages_text: list[str]) -> None:
@@ -41,10 +42,11 @@ def patched_config(monkeypatch, tmp_path):
     return tmp_path
 
 
-class FakeChatClient:
+class FakeChatClient(BaseLLMClient):
     """Mock ChatClient, return fixed entity extraction result."""
 
     def __init__(self, *args, **kwargs):
+        # 跳过 BaseLLMClient.__init__ 的 API key 检查
         self.chat_url = "https://test.com/v1/chat/completions"
         self.user_agent = "KimiCLI/1.44.0"
 
@@ -290,10 +292,10 @@ def test_stage3_ingest_completes_and_persists(patched_config, monkeypatch):
     assert doc.doc_id == doc_id
 
     # 验证 chunks
-    chunks = db.query_by_doc(doc_id)
+    chunks = db.query_blocks_by_doc(doc_id)
     assert len(chunks) > 0
-    for ck in chunks:
-        assert ck.status == "done"
+    for block in chunks:
+        assert block["status"] == "done"
 
     # 验证图谱文件已保存
     graph_path = Config.DB_PATH.parent / Config.GRAPH_OUTPUT_DIR / f"{doc_id}.json"
@@ -445,10 +447,10 @@ def test_three_stage_pipeline_end_to_end(patched_config, monkeypatch):
     doc = db.get_document_by_path(str(pdf))
     assert doc is not None
 
-    chunks = db.query_by_doc(doc_id)
+    chunks = db.query_blocks_by_doc(doc_id)
     assert len(chunks) > 0
-    for ck in chunks:
-        assert ck.status == "done"
+    for block in chunks:
+        assert block["status"] == "done"
 
 
 # ---------------------------------------------------------------------------
@@ -916,12 +918,14 @@ def test_stage3_chat_mode_body_preserved(patched_config, monkeypatch, tmp_path):
 
     # use FakeChatClient._post to capture received payload
     captured = []
+    assert pipe.llm_chat is not None
     original_post = pipe.llm_chat._post
 
     def _capture_post(url, payload, timeout=None):
         captured.append(payload)
         return original_post(url, payload, timeout)
 
+    assert pipe.llm_chat is not None
     pipe.llm_chat._post = _capture_post
 
     pipe._submit_via_chat(requests, results_path)
@@ -964,6 +968,7 @@ def test_stage3_chat_mode_error_continue(patched_config, monkeypatch, tmp_path):
             ]
         }
 
+    assert pipe.llm_chat is not None
     pipe.llm_chat._post = _fail_then_succeed
 
     requests = [

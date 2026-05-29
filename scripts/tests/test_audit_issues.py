@@ -8,7 +8,7 @@ from core.config import Config
 from core.db import KnowledgeDB
 from core.graph_store import GraphEntity, NetworkXGraphStore
 from core.knowledge_base_service import KnowledgeBaseService, _EntityRef
-from core.models import Chunk, Document
+from core.models import Document
 from core.vector_index import VectorIndex
 
 # ---------------------------------------------------------------------------
@@ -57,7 +57,7 @@ def test_bridge_sync_failure_graceful(tmp_path, monkeypatch):
     graph = NetworkXGraphStore()
     kb = KnowledgeBaseService(db=db, vec=None, graph_store=graph)
 
-    # 手动插入文档和 chunks
+    # 手动插入文档和 block
     doc = Document(
         doc_id="doc1",
         title="t",
@@ -67,13 +67,13 @@ def test_bridge_sync_failure_graceful(tmp_path, monkeypatch):
         file_hash="h1",
     )
     db.upsert_document(doc)
-    ck = Chunk(
+    db_id = db.insert_block(
         doc_id="doc1",
-        chunk_id="ch_0",
+        block_id="b0",
         content="hello",
+        seq_index=0,
         metadata={"extracted_entities": [{"type": "Module", "name": "M1"}]},
     )
-    db_id = db.insert_chunk(ck)
     kb._bridge.attach(db_id, {_EntityRef("Module", "M1")})
 
     # 模拟 _sync_bridge_for_doc 失败

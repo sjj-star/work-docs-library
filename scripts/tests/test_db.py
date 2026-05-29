@@ -2,7 +2,7 @@
 
 import pytest
 from core.db import KnowledgeDB
-from core.models import Chapter, Chunk, Document
+from core.models import Chapter, Document
 
 
 @pytest.fixture
@@ -74,60 +74,51 @@ def test_update_document_status(db, sample_doc):
     assert doc.status == "done"
 
 
-def test_insert_chunk_and_query(db, sample_doc):
-    """Test insert chunk and query."""
+def test_insert_block_and_query(db, sample_doc):
+    """Test insert block and query."""
     db.upsert_document(sample_doc)
-    chunk = Chunk(
+    db_id = db.insert_block(
         doc_id="doc1",
-        chunk_id="p1",
+        block_id="b1",
         content="hello world",
-        chunk_type="text",
-        chapter_title="Ch1",
+        seq_index=0,
+        metadata={"section_title": "Ch1"},
     )
-    db_id = db.insert_chunk(chunk)
     assert isinstance(db_id, int)
 
-    by_doc = db.query_by_doc("doc1")
+    by_doc = db.query_blocks_by_doc("doc1")
     assert len(by_doc) == 1
-    assert by_doc[0].content == "hello world"
+    assert by_doc[0]["content"] == "hello world"
 
-    by_chapter = db.query_by_chapter("doc1", "Ch1")
-    assert len(by_chapter) == 1
-
-    by_regex = db.query_by_chapter_regex("doc1", r"^Ch")
-    assert len(by_regex) == 1
-
-    fetched = db.get_chunk_by_db_id(db_id)
+    fetched = db.get_block_by_db_id(db_id)
     assert fetched is not None
-    assert fetched.chapter_title == "Ch1"
+    assert fetched["metadata"]["section_title"] == "Ch1"
 
 
-def test_chunk_embedding_batch(db, sample_doc):
-    """Test chunk embedding batch update."""
+def test_block_embedding_batch(db, sample_doc):
+    """Test block embedding batch update."""
     db.upsert_document(sample_doc)
-    chunk = Chunk(doc_id="doc1", chunk_id="p1", content="c", chunk_type="text")
-    db_id = db.insert_chunk(chunk)
-    db.update_chunks_embedded_batch([(db_id, [0.1, 0.2, 0.3])])
-    ck = db.get_chunk_by_db_id(db_id)
-    assert ck.metadata["embedding"] == [0.1, 0.2, 0.3]
-    assert ck.status == "embedded"
+    db_id = db.insert_block(doc_id="doc1", block_id="b1", content="c", seq_index=0)
+    db.update_blocks_embedded_batch([(db_id, [0.1, 0.2, 0.3])])
+    block = db.get_block_by_db_id(db_id)
+    assert block["metadata"]["embedding"] == [0.1, 0.2, 0.3]
+    assert block["status"] == "embedded"
 
 
-def test_delete_chunks_by_doc(db, sample_doc):
-    """Test delete chunks by doc."""
+def test_delete_blocks_by_doc(db, sample_doc):
+    """Test delete blocks by doc."""
     db.upsert_document(sample_doc)
-    db.insert_chunk(Chunk(doc_id="doc1", chunk_id="p1", content="c", chunk_type="text"))
-    db.delete_chunks_by_doc("doc1")
-    assert db.query_by_doc("doc1") == []
+    db.insert_block(doc_id="doc1", block_id="b1", content="c", seq_index=0)
+    db.delete_blocks_by_doc("doc1")
+    assert db.query_blocks_by_doc("doc1") == []
 
 
-def test_get_pending_chunks(db, sample_doc):
-    """Test get pending chunks."""
+def test_get_pending_blocks(db, sample_doc):
+    """Test get pending blocks."""
     db.upsert_document(sample_doc)
-    c1 = Chunk(doc_id="doc1", chunk_id="p1", content="pending", chunk_type="text")
-    db.insert_chunk(c1)
+    db.insert_block(doc_id="doc1", block_id="b1", content="pending", seq_index=0)
 
-    pending = db.get_pending_chunks("doc1")
+    pending = db.get_pending_blocks("doc1")
     assert len(pending) == 1
     assert pending[0][3] == "pending"
 

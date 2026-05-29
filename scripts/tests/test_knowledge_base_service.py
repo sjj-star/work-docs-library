@@ -3,8 +3,8 @@
 import pytest
 from core.db import KnowledgeDB
 from core.graph_store import GraphEntity, GraphRelation, NetworkXGraphStore
-from core.knowledge_base_service import KnowledgeBaseService
-from core.models import Chunk, Document
+from core.knowledge_base_service import KnowledgeBaseService, _EntityRef
+from core.models import Document
 from core.vector_index import VectorIndex
 
 
@@ -28,14 +28,11 @@ def test_kbservice_get_document_progress(tmp_path, monkeypatch):
     monkeypatch.setattr("core.config.Config.ID_MAP_PATH", tmp_path / "id_map.json")
 
     svc = KnowledgeBaseService()
-    # Insert doc and chunks with different statuses
     svc.db.upsert_document(Document(doc_id="d1", title="T", source_path="/x.pdf", file_type="pdf"))
     statuses = ["done", "done", "embedded", "pending", "failed"]
     for i, status in enumerate(statuses):
-        ck = Chunk(doc_id="d1", chunk_id=f"c{i}", content="x", chunk_type="text", status="pending")
-        db_id = svc.db.insert_chunk(ck)
-        # insert_chunk hard-codes status to pending, update afterward
-        svc.db.update_chunk_status(db_id, status)
+        db_id = svc.db.insert_block(doc_id="d1", block_id=f"b{i}", content="x", seq_index=i)
+        svc.db.update_block_status(db_id, status)
 
     prog = svc.get_document_progress("d1")
     assert prog["total"] == 5
@@ -61,15 +58,14 @@ def test_kbservice_query_chunks_requires_query_type():
 
 
 def test_kbservice_get_chunk_content_by_chunk_id(tmp_path, monkeypatch):
-    """get_chunk_content 通过 chunk_db_id 获取内容."""
+    """get_chunk_content 通过 block_db_id 获取内容."""
     monkeypatch.setattr("core.config.Config.DB_PATH", tmp_path / "test.db")
     monkeypatch.setattr("core.config.Config.FAISS_INDEX_PATH", tmp_path / "faiss.index")
     monkeypatch.setattr("core.config.Config.ID_MAP_PATH", tmp_path / "id_map.json")
 
     svc = KnowledgeBaseService()
     svc.db.upsert_document(Document(doc_id="d1", title="T", source_path="/x.pdf", file_type="pdf"))
-    ck = Chunk(doc_id="d1", chunk_id="c0", content="hello world", chunk_type="text")
-    db_id = svc.db.insert_chunk(ck)
+    db_id = svc.db.insert_block(doc_id="d1", block_id="b0", content="hello world", seq_index=0)
 
     result = svc.get_chunk_content(chunk_db_id=db_id)
     assert result["query_type"] == "chunk"
@@ -183,20 +179,19 @@ def test_kbservice_list_documents_empty(tmp_path, monkeypatch):
     assert svc.list_documents() == []
 
 
-def test_kbservice_query_by_doc(tmp_path, monkeypatch):
-    """query_by_doc 返回文档的所有 chunks."""
+def test_kbservice_query_blocks_by_doc(tmp_path, monkeypatch):
+    """query_blocks_by_doc 返回文档的所有 blocks."""
     monkeypatch.setattr("core.config.Config.DB_PATH", tmp_path / "test.db")
     monkeypatch.setattr("core.config.Config.FAISS_INDEX_PATH", tmp_path / "faiss.index")
     monkeypatch.setattr("core.config.Config.ID_MAP_PATH", tmp_path / "id_map.json")
 
     svc = KnowledgeBaseService()
     svc.db.upsert_document(Document(doc_id="d1", title="T", source_path="/x.pdf", file_type="pdf"))
-    ck = Chunk(doc_id="d1", chunk_id="c0", content="hello", chunk_type="text")
-    svc.db.insert_chunk(ck)
+    svc.db.insert_block(doc_id="d1", block_id="b0", content="hello", seq_index=0)
 
-    chunks = svc.db.query_by_doc("d1")
-    assert len(chunks) == 1
-    assert chunks[0].content == "hello"
+    blocks = svc.db.query_blocks_by_doc("d1")
+    assert len(blocks) == 1
+    assert blocks[0]["content"] == "hello"
 
 
 # ---------------------------------------------------------------------------
@@ -204,12 +199,10 @@ def test_kbservice_query_by_doc(tmp_path, monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-def _make_chunk_with_entities(doc_id, chunk_id, content, entities):
-    """辅助函数：创建带 extracted_entities metadata 的 Chunk."""
+def _make_block_with_entities(block_id, content, entities):
+    """辅助函数：创建带 extracted_entities metadata 的 content_block 参数."""
     meta = {"extracted_entities": [{"type": et, "name": en} for et, en in entities]}
-    return Chunk(
-        doc_id=doc_id, chunk_id=chunk_id, content=content, chunk_type="text", metadata=meta
-    )
+    return block_id, content, meta
 
 
 def test_bridge_rebuild_from_db(tmp_path, monkeypatch):
@@ -221,23 +214,37 @@ def test_bridge_rebuild_from_db(tmp_path, monkeypatch):
     svc = KnowledgeBaseService()
     svc.db.upsert_document(Document(doc_id="d1", title="T", source_path="/x.pdf", file_type="pdf"))
 
-    ck1 = _make_chunk_with_entities("d1", "c0", "reg A desc", [("Register", "A"), ("Module", "M1")])
-    ck2 = _make_chunk_with_entities("d1", "c1", "reg B desc", [("Register", "B"), ("Module", "M1")])
-    id1 = svc.db.insert_chunk(ck1)
-    id2 = svc.db.insert_chunk(ck2)
+    b1_id, b1_content, b1_meta = _make_block_with_entities(
+        "b0", "reg A desc", [("Register", "A"), ("Module", "M1")]
+    )
+    b2_id, b2_content, b2_meta = _make_block_with_entities(
+        "b1", "reg B desc", [("Register", "B"), ("Module", "M1")]
+    )
+    id1 = svc.db.insert_block(
+        doc_id="d1", block_id=b1_id, content=b1_content, seq_index=0, metadata=b1_meta
+    )
+    id2 = svc.db.insert_block(
+        doc_id="d1", block_id=b2_id, content=b2_content, seq_index=1, metadata=b2_meta
+    )
 
     # 重建后验证
     svc._bridge.rebuild(svc.db)
 
     # 正向查询
-    assert svc._bridge.get_entities(id1) == {("Register", "A"), ("Module", "M1")}
-    assert svc._bridge.get_entities(id2) == {("Register", "B"), ("Module", "M1")}
+    assert svc._bridge.get_entities(id1) == {
+        _EntityRef("Register", "A"),
+        _EntityRef("Module", "M1"),
+    }
+    assert svc._bridge.get_entities(id2) == {
+        _EntityRef("Register", "B"),
+        _EntityRef("Module", "M1"),
+    }
 
     # 反向查询
-    assert svc._bridge.get_chunks(("Register", "A")) == {id1}
-    assert svc._bridge.get_chunks(("Register", "B")) == {id2}
-    assert svc._bridge.get_chunks(("Module", "M1")) == {id1, id2}
-    assert svc._bridge.get_chunks(("Signal", "X")) == set()
+    assert svc._bridge.get_chunks(_EntityRef("Register", "A")) == {id1}
+    assert svc._bridge.get_chunks(_EntityRef("Register", "B")) == {id2}
+    assert svc._bridge.get_chunks(_EntityRef("Module", "M1")) == {id1, id2}
+    assert svc._bridge.get_chunks(_EntityRef("Signal", "X")) == set()
 
 
 def test_bridge_attach_detach_idempotent():
@@ -304,14 +311,20 @@ def test_sync_bridge_for_doc(tmp_path, monkeypatch):
     svc.db.upsert_document(Document(doc_id="d1", title="T", source_path="/x.pdf", file_type="pdf"))
     svc.db.upsert_document(Document(doc_id="d2", title="T2", source_path="/y.pdf", file_type="pdf"))
 
-    id1 = svc.db.insert_chunk(_make_chunk_with_entities("d1", "c0", "x", [("Register", "A")]))
-    id2 = svc.db.insert_chunk(_make_chunk_with_entities("d2", "c0", "y", [("Register", "B")]))
+    b1_id, b1_content, b1_meta = _make_block_with_entities("b0", "x", [("Register", "A")])
+    b2_id, b2_content, b2_meta = _make_block_with_entities("b0", "y", [("Register", "B")])
+    id1 = svc.db.insert_block(
+        doc_id="d1", block_id=b1_id, content=b1_content, seq_index=0, metadata=b1_meta
+    )
+    id2 = svc.db.insert_block(
+        doc_id="d2", block_id=b2_id, content=b2_content, seq_index=0, metadata=b2_meta
+    )
 
     svc._sync_bridge_for_doc("d1")
 
-    # d1 的 chunk 已索引
+    # d1 的 block 已索引
     assert svc._entity_to_chunks("Register", "A") == {id1}
-    # d2 未被同步（旧数据若存在应被清理）
+    # d2 未被同步
     assert svc._entity_to_chunks("Register", "B") == set()
 
     # 同步 d2
@@ -322,7 +335,7 @@ def test_sync_bridge_for_doc(tmp_path, monkeypatch):
 
 
 def test_find_chunks_by_entity(tmp_path, monkeypatch):
-    """find_chunks_by_entity 通过桥接索引 O(1) 反向查找 chunk."""
+    """find_chunks_by_entity 通过桥接索引 O(1) 反向查找 block."""
     monkeypatch.setattr("core.config.Config.DB_PATH", tmp_path / "test.db")
     monkeypatch.setattr("core.config.Config.FAISS_INDEX_PATH", tmp_path / "faiss.index")
     monkeypatch.setattr("core.config.Config.ID_MAP_PATH", tmp_path / "id_map.json")
@@ -330,9 +343,15 @@ def test_find_chunks_by_entity(tmp_path, monkeypatch):
     svc = KnowledgeBaseService()
     svc.db.upsert_document(Document(doc_id="d1", title="T", source_path="/x.pdf", file_type="pdf"))
 
-    id1 = svc.db.insert_chunk(_make_chunk_with_entities("d1", "c0", "reg A", [("Register", "A")]))
-    id2 = svc.db.insert_chunk(
-        _make_chunk_with_entities("d1", "c1", "reg A and B", [("Register", "A"), ("Register", "B")])
+    b1_id, b1_content, b1_meta = _make_block_with_entities("b0", "reg A", [("Register", "A")])
+    b2_id, b2_content, b2_meta = _make_block_with_entities(
+        "b1", "reg A and B", [("Register", "A"), ("Register", "B")]
+    )
+    id1 = svc.db.insert_block(
+        doc_id="d1", block_id=b1_id, content=b1_content, seq_index=0, metadata=b1_meta
+    )
+    id2 = svc.db.insert_block(
+        doc_id="d1", block_id=b2_id, content=b2_content, seq_index=1, metadata=b2_meta
     )
     svc._sync_bridge_for_doc("d1")
 
@@ -341,7 +360,7 @@ def test_find_chunks_by_entity(tmp_path, monkeypatch):
     assert len(chunks) == 2
     assert {c.id for c in chunks} == {id1, id2}
 
-    # 限制 doc_id（虽只有 d1，测试过滤逻辑）
+    # 限制 doc_id
     chunks = svc.find_chunks_by_entity("Register", "A", doc_id="d1")
     assert len(chunks) == 2
 
@@ -363,7 +382,10 @@ def test_chunk_to_entities_and_entity_to_chunks(tmp_path, monkeypatch):
     svc = KnowledgeBaseService()
     svc.db.upsert_document(Document(doc_id="d1", title="T", source_path="/x.pdf", file_type="pdf"))
 
-    id1 = svc.db.insert_chunk(_make_chunk_with_entities("d1", "c0", "x", [("Register", "A")]))
+    b1_id, b1_content, b1_meta = _make_block_with_entities("b0", "x", [("Register", "A")])
+    id1 = svc.db.insert_block(
+        doc_id="d1", block_id=b1_id, content=b1_content, seq_index=0, metadata=b1_meta
+    )
     svc._sync_bridge_for_doc("d1")
 
     from core.knowledge_base_service import _EntityRef
@@ -381,9 +403,7 @@ def test_get_chunk_deep_copy(tmp_path, monkeypatch):
 
     svc = KnowledgeBaseService()
     svc.db.upsert_document(Document(doc_id="d1", title="T", source_path="/x.pdf", file_type="pdf"))
-    id1 = svc.db.insert_chunk(
-        Chunk(doc_id="d1", chunk_id="c0", content="original", chunk_type="text")
-    )
+    id1 = svc.db.insert_block(doc_id="d1", block_id="b0", content="original", seq_index=0)
 
     ck = svc._get_chunk(id1)
     assert ck is not None
@@ -391,6 +411,7 @@ def test_get_chunk_deep_copy(tmp_path, monkeypatch):
 
     ck.content = "modified"
     ck2 = svc._get_chunk(id1)
+    assert ck2 is not None
     assert ck2.content == "original"
 
 
@@ -444,7 +465,7 @@ def test_submit_feedback_syncs_relation_score(tmp_path, monkeypatch):
 
 
 def test_bridge_rebuild_with_content_blocks(tmp_path, monkeypatch):
-    """Bridge rebuild 应同时加载 content_blocks 和 chunks 的实体映射."""
+    """Bridge rebuild 应加载 content_blocks 的实体映射."""
     from core.knowledge_base_service import _EntityRef
 
     monkeypatch.setattr("core.config.Config.DB_PATH", tmp_path / "test.db")
@@ -454,14 +475,11 @@ def test_bridge_rebuild_with_content_blocks(tmp_path, monkeypatch):
     svc = KnowledgeBaseService()
     svc.db.upsert_document(Document(doc_id="d1", title="T", source_path="/x.pdf", file_type="pdf"))
 
-    # 插入 content_block（方案C主存储）
-    # 先插入一个占位的 block，确保后续 block_id 与 chunk_id 不冲突
-    svc.db.insert_block(doc_id="d1", block_id="b_placeholder", content="x", seq_index=0)
     block_id = svc.db.insert_block(
         doc_id="d1",
         block_id="b_0",
         content="reg A desc",
-        seq_index=1,
+        seq_index=0,
         metadata={
             "extracted_entities": [
                 {"type": "Register", "name": "A"},
@@ -470,17 +488,12 @@ def test_bridge_rebuild_with_content_blocks(tmp_path, monkeypatch):
         },
     )
 
-    # 插入兼容层 chunk（id 从 1 开始，与 block_id=2 不冲突）
-    ck = _make_chunk_with_entities("d1", "c0", "reg B desc", [("Register", "B")])
-    chunk_id = svc.db.insert_chunk(ck)
-
     # 重建后验证
     svc._bridge.rebuild(svc.db)
 
     # content_blocks 的映射应被加载
-    assert svc._bridge.get_entities(block_id) == {_EntityRef("Register", "A"), _EntityRef("Module", "M1")}
+    assert svc._bridge.get_entities(block_id) == {
+        _EntityRef("Register", "A"),
+        _EntityRef("Module", "M1"),
+    }
     assert svc._bridge.get_chunks(_EntityRef("Register", "A")) == {block_id}
-
-    # chunks 的映射也应被加载
-    assert svc._bridge.get_entities(chunk_id) == {_EntityRef("Register", "B")}
-    assert svc._bridge.get_chunks(_EntityRef("Register", "B")) == {chunk_id}
