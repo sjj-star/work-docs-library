@@ -156,7 +156,7 @@ def tool_doc_build_batches(params: dict) -> dict:
 
     pipe = DocGraphPipeline()
     try:
-        jsonl_path, batches, requests = pipe.stage2_build_jsonl(
+        jsonl_path, batches, requests, _content_blocks, _heading_maps = pipe.stage2_build_jsonl(
             doc_id, max_chars=params.get("max_chars")
         )
         return {
