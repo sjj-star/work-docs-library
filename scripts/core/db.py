@@ -12,7 +12,7 @@ from .models import Chapter, Chunk, Document
 
 logger = logging.getLogger(__name__)
 
-SCHEMA_VERSION = "2"
+SCHEMA_VERSION = "3"
 
 
 class KnowledgeDB:
@@ -66,6 +66,35 @@ class KnowledgeDB:
         CREATE INDEX IF NOT EXISTS idx_chunks_doc ON chunks(doc_id);
         CREATE INDEX IF NOT EXISTS idx_chunks_type ON chunks(chunk_type);
         CREATE INDEX IF NOT EXISTS idx_chunks_chapter ON chunks(doc_id, chapter_title);
+
+        -- v3: content_blocks + heading_maps (方案C: 内容块-标题映射解耦架构)
+        CREATE TABLE IF NOT EXISTS content_blocks (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            doc_id TEXT NOT NULL,
+            block_id TEXT NOT NULL,
+            content TEXT NOT NULL,
+            seq_index INTEGER NOT NULL,
+            metadata TEXT,
+            status TEXT DEFAULT 'pending',
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (doc_id) REFERENCES documents(doc_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_blocks_doc ON content_blocks(doc_id);
+        CREATE INDEX IF NOT EXISTS idx_blocks_seq ON content_blocks(doc_id, seq_index);
+
+        CREATE TABLE IF NOT EXISTS heading_maps (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            doc_id TEXT NOT NULL,
+            heading_title TEXT NOT NULL,
+            heading_level INTEGER NOT NULL,
+            parent_heading TEXT,
+            block_db_ids TEXT NOT NULL,
+            content_summary TEXT,
+            FOREIGN KEY (doc_id) REFERENCES documents(doc_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_headings_doc ON heading_maps(doc_id);
+        CREATE INDEX IF NOT EXISTS idx_headings_title ON heading_maps(doc_id, heading_title);
+        CREATE INDEX IF NOT EXISTS idx_headings_level ON heading_maps(doc_id, heading_level);
         CREATE TABLE IF NOT EXISTS conflict_logs (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             entity_type TEXT,
@@ -342,6 +371,164 @@ class KnowledgeDB:
         """按 ID 删除单个 chunk."""
         with self._connect() as conn:
             conn.execute("DELETE FROM chunks WHERE id = ?", (db_id,))
+
+    # -- v3: content_blocks + heading_maps (方案C) --
+
+    def insert_block(
+        self, doc_id: str, block_id: str, content: str, seq_index: int, metadata: dict | None = None
+    ) -> int:
+        """插入 content_block，返回 db_id."""
+        with self._connect() as conn:
+            cur = conn.execute(
+                """
+                INSERT INTO content_blocks (doc_id, block_id, content, seq_index, metadata, status)
+                VALUES (?, ?, ?, ?, ?, 'pending')
+                """,
+                (
+                    doc_id,
+                    block_id,
+                    content,
+                    seq_index,
+                    json.dumps(metadata or {}, ensure_ascii=False),
+                ),
+            )
+            assert cur.lastrowid is not None
+            return cur.lastrowid
+
+    def insert_heading_map(
+        self,
+        doc_id: str,
+        heading_title: str,
+        heading_level: int,
+        parent_heading: str | None,
+        block_db_ids: list[int],
+        content_summary: str | None = None,
+    ) -> int:
+        """插入 heading_map，返回 db_id."""
+        with self._connect() as conn:
+            cur = conn.execute(
+                """
+                INSERT INTO heading_maps (
+                    doc_id, heading_title, heading_level,
+                    parent_heading, block_db_ids, content_summary
+                )
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    doc_id,
+                    heading_title,
+                    heading_level,
+                    parent_heading or "",
+                    json.dumps(block_db_ids, ensure_ascii=False),
+                    content_summary or "",
+                ),
+            )
+            assert cur.lastrowid is not None
+            return cur.lastrowid
+
+    def query_blocks_by_doc(self, doc_id: str) -> list[dict]:
+        """获取文档的所有 content_blocks，按 seq_index 排序."""
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM content_blocks WHERE doc_id = ? ORDER BY seq_index",
+                (doc_id,),
+            ).fetchall()
+        return self._rows_to_blocks(rows)
+
+    def query_by_heading(self, doc_id: str, heading_title: str) -> list[dict]:
+        """按标题查询关联的 content_blocks."""
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT block_db_ids FROM heading_maps WHERE doc_id = ? AND heading_title = ?",
+                (doc_id, heading_title),
+            ).fetchone()
+            if not row:
+                return []
+            block_ids = json.loads(row["block_db_ids"] or "[]")
+            if not block_ids:
+                return []
+            placeholders = ",".join("?" * len(block_ids))
+            rows = conn.execute(
+                f"SELECT * FROM content_blocks WHERE id IN ({placeholders}) ORDER BY seq_index",
+                tuple(block_ids),
+            ).fetchall()
+        return self._rows_to_blocks(rows)
+
+    def delete_blocks_by_doc(self, doc_id: str) -> None:
+        """删除文档的所有 content_blocks."""
+        with self._connect() as conn:
+            conn.execute("DELETE FROM content_blocks WHERE doc_id = ?", (doc_id,))
+
+    def delete_heading_maps_by_doc(self, doc_id: str) -> None:
+        """删除文档的所有 heading_maps."""
+        with self._connect() as conn:
+            conn.execute("DELETE FROM heading_maps WHERE doc_id = ?", (doc_id,))
+
+    def update_block_status(self, block_db_id: int, status: str) -> None:
+        """更新 content_block 状态."""
+        with self._connect() as conn:
+            conn.execute(
+                "UPDATE content_blocks SET status = ? WHERE id = ?",
+                (status, block_db_id),
+            )
+
+    def update_blocks_embedded_batch(self, items: list[tuple]) -> None:
+        """批量更新 content_block embedding 和状态（在一个连接中完成）."""
+        with self._connect() as conn:
+            for block_db_id, embedding in items:
+                row = conn.execute(
+                    "SELECT metadata FROM content_blocks WHERE id = ?", (block_db_id,)
+                ).fetchone()
+                meta = json.loads(row["metadata"] or "{}") if row else {}
+                meta["embedding"] = embedding
+                conn.execute(
+                    "UPDATE content_blocks SET metadata = ?, status = 'embedded' WHERE id = ?",
+                    (json.dumps(meta, ensure_ascii=False), block_db_id),
+                )
+
+    def get_pending_blocks(self, doc_id: str | None = None) -> list[tuple]:
+        """获取待处理的 content_blocks."""
+        sql = (
+            "SELECT id, doc_id, block_id, content, seq_index, metadata "
+            "FROM content_blocks WHERE status = 'pending'"
+        )
+        params: tuple = ()
+        if doc_id:
+            sql += " AND doc_id = ?"
+            params = (doc_id,)
+        with self._connect() as conn:
+            rows = conn.execute(sql, params).fetchall()
+        return [
+            (
+                r["id"],
+                r["doc_id"],
+                r["block_id"],
+                r["content"],
+                r["seq_index"],
+                json.loads(r["metadata"] or "{}"),
+            )
+            for r in rows
+        ]
+
+    def get_block_by_db_id(self, db_id: int) -> dict | None:
+        """按 ID 查询单个 content_block."""
+        with self._connect() as conn:
+            row = conn.execute("SELECT * FROM content_blocks WHERE id = ?", (db_id,)).fetchone()
+        return self._rows_to_blocks([row])[0] if row else None
+
+    def _rows_to_blocks(self, rows: list[sqlite3.Row]) -> list[dict]:
+        return [
+            {
+                "id": r["id"],
+                "doc_id": r["doc_id"],
+                "block_id": r["block_id"],
+                "content": r["content"],
+                "seq_index": r["seq_index"],
+                "status": r["status"] or "pending",
+                "metadata": json.loads(r["metadata"] or "{}"),
+            }
+            for r in rows
+        ]
 
     # -- 冲突日志 --
 
