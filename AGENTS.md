@@ -149,7 +149,7 @@
 - **Mock 优先**：所有涉及外部 API 的测试使用 Fake 客户端，**禁止调用真实 API**
 - **环境隔离**：`scripts/tests/conftest.py` 在模块级别完成三重隔离（清除环境变量、阻止 `load_dotenv` 重新加载 `.env`、重定向 Config 默认路径到临时目录），确保测试不依赖外部 `.env` 或生产数据。详见 `README.md`「开发与测试」
 - **回归即修复**：任何导致测试失败的变更必须当场修复
-- **335 个测试用例必须全部通过**（2 个 skipped 为正常：真实文档参数集为空）
+- **352 个测试用例必须全部通过**（2 个 skipped 为正常：真实文档参数集为空）
 
 ### 测试文件清单
 | 测试文件 | 说明 |
@@ -219,7 +219,9 @@ monkeypatch.setattr(
 - ✅ **Pipeline 六阶段拆分**
 - ✅ **Embedding 同步单文本 API**
 - ✅ **环境隔离三重机制**：彻底根治 `.env` 污染测试环境的问题（`fc7fb38` 未根治，通过 conftest.py 清除+阻止 load_dotenv+临时目录重定向彻底解决）
-- ✅ **335 个测试全部通过**（2 个 skipped 为正常）
+- ✅ **存储粒度与查询粒度解耦（方案C）**：引入 `content_blocks` 表作为存储粒度（按 `##` section 聚合后切分），`heading_maps` 表作为查询粒度（`##`/`###` 共享同一 block 集合），batch 数量减少 40-50%，API 成本降低
+- ✅ **FAISS ID 偏移**：`_BLOCK_FAISS_OFFSET = 10_000_000` 避免 content_blocks 与兼容层 chunks 在 FAISS 中冲突
+- ✅ **352 个测试全部通过**（2 个 skipped 为正常）
 
 ### 下一阶段（精确到下一步）
 1. **可视化**：图谱可视化导出（Graphviz / D3.js）

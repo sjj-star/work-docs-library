@@ -212,8 +212,8 @@
 - **Batch API 的延迟**：避免对未变章节重复提交 Batch API，显著降低排队等待时间
 
 **实现细节**：
-- `Chunk.metadata` 存储 `content_hash`、`extracted_entities`、`extracted_relations`（⚠️ 当前未按章节过滤，缓存全文档关系）、`image_descriptions`（⚠️ 当前未按章节过滤）、`embedding`
-- `_save_chunks_to_db()` 向量化阶段分离 `reuse_pairs`（未变章节复用 embedding）和 `reembed_pairs`（变更/新增章节重新调用 Embedding API）
+- `content_blocks.metadata` 存储 `content_hash`、`extracted_entities`、`extracted_relations`、`image_descriptions`、`embedding`
+- `_save_blocks_to_db()` 向量化阶段分离 `reuse_pairs`（未变 section 复用 embedding）和 `reembed_pairs`（变更/新增 section 重新调用 Embedding API）
 - 全局图重建策略：`DocGraphPipeline._process_one()` 保存独立子图 `{doc_id}.json`；`KnowledgeBaseService.ingest_document()` 完成后清空内存全局图，从所有现有 `{doc_id}.json` 子图重新加载合并，确保无幽灵残留
 
 **权衡**：
@@ -285,118 +285,169 @@
 
 ---
 
-## 14. 为什么 ChapterParser 构建真正的多级树？
+## 14. 为什么存储粒度与查询粒度解耦？
 
-**选择**：`parse_tree()` 从扁平化的"`#` 为根、`##+` 为子节点"改为使用栈结构构建真正的多级树。
+**选择**：引入 `content_blocks` 表作为**存储粒度**（LLM batch 和向量化的基本单位），引入 `heading_maps` 表作为**查询粒度**（按章节检索的入口），两者通过 `block_db_ids` 字段关联。
 
 **原因**：
-- **父子关系准确**：`###` 应该是 `##` 的子节点，而非 `##` 的同级
-- **按原文顺序保留 content**：每个节点保留自己的原始 content，不互相合并，结构清晰
-- **标题路径前缀**：`collect_all_nodes()` 为每个 chunk 附加从根到当前节点的完整标题路径，LLM 获得完整层级上下文
+- **查询粒度和存储粒度天然不同**：用户查询 "2.1 GPIO Configuration" 时，期望看到该小节及其所有子章节（2.1.1, 2.1.2）的内容聚合。但如果按 `###` 粒度存储并直接向量化，同一 section 的子章节内容分散在不同 batch，上下文割裂
+- **减少 batch 数量**：按 `##` section 聚合后，HRPWM 文档 batch 数量从 26 降至 13（-50%），ARM 文档从 15 降至 9（-40%），API 成本直接降低
+- **保留子章节查询能力**：`heading_maps` 中 `###` 标题映射到其父 `##` section 的所有 blocks，用户查询 "2.1.1" 仍能获取整个 2.1 section 的内容
+- **独立演进**：存储粒度可随 LLM context window 扩展而增大（减少切分），查询粒度可随 heading_maps 策略优化而精细化，两者互不阻塞
 
 **实现**：
-- 遍历 flat heading 列表，使用栈确定父子关系（弹出 `level >= 当前 level` 的节点）
-- `collect_all_nodes(node)` 递归收集所有有 content 的节点，为每个节点生成 `\# Title\n\## Section\n\### Sub\n\ncontent` 格式的完整路径前缀
+
+```
+ChapterParser.parse_tree() → _collect_section_content() → _build_content_blocks_and_maps()
+    → content_blocks[] + heading_maps[]
+```
+
+**content_blocks 的生成**：
+1. 按 `##` section 聚合自身 content + 所有子孙 content（保留 Markdown 层级）
+2. 若聚合后 content 超过 `max_chars`（默认 10000），按段落边界切分为多个 blocks
+3. 每个 block 有独立 `block_id`（`b_0`, `b_1`…）和全局 `seq_index`
+
+**heading_maps 的映射**：
+- `##` 标题 → 该 section 的所有 block_db_ids
+- `###` 及以下 → 同样映射到该 section 的 block_db_ids（简化处理，避免子章节内容割裂）
 
 **权衡**：
-- chunk 数量可能略有增加（原本为空的中间节点不会产生 chunk），但增量更新更精确
+- 查询 "2.1.1" 返回整个 2.1 section 的内容，粒度略粗。若需精确到子章节的内容切片，可后续优化 heading_maps 的映射策略
+- 增量更新仍以 `###` 计算 content_hash，但 `##` 下任何 `###` 变更会导致整个 section 的 blocks 重新生成
+- 兼容层 `chunks` 表保留但不再由 pipeline 写入，`_EntityChunkBridge` 仍读取 chunks 表（未来可移除兼容层）
 
 ---
 
-## 15. 为什么 BatchBuilder 以 `##` 为硬边界、`###` 为 chunk 单位？
-
-**选择**：
-- `ChapterParser.collect_all_nodes()` 先扁平化树，收集所有有 content 的节点
-- `BatchBuilder.build_batches()` 接收扁平化节点列表，按 `max_chars` 切分，超长内容按 **段落边界**（`\n\n+`）切分为 sub-batch
-
-**原因**：
-- **按原文顺序**：每个节点保留自己的 content，不互相合并，标题路径前缀提供完整层级上下文
-- **段落边界更安全**：Markdown 空行是天然的语义边界，避免带编号的标题行（如 "Table 6. SFO Library Routines"）被句号误切开
-- **粒度适中**：小节级别（如 "2.1.1 Features"）内容通常在几千字符，适合作为 LLM batch 的基本单位
-
-**实现**：
-- `collect_all_nodes(node, ancestors)` 递归收集所有有 content 的节点，生成带标题路径前缀的 chunk
-- `build_batches` 直接遍历扁平化节点列表，content 超过 `max_chars` 时调用 `_split_by_sentences` 按段落边界切分
-
-**权衡**：
-- 单个超长段落（无空行）可能略超 `max_chars`，但代码有 fallback 不会截断
-- chunk 数量可能略有增加，但增量更新更精确（父章节和子章节独立比对 content_hash）
-
----
-
-## 16. Chunk 与 Sub-chunk 的生成链路
+## 15. Content Block 的聚合、切分与入库链路
 
 ### 概念定义
 
 | 术语 | 定义 | 示例 |
 |------|------|------|
-| **Chapter** | `ChapterParser` 按 Markdown 标题层级（`#`/`##`/`###`/`####`）解析出的树节点，包含 `title` 和 `content` | `{"title": "2.1 GPIO Configuration", "content": "..."}` |
-| **Chunk** | 数据库 `chunks` 表中的一行，是**内容存储和向量检索的最小单位** | `Chunk(chunk_id="ch_3", content="...", db_id=42)` |
-| **Sub-chunk** | 超长 chapter 被 `_maybe_split_chapter` 拆分后的产物，有自己的 `chunk_id` 和 `db_id` | `Chunk(chunk_id="ch_3_part_0", content="...前半", db_id=43)` |
+| **Section** | `ChapterParser` 按 Markdown 标题层级解析出的 `##` 级别节点，包含自身 content 和所有子孙 content | `{"title": "2.1 GPIO Configuration", "level": 2}` |
+| **Content Block** | 数据库 `content_blocks` 表中的一行，是**LLM batch 和向量化的最小单位** | `{"block_id": "b_0", "content": "...", "seq_index": 0}` |
+| **Sub-block** | 超长 section 被 `split_text_by_paragraphs` 拆分后的产物，属于同一 section 的不同片段 | `{"block_id": "b_1", "content": "...后半", "seq_index": 1}` |
+| **Heading Map** | 数据库 `heading_maps` 表中的一行，记录标题到 block 集合的映射 | `{"heading_title": "2.1", "block_db_ids": [1, 2]}` |
 
 ### 生成链路
 
 ```
-PDF → Markdown → ChapterParser.parse_tree() → collect_all_nodes()
-    → _maybe_split_chapter() → _insert_chunk() → SQLite
+PDF → Markdown → ChapterParser.parse_tree()
+    → _collect_section_content()  [递归聚合 ## + 子孙 content]
+    → split_text_by_paragraphs()  [按段落边界切分]
+    → content_blocks[]
+    → BatchBuilder.build_batches() [构建 LLM batch]
+    → _save_blocks_to_db()        [写入 SQLite]
+    → content_blocks + heading_maps
 ```
 
-1. **章节树**（`parse_tree()`）：按 `#`/`##`/`###`/`####` 构建多级树。`###` 级别的小节是"基本 chunk 单位"
-2. **扁平化**（`collect_all_nodes()`）：递归收集所有有 content 的节点，为每个节点附加从根到当前节点的完整标题路径前缀
-3. **拆分检查**（`_maybe_split_chapter()`）：
-   ```python
-   max_chars = Config.CHUNK_MAX_CHARS  # 默认 6000
-   if len(content) <= max_chars:
-       return [{**ch, "_chunk_id": f"ch_{base_idx}"}]        # 不拆分
-   parts = _split_for_embedding(content, max_chars)          # 按段落→句子切分
-   return [{**ch, "content": part, "_chunk_id": f"ch_{base_idx}_part_{i}"} for i, part in enumerate(parts)]
-   ```
-4. **入库**（`_insert_chunk()`）：每个 chunk/sub-chunk 成为数据库中的独立行
+### 聚合（`_collect_section_content`）
 
-### `_split_for_embedding` 的切分策略
+递归收集 `##` section 自身 content + 所有子孙 content，保留 Markdown heading 层级：
 
-按优先级逐级 fallback：
+```python
+def _collect_section_content(node):
+    lines = []
+    if node.title:
+        lines.append(f"{'#' * node.level} {node.title}")
+    if node.content:
+        lines.append(node.content)
+    for child in node.children:
+        child_content = _collect_section_content(child)
+        if child_content:
+            lines.append(child_content)
+    return "\n\n".join(lines).strip()
+```
 
-1. **段落边界**（`\n\n+`）：保护代码块、HTML table、Markdown table 不被截断
-2. **句子边界**（`[.!?。！？]\s+`）：标点后的空格是天然语义边界
-3. **保留原样**：若单个句子仍超长，记录 warning 并保留原样（由 API 错误处理兜底）
+第一个 section 若 root（`#`）有 content，会将 root content 作为 preface 前置到该 section。
 
-### Sub-chunk 的继承与独立性
+### 切分（`split_text_by_paragraphs`）
 
-Sub-chunk 继承父 chapter 的所有属性，但有自己的 `db_id`：
+按优先级逐级 fallback，保护结构化块不被截断：
+
+1. **结构化块保护**：代码块（```` ``` ````）、HTML table、Markdown table 先提取为占位符（`\x00BLOCK{N}\x00`），避免切分破坏结构
+2. **段落边界**（`\n\n+`）：按空行切分，恢复占位符
+3. **超长段落二次切分**：单个段落仍超限时，按句子边界（`(?<=[.!?。！？])\s+`）切分
+4. **极限 fallback**：单句仍超长则按字符边界硬切分并记录 warning
+
+### 入库（`_save_blocks_to_db`）
+
+1. **清理旧数据**：删除旧 blocks、heading_maps、chunks，同时清理 FAISS 中旧向量
+2. **插入 content_blocks**：每个 block 的 metadata 包含 `content_hash`、按 `section_title` 过滤的 `extracted_entities` / `extracted_relations` / `image_descriptions`
+3. **插入 heading_maps**：`block_ids` 替换为 SQLite `db_id`，`##` 和 `###` 都指向同一 block 集合
+4. **兼容层**：按 `section_title` 聚合 blocks，同时写入 `chunks` 表（用于增量分析和现有测试的 `_EntityChunkBridge`）
+
+### Content Block 与 Sub-block 的独立性
+
+Sub-block 继承父 section 的属性，但有自己的 `db_id`：
 
 | 属性 | 继承/独立 | 说明 |
 |------|----------|------|
 | `content` | **独立** | 拆分后的片段内容 |
-| `chunk_id` | **独立** | `ch_N_part_M` 格式 |
-| `db_id` | **独立** | SQLite 自增主键，FAISS 索引用它 |
-| `chapter_title` | 继承 | 与父 chapter 相同 |
-| `content_hash` | 继承 | 父 chapter 的 hash（用于增量更新比对） |
-| `extracted_entities` | 继承 | 父 chapter 缓存的实体引用 |
-| `extracted_relations` | 继承 | 父 chapter 缓存的关系 |
-| `image_descriptions` | 继承 | 父 chapter 合并后的图片描述 |
+| `block_id` | **独立** | `b_N` 格式 |
+| `db_id` | **独立** | SQLite 自增主键，FAISS 索引用它（加 `_BLOCK_FAISS_OFFSET` 偏移） |
+| `section_title` | 继承 | 与父 section 相同 |
+| `content_hash` | 继承 | 父 section 的 hash（用于增量更新比对） |
+| `extracted_entities` | 继承 | 父 section 缓存的实体引用 |
+| `extracted_relations` | 继承 | 父 section 缓存的关系 |
+| `image_descriptions` | 继承 | 父 section 合并后的图片描述 |
 
-### 为什么 Chunk 粒度 = 向量化粒度？
+### 为什么 Block 粒度 = 向量化粒度？
 
-数据库中的一行 = 一个向量化单位。这意味着：
-- 每个 chunk（包括 sub-chunk）独立向量化
-- sub-chunk 在 SQLite、FAISS、`_EntityChunkBridge` 中都是**一等公民**
-- 不存在"一个 chunk 对应多个向量"或"多个 chunk 合并为一个向量"的情况
-- 这彻底解决了早期版本中 batch 路径 split-chunk 未聚合导致 FAISS 重复向量的问题
+数据库 `content_blocks` 表中的一行 = 一个向量化单位。这意味着：
+- 每个 block（包括 sub-block）独立向量化
+- block 在 SQLite、FAISS、`_EntityChunkBridge` 中都是**一等公民**
+- 不存在"一个 block 对应多个向量"或"多个 block 合并为一个向量"的情况
+- `_BLOCK_FAISS_OFFSET` 确保 block db_id 与兼容层 chunk db_id 在 FAISS 中不冲突
 
-### `CHUNK_MAX_CHARS` 的设计意图
+### `LLM_BATCH_MAX_CHARS` 与 `CHUNK_MAX_CHARS` 的分工
 
-`CHUNK_MAX_CHARS`（默认 6000）控制的是**单个 chunk 的最大字符数上限**：
-- 在 **stage4（入库阶段）** 决定 chapter 是否需要拆分
-- **向量化阶段只是下游消费方**，因为 chunk 已被拆分到合适大小
-- 默认值 6000 是基于项目实际处理的 PDF 技术文档文本分布的经验参数（自然语言+代码/LaTeX 混合内容约对应 2500-2800 actual tokens）
-- 纯数字/特殊字符密集的段落可能在此限制下仍超过 3072 tokens，但这是可接受的风险——API 调用失败时会记录错误，用户可手动调低该值
+| 配置 | 默认值 | 作用阶段 | 说明 |
+|------|--------|---------|------|
+| `LLM_BATCH_MAX_CHARS` | 10000 | Stage 2 | 控制 LLM batch 请求的最大字符数，按 `##` section 聚合后若超限则切分为 sub-batch |
+| `CHUNK_MAX_CHARS` | 6000 | Stage 4（兼容层） | 控制兼容层 `chunks` 表的切分粒度，仅影响旧代码路径 |
+
+---
+
+## 16. Heading Map 查询粒度与 FAISS ID 偏移
+
+### heading_maps 的查询语义
+
+| 查询方式 | 实现 | 返回内容 |
+|---------|------|---------|
+| `query_by_heading("2.1")` | `heading_maps` 表 `heading_title` 匹配 | 该 section 的所有 content_blocks |
+| `query_by_heading("2.1.1")` | `heading_maps` 表 `heading_title` 匹配 | 父 section（2.1）的所有 content_blocks |
+| `semantic_search("GPIO")` | FAISS 搜索 | 匹配的 content_blocks |
+
+**关键设计**：`##` 和 `###` 共享同一 block 集合，保证查询时不遗漏子章节内容。`heading_level` 和 `parent_heading` 字段保留层级关系，供前端展示目录结构使用。
+
+### FAISS ID 偏移（`_BLOCK_FAISS_OFFSET = 10_000_000`）
+
+content_blocks 表和兼容层 chunks 表共享同一个 FAISS 向量索引，但两者的 `db_id` 都从 1 开始自增，可能冲突。
+
+```python
+# stage6 入库：block db_id 存入 FAISS 时加偏移
+faiss_id = block_db_id + _BLOCK_FAISS_OFFSET  # db_id=1 → faiss_id=10000001
+
+# semantic_search 查询：减去偏移还原 block db_id
+if faiss_id >= _BLOCK_FAISS_OFFSET:
+    block_db_id = faiss_id - _BLOCK_FAISS_OFFSET
+```
+
+**原因**：
+- 兼容层 `chunks` 表仍由 `_save_blocks_to_db` 写入（供增量分析和桥接索引使用）
+- 若不加偏移，block db_id=1 和 chunk db_id=1 在 FAISS 中指向同一向量，造成数据污染
+- 偏移量 10_000_000 足够大，可覆盖任何合理的 db_id 范围
+
+**权衡**：
+- 未来移除 chunks 兼容层后，可去掉偏移，直接用 block db_id 作为 faiss_id
+- 偏移增加了 `semantic_search` 和 `stage6` 的复杂度，但隔离了新旧数据，避免迁移期数据损坏
 
 ---
 
 ## 为什么需要 EntityChunkBridge 双向桥接索引？
 
-**选择**：在 `KnowledgeBaseService` 内部维护一个纯内存的 `_EntityChunkBridge`，建立 `chunk_db_id ↔ (entity_type, entity_name)` 的双向多对多映射。零 schema 变更、零数据模型变更，从 SQLite `chunk.metadata["extracted_entities"]` 构建。
+**选择**：在 `KnowledgeBaseService` 内部维护一个纯内存的 `_EntityChunkBridge`，建立 `chunk_db_id ↔ (entity_type, entity_name)` 的双向多对多映射。零 schema 变更、零数据模型变更，从 SQLite `chunk.metadata["extracted_entities"]` 构建（兼容层 chunks 表由 `_save_blocks_to_db` 按 section 聚合写入，metadata 结构与 content_blocks 一致）。
 
 **原因**：
 - **补齐单向关联的缺失**：原有架构中 chunk → entity 的关联已存在（通过 `metadata.extracted_entities`），但 entity → chunk 的反向查询缺失。`graph_provenance` 此前通过逐文档遍历所有 chunks 做暴力扫描（O(N)），不可扩展
@@ -599,7 +650,7 @@ graph_query(entity_type="Product", name="TMS320F28379D")
 - **阶段可独立执行**：stage3（API 调用，产生费用和延迟）与 stage4/5/6（本地处理，零成本）解耦。用户可以在 stage3 完成后审查结果，再决定是否执行 stage4
 - **失败可重试**：stage4 入库失败（如数据库锁定）时，无需重新调用 Batch API（避免重复付费和排队），直接重试 stage4 即可；同理 stage6 向量化失败仅需重试 stage6
 - **结果可编辑**：用户可手动修改 `batch/{doc_id}.jsonl` 后重新执行 stage3（增量过滤仍会生效），或修改 `results.jsonl` 后重新执行 stage4，修正 LLM 提取错误而无需重新调 API
-- **向量化解耦**：stage4 完成后 chunks 状态为 `embedded`，知识图谱已可查询；stage5/stage6 独立执行向量化，不阻塞图谱使用
+- **向量化解耦**：stage4 完成后 content_blocks 状态为 `embedded`，知识图谱已可查询；stage5/stage6 独立执行向量化，不阻塞图谱使用
 - **向后兼容**：`stage3_ingest()` 保留原签名，内部委托给 `stage3_submit_batches` + `stage4_ingest_results` + `stage5_build_embed_jsonl` + `stage6_submit_embed_batches`，现有调用方无需修改
 
 **中间产物清单**：
