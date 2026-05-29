@@ -46,6 +46,9 @@ from .vector_index import VectorIndex
 
 logger = logging.getLogger(__name__)
 
+# FAISS 中 block db_id 的偏移量（避免与 chunk db_id 冲突）
+_BLOCK_FAISS_OFFSET = 10_000_000
+
 # 常见芯片产品型号正则（可扩展）
 _PRODUCT_NAME_PATTERNS = [
     r"TMS320[A-Z0-9]+",
@@ -265,6 +268,111 @@ class ChapterParser:
 
 
 # ---------------------------------------------------------------------------
+# 内容块-标题映射构建（方案C）
+# ---------------------------------------------------------------------------
+
+
+def _collect_section_content(node: ChapterNode) -> str:
+    """递归收集节点及其所有子孙的 content，保留 Markdown 层级."""
+    lines: list[str] = []
+    if node.title:
+        lines.append(f"{'#' * node.level} {node.title}")
+    if node.content:
+        lines.append(node.content)
+    for child in node.children:
+        child_content = _collect_section_content(child)
+        if child_content:
+            lines.append(child_content)
+    return "\n\n".join(lines).strip()
+
+
+def _build_content_blocks_and_maps(
+    tree_chapters: list[ChapterNode],
+    max_chars: int,
+) -> tuple[list[dict], list[dict]]:
+    """构建内容块和标题映射.
+
+    对每个 ## 节点：
+    1. 聚合自身 + 所有子孙 content（保留 Markdown 层级）
+    2. 如果是第一个 section 且 root 有 content，将 root content 作为 preface
+    3. 按 max_chars 切分为 blocks
+    4. 记录每个 block 的 seq_index
+
+    heading_maps 简化处理：## 和 ### 标题都映射到该 section 的所有 block_ids.
+    """
+    content_blocks: list[dict] = []
+    heading_maps: list[dict] = []
+    global_seq = 0
+
+    for root in tree_chapters:
+        for idx, section in enumerate(root.children):  # ## 级别
+            aggregated = _collect_section_content(section)
+
+            # 第一个 section 且 root 有 content，添加 preface
+            if idx == 0 and root.content:
+                preface = (
+                    f"# {root.title}\n\n{root.content}".strip()
+                    if root.title
+                    else root.content.strip()
+                )
+                aggregated = f"{preface}\n\n{aggregated}".strip()
+
+            if not aggregated:
+                continue
+
+            chunks = split_text_by_paragraphs(aggregated, max_chars)
+
+            section_block_ids: list[str] = []
+            for chunk in chunks:
+                block_id = f"b_{global_seq}"
+                content_blocks.append(
+                    {
+                        "block_id": block_id,
+                        "seq_index": global_seq,
+                        "content": chunk,
+                        "section_title": section.title,
+                    }
+                )
+                section_block_ids.append(block_id)
+                global_seq += 1
+
+            if not section_block_ids:
+                continue
+
+            # ## 标题 → 该 section 的所有 block_ids
+            heading_maps.append(
+                {
+                    "heading_title": section.title,
+                    "heading_level": section.level,
+                    "parent_heading": root.title if root.title else "",
+                    "block_ids": list(section_block_ids),
+                }
+            )
+
+            # ### 及以下 → 也映射到该 section 的所有 block_ids（简化处理）
+            for child in section.children:
+                heading_maps.append(
+                    {
+                        "heading_title": child.title,
+                        "heading_level": child.level,
+                        "parent_heading": section.title,
+                        "block_ids": list(section_block_ids),
+                    }
+                )
+                for gc in child.children:
+                    heading_maps.append(
+                        {
+                            "heading_title": gc.title,
+                            "heading_level": gc.level,
+                            "parent_heading": child.title,
+                            "block_ids": list(section_block_ids),
+                        }
+                    )
+
+    return content_blocks, heading_maps
+
+
+# ---------------------------------------------------------------------------
 # Batch 构建器：按 Markdown 层级控制 batch 粒度
 # ---------------------------------------------------------------------------
 
@@ -352,7 +460,6 @@ def _split_md_table(text: str, max_len: int) -> list[str]:
         return [text[i : i + max_len] for i in range(0, len(text), max_len)]
 
     header_lines = lines[:2]
-    header = "\n".join(header_lines)
     data_lines = lines[2:]
 
     result = []
@@ -509,21 +616,21 @@ def _split_for_embedding(text: str, max_chars: int) -> list[str]:
 
 
 class BatchBuilder:
-    """按 # / ## 层级构建 LLM batch 请求."""
+    """按 content_block 构建 LLM batch 请求."""
 
     @classmethod
     def build_batches(
         cls,
-        chapters: list[ChapterNode],
+        content_blocks: list[dict],
         max_chars: int,
     ) -> list[list[dict[str, str]]]:
         """构建 batch 请求列表.
 
-        输入为扁平化的 ChapterNode 列表（每个节点已包含完整标题路径前缀），
-        按 max_chars 切分，超长的 content 按段落边界切分为 sub-batch。
+        每个 content_block 生成一个 batch。若 block content 超过 max_chars，
+        按段落边界切分为 sub-batch。
 
         Args:
-            chapters: 扁平化的 ChapterNode 列表（无 children）
+            content_blocks: content_block 列表，每个 dict 包含 block_id, content, section_title
             max_chars: 每批最大字符数
 
         Returns:
@@ -532,13 +639,14 @@ class BatchBuilder:
         """
         batches: list[list[dict[str, str]]] = []
 
-        for node in chapters:
-            content = node.content
+        for block in content_blocks:
+            content = block.get("content", "")
             if not content:
                 continue
-            chunks = cls._split_if_needed(node.title, content, max_chars)
+            title = block.get("section_title", "")
+            chunks = cls._split_if_needed(title, content, max_chars)
             for chunk_content in chunks:
-                batches.append([{"title": node.title, "content": chunk_content}])
+                batches.append([{"title": title, "content": chunk_content}])
 
         return batches
 
@@ -1019,14 +1127,14 @@ class DocGraphPipeline:
         self,
         doc_id: str,
         max_chars: int | None = None,
-    ) -> tuple[Path, list[list[dict[str, str]]], list[dict[str, Any]]]:
+    ) -> tuple[Path, list[list[dict[str, str]]], list[dict[str, Any]], list[dict], list[dict]]:
         """阶段2: Markdown → Batch JSONL.
 
         从 knowledge_base/parsed/{doc_id}/result.md 读取，
         生成 JSONL 到 knowledge_base/batch/{doc_id}.jsonl。
 
         Returns:
-            (jsonl_path, batches, requests)
+            (jsonl_path, batches, requests, content_blocks, heading_maps)
         """
         parsed_output_dir = Config.DB_PATH.parent / Config.PARSE_OUTPUT_DIR / doc_id
         result_md_path = parsed_output_dir / "result.md"
@@ -1037,17 +1145,13 @@ class DocGraphPipeline:
         tree_chapters = self.chapter_parser.parse_tree(extracted_text)
         logger.info(f"章节解析完成 | roots={len(tree_chapters)}")
 
-        new_chapters_flat: list[dict[str, Any]] = []
-        for root in tree_chapters:
-            new_chapters_flat.extend(ChapterParser.collect_all_nodes(root))
-
-        # 构建 batch（全部章节，不做增量过滤）
-        process_nodes = [
-            ChapterNode(level=1, title=ch["title"], content=ch["content"])
-            for ch in new_chapters_flat
-        ]
+        # 构建 content_blocks 和 heading_maps（方案C）
         max_chars = max_chars or Config.LLM_BATCH_MAX_CHARS
-        batches = BatchBuilder.build_batches(process_nodes, max_chars) if process_nodes else []
+        content_blocks, heading_maps = _build_content_blocks_and_maps(tree_chapters, max_chars)
+        logger.info(f"内容块构建完成 | blocks={len(content_blocks)} | headings={len(heading_maps)}")
+
+        # 构建 batch
+        batches = BatchBuilder.build_batches(content_blocks, max_chars) if content_blocks else []
         logger.info(f"Batch 构建完成 | batches={len(batches)}")
 
         # 构建 doc_context
@@ -1079,15 +1183,15 @@ class DocGraphPipeline:
         _build_jsonl(requests, jsonl_path)
         logger.info(f"JSONL 已生成 | path={jsonl_path} | requests={len(requests)}")
 
-        # 保存 batch_info 映射（request index -> chapter titles）
+        # 保存 batch_info 映射（request index -> block_id + section_title）
         batch_info = []
         for i, batch in enumerate(batches):
-            titles = [ch["title"] for ch in batch]
             batch_info.append(
                 {
                     "index": i,
                     "custom_id": f"batch_{i}",
-                    "chapter_titles": titles,
+                    "block_ids": [block["block_id"] for block in content_blocks[i : i + 1]],
+                    "section_title": batch[0]["title"] if batch else "",
                 }
             )
         batch_info_path = batch_dir / f"{doc_id}_batch_info.json"
@@ -1096,7 +1200,19 @@ class DocGraphPipeline:
         )
         logger.info(f"Batch info 已保存 | path={batch_info_path} | batches={len(batch_info)}")
 
-        return jsonl_path, batches, requests
+        # 保存 content_blocks 和 heading_maps 供 stage4 使用
+        blocks_path = batch_dir / f"{doc_id}_blocks.json"
+        blocks_path.write_text(
+            json.dumps(
+                {"content_blocks": content_blocks, "heading_maps": heading_maps},
+                ensure_ascii=False,
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+        logger.info(f"Blocks 已保存 | path={blocks_path} | blocks={len(content_blocks)}")
+
+        return jsonl_path, batches, requests, content_blocks, heading_maps
 
     def _read_result_md(self, doc_id: str) -> str:
         """读取 parsed/{doc_id}/result.md."""
@@ -1249,6 +1365,8 @@ class DocGraphPipeline:
                 changed_custom_ids: set[str] = set()
                 for info in batch_info:
                     titles = set(info.get("chapter_titles", []))
+                    if not titles:
+                        titles = {info.get("section_title", "")}
                     if titles & changed_titles:
                         changed_custom_ids.add(info.get("custom_id", ""))
                 requests = [
@@ -1282,12 +1400,24 @@ class DocGraphPipeline:
 
         # 回退：重新构建 requests（JSONL 不存在或为空时）
         if not requests:
-            process_nodes: list[ChapterNode] = []
+            # 从 changed + added 构建 content_blocks
+            fallback_blocks: list[dict] = []
+            seq = 0
             for ch in changed + added:
-                process_nodes.append(ChapterNode(level=1, title=ch["title"], content=ch["content"]))
+                chunks = split_text_by_paragraphs(ch["content"], Config.LLM_BATCH_MAX_CHARS)
+                for chunk in chunks:
+                    fallback_blocks.append(
+                        {
+                            "block_id": f"b_{seq}",
+                            "seq_index": seq,
+                            "content": chunk,
+                            "section_title": ch["title"],
+                        }
+                    )
+                    seq += 1
             batches = (
-                BatchBuilder.build_batches(process_nodes, Config.LLM_BATCH_MAX_CHARS)
-                if process_nodes
+                BatchBuilder.build_batches(fallback_blocks, Config.LLM_BATCH_MAX_CHARS)
+                if fallback_blocks
                 else []
             )
 
@@ -1347,7 +1477,9 @@ class DocGraphPipeline:
             "added_titles": [ch["title"] for ch in added],
             "removed_titles": [ck.chapter_title for ck in removed],
             "result_md_hash": hashlib.md5(
-                (Config.DB_PATH.parent / Config.PARSE_OUTPUT_DIR / doc_id / "result.md").read_bytes()
+                (
+                    Config.DB_PATH.parent / Config.PARSE_OUTPUT_DIR / doc_id / "result.md"
+                ).read_bytes()
             ).hexdigest(),
         }
         info_path = batch_dir / f"{doc_id}_incremental.json"
@@ -1403,9 +1535,7 @@ class DocGraphPipeline:
                         },
                     }
                 except Exception as e:
-                    logger.error(
-                        f"Chat API 调用失败 | {custom_id} ({idx + 1}/{total}) | error={e}"
-                    )
+                    logger.error(f"Chat API 调用失败 | {custom_id} ({idx + 1}/{total}) | error={e}")
                     result = {
                         "custom_id": custom_id,
                         "response": {
@@ -1470,7 +1600,9 @@ class DocGraphPipeline:
             info = json.loads(info_path.read_text(encoding="utf-8"))
             expected_hash = info.get("result_md_hash", "")
             actual_hash = hashlib.md5(
-                (Config.DB_PATH.parent / Config.PARSE_OUTPUT_DIR / doc_id / "result.md").read_bytes()
+                (
+                    Config.DB_PATH.parent / Config.PARSE_OUTPUT_DIR / doc_id / "result.md"
+                ).read_bytes()
             ).hexdigest()
             if expected_hash != actual_hash:
                 logger.warning(
@@ -1489,7 +1621,8 @@ class DocGraphPipeline:
                     actual = set(current_titles.get(key.replace("_titles", ""), []))
                     if expected != actual:
                         logger.warning(
-                            f"增量分析结果与 stage3 不一致 ({key})，删除旧增量分析并重新处理 | doc_id={doc_id}"
+                            f"增量分析结果与 stage3 不一致 ({key})，"
+                            f"删除旧增量分析并重新处理 | doc_id={doc_id}"
                         )
                         info_path.unlink(missing_ok=True)
                         break
@@ -1539,6 +1672,8 @@ class DocGraphPipeline:
                 batch_info = json.loads(batch_info_path.read_text(encoding="utf-8"))
                 for info in batch_info:
                     titles = info.get("chapter_titles", [])
+                    if not titles:
+                        titles = [info.get("section_title", "")]
                     chapter_map[info.get("custom_id", "")] = titles[0] if titles else ""
 
             ents, rels, img_descs = self.entity_extractor.extract_from_results_file(
@@ -1596,12 +1731,55 @@ class DocGraphPipeline:
                 f"modules={len({e.name for e in all_entities if e.entity_type == 'Module'})}"
             )
 
-        # --- 保存 chunks → SQLite → 向量化 ---
+        # 加载 content_blocks 和 heading_maps（从 stage2 保存的文件）
+        blocks_path = results_path.parent / f"{doc_id}_blocks.json"
+        if blocks_path.exists():
+            blocks_data = json.loads(blocks_path.read_text(encoding="utf-8"))
+            content_blocks = blocks_data.get("content_blocks", [])
+            heading_maps = blocks_data.get("heading_maps", [])
+        else:
+            content_blocks = []
+            heading_maps = []
+
+        # 如果 content_blocks 为空（文件缺失或损坏），从 chapters 构建
+        if not content_blocks:
+            logger.warning(f"content_blocks 为空，从 chapters 构建 | doc_id={doc_id}")
+            seq = 0
+            for ch in new_chapters_flat:
+                chunks = split_text_by_paragraphs(ch["content"], Config.LLM_BATCH_MAX_CHARS)
+                for chunk in chunks:
+                    content_blocks.append(
+                        {
+                            "block_id": f"b_{seq}",
+                            "seq_index": seq,
+                            "content": chunk,
+                            "section_title": ch["title"],
+                        }
+                    )
+                    seq += 1
+            # 同步构建简化 heading_maps
+            for ch in new_chapters_flat:
+                block_ids = [
+                    b["block_id"] for b in content_blocks if b["section_title"] == ch["title"]
+                ]
+                if block_ids:
+                    heading_maps.append(
+                        {
+                            "heading_title": ch["title"],
+                            "heading_level": ch.get("level", 2),
+                            "parent_heading": "",
+                            "block_ids": block_ids,
+                        }
+                    )
+
+        # --- 保存 blocks → SQLite → 向量化 ---
         try:
-            self._save_chunks_to_db(
+            self._save_blocks_to_db(
                 doc_id,
                 file_path,
                 file_hash,
+                content_blocks,
+                heading_maps,
                 new_chapters_flat,
                 extracted_text,
                 unchanged,
@@ -1648,7 +1826,7 @@ class DocGraphPipeline:
         return doc_id
 
     def stage5_build_embed_jsonl(self, doc_id: str) -> Path:
-        """阶段5: 从 SQLite chunks 构建 Embedding Batch JSONL（本地，不调用 API）.
+        """阶段5: 从 SQLite content_blocks 构建 Embedding Batch JSONL（本地，不调用 API）.
 
         Returns:
             embed_jsonl_path: `knowledge_base/batch/{doc_id}_embed.jsonl`
@@ -1657,19 +1835,19 @@ class DocGraphPipeline:
         batch_dir.mkdir(parents=True, exist_ok=True)
         embed_jsonl_path = batch_dir / f"{doc_id}_embed.jsonl"
 
-        db_chunks = self.db.query_by_doc(doc_id)
+        db_blocks = self.db.query_blocks_by_doc(doc_id)
         reembed_pairs: list[tuple[str, int]] = []
 
-        for ck in db_chunks:
-            if not ck.content.strip():
+        for block in db_blocks:
+            if not block["content"].strip():
                 continue
-            if ck.metadata.get("embedding"):
+            if block["metadata"].get("embedding"):
                 continue
-            reembed_pairs.append((ck.content, ck.id))
+            reembed_pairs.append((block["content"], block["id"] + _BLOCK_FAISS_OFFSET))
 
         if not reembed_pairs:
             embed_jsonl_path.write_text("", encoding="utf-8")
-            logger.info(f"所有 chunk 已有 embedding，生成空 JSONL | path={embed_jsonl_path}")
+            logger.info(f"所有 block 已有 embedding，生成空 JSONL | path={embed_jsonl_path}")
             return embed_jsonl_path
 
         # 构建 requests，每个 request 包含单个文本，custom_id 直接编码 db_id
@@ -1692,7 +1870,7 @@ class DocGraphPipeline:
         _build_jsonl(requests, embed_jsonl_path)
         logger.info(
             f"Embedding JSONL 已生成 | path={embed_jsonl_path} | "
-            f"chunks={len(reembed_pairs)} | requests={len(requests)}"
+            f"blocks={len(reembed_pairs)} | requests={len(requests)}"
         )
         return embed_jsonl_path
 
@@ -1715,21 +1893,21 @@ class DocGraphPipeline:
             embed_jsonl_path = batch_dir / f"{doc_id}_embed.jsonl"
 
         # 1. 收集复用 embedding
-        db_chunks = self.db.query_by_doc(doc_id)
+        db_blocks = self.db.query_blocks_by_doc(doc_id)
         all_items: list[tuple[int, list[float]]] = []
         reembed_db_ids: set[int] = set()
 
-        for ck in db_chunks:
-            emb = ck.metadata.get("embedding")
+        for block in db_blocks:
+            emb = block["metadata"].get("embedding")
             if emb:
-                all_items.append((ck.id, emb))
+                all_items.append((block["id"] + _BLOCK_FAISS_OFFSET, emb))
             else:
-                reembed_db_ids.add(ck.id)
+                reembed_db_ids.add(block["id"] + _BLOCK_FAISS_OFFSET)
 
         if not reembed_db_ids:
-            logger.info(f"所有 chunk 已有 embedding，跳过 stage6 | doc_id={doc_id}")
-            for ck in db_chunks:
-                self.db.update_chunk_status(ck.id, "done")
+            logger.info(f"所有 block 已有 embedding，跳过 stage6 | doc_id={doc_id}")
+            for block in db_blocks:
+                self.db.update_block_status(block["id"], "done")
             return doc_id
 
         # 2. 从 JSONL 读取并同步向量化
@@ -1747,7 +1925,7 @@ class DocGraphPipeline:
                         custom_id = req.get("custom_id", "")
                         # custom_id 格式: embed_dbid_{db_id}
                         try:
-                            db_id = int(custom_id.split("_")[-1])
+                            db_id = int(custom_id.split("_")[-1]) - _BLOCK_FAISS_OFFSET
                         except (ValueError, IndexError):
                             logger.warning(f"无法从 custom_id 解析 db_id | custom_id={custom_id}")
                             continue
@@ -1762,26 +1940,27 @@ class DocGraphPipeline:
 
         # 4. 统一写入 SQLite 和 FAISS（带失败回滚）
         if all_items:
-            self.db.update_chunks_embedded_batch(all_items)
+            self.db.update_blocks_embedded_batch(all_items)
             try:
                 self.vec.add_batch(all_items)
             except Exception as e:
                 logger.error(f"FAISS 添加失败，回滚 SQLite embedding | doc_id={doc_id} | error={e}")
-                for chunk_db_id, _ in all_items:
-                    ck = self.db.get_chunk_by_db_id(chunk_db_id)
-                    if ck:
-                        meta = ck.metadata.copy()
+                for block_db_id, _ in all_items:
+                    block = self.db.get_block_by_db_id(block_db_id)
+                    if block:
+                        meta = dict(block["metadata"])
                         meta.pop("embedding", None)
                         with self.db._connect() as conn:
                             conn.execute(
-                                "UPDATE chunks SET metadata = ?, status = 'embedded' WHERE id = ?",
-                                (json.dumps(meta, ensure_ascii=False), chunk_db_id),
+                                "UPDATE content_blocks SET metadata = ?, "
+                                "status = 'embedded' WHERE id = ?",
+                                (json.dumps(meta, ensure_ascii=False), block_db_id),
                             )
                 raise
 
         # 5. 更新状态为 done
-        for ck in db_chunks:
-            self.db.update_chunk_status(ck.id, "done")
+        for block in db_blocks:
+            self.db.update_block_status(block["id"], "done")
 
         return doc_id
 
@@ -1836,7 +2015,9 @@ class DocGraphPipeline:
             )
 
             # 阶段2: Markdown → JSONL
-            jsonl_path, _batches, _requests = self.stage2_build_jsonl(doc_id)
+            jsonl_path, _batches, _requests, _content_blocks, _heading_maps = (
+                self.stage2_build_jsonl(doc_id)
+            )
 
             # 阶段3: 提交 Batch API 并保存结果
             results_path = self.stage3_submit_batches(
@@ -1867,11 +2048,13 @@ class DocGraphPipeline:
                 pass
             raise
 
-    def _save_chunks_to_db(
+    def _save_blocks_to_db(
         self,
         doc_id: str,
         file_path: str,
         file_hash: str,
+        content_blocks: list[dict],
+        heading_maps: list[dict],
         chapters: list[dict[str, Any]],
         full_text: str,
         unchanged: list[tuple[dict[str, Any], list[Chunk]]] | None = None,
@@ -1882,7 +2065,7 @@ class DocGraphPipeline:
         all_entities: list[GraphEntity] | None = None,
         all_relations: list[GraphRelation] | None = None,
     ) -> None:
-        """将章节作为 chunks 保存到 SQLite（增量模式），支持向量检索，并合并图片文字化结果."""
+        """将内容块和标题映射保存到 SQLite（方案C），支持向量检索."""
         unchanged = unchanged or []
         changed = changed or []
         added = added or []
@@ -1891,95 +2074,108 @@ class DocGraphPipeline:
         all_entities = all_entities or []
         all_relations = all_relations or []
 
-        # 1. 清理旧数据（所有旧 chunks 统一清理）
+        # 1. 清理旧数据
         old_doc = self.db.get_document_by_path(file_path)
         if old_doc:
+            # 清理旧 chunks 的向量索引
             all_old = self.db.query_by_doc(old_doc.doc_id)
             if all_old:
                 self.vec.remove_doc([c.id for c in all_old])
+            # 清理旧 blocks 和 heading_maps
+            self.db.delete_blocks_by_doc(old_doc.doc_id)
+            self.db.delete_heading_maps_by_doc(old_doc.doc_id)
+            # 保留旧 chunks 用于增量分析兼容（可选清理）
             self.db.delete_chunks_by_doc(old_doc.doc_id)
 
         # 2. 准备实体/关系缓存序列化
         entity_dicts = [e.to_dict() for e in all_entities]
         relation_dicts = [r.to_dict() for r in all_relations]
 
-        def _build_metadata(ch_title: str, ch_hash: str, old_ck: Chunk | None) -> dict[str, Any]:
-            """构建 chunk metadata，包含缓存的实体/关系/embedding."""
-            ch_ents = [e for e in entity_dicts if e.get("source_chapter") == ch_title]
-            ch_ent_keys = {(e.get("type", ""), e.get("name", "")) for e in ch_ents}
-            ch_names = {e.get("name", "") for e in ch_ents}
-            ch_rels = [
+        def _build_metadata(
+            section_title: str, block_hash: str, old_meta: dict | None
+        ) -> dict[str, Any]:
+            """构建 block metadata，按 section 过滤实体/关系."""
+            section_ents = [e for e in entity_dicts if e.get("source_chapter") == section_title]
+            section_ent_keys = {(e.get("type", ""), e.get("name", "")) for e in section_ents}
+            section_names = {e.get("name", "") for e in section_ents}
+            section_rels = [
                 r
                 for r in relation_dicts
-                if (r.get("from_type", ""), r.get("from", "")) in ch_ent_keys
-                or (r.get("to_type", ""), r.get("to", "")) in ch_ent_keys
-                or r.get("from", "") in ch_names
-                or r.get("to", "") in ch_names
+                if (r.get("from_type", ""), r.get("from", "")) in section_ent_keys
+                or (r.get("to_type", ""), r.get("to", "")) in section_ent_keys
+                or r.get("from", "") in section_names
+                or r.get("to", "") in section_names
             ]
-            ch_images = [img for img in image_descriptions if img.get("chapter_title") == ch_title]
+            section_images = [
+                img for img in image_descriptions if img.get("chapter_title") == section_title
+            ]
             meta: dict[str, Any] = {
-                "content_hash": ch_hash,
-                "extracted_entities": ch_ents,
-                "extracted_relations": ch_rels,
-                "image_descriptions": ch_images,
+                "section_title": section_title,
+                "content_hash": block_hash,
+                "extracted_entities": section_ents,
+                "extracted_relations": section_rels,
+                "image_descriptions": section_images,
             }
-            if old_ck and old_ck.metadata.get("embedding"):
-                meta["embedding"] = old_ck.metadata["embedding"]
+            if old_meta and old_meta.get("embedding"):
+                meta["embedding"] = old_meta["embedding"]
             return meta
 
-        # 3. 插入所有新 chunks
-        chunk_db_ids: list[int] = []
-
-        def _maybe_split_chapter(ch: dict[str, Any], base_idx: int) -> list[dict[str, Any]]:
-            """如果 chapter content 超过向量化限制，拆分为多个 sub-chapters."""
-            content = ch["content"]
-            max_chars = Config.CHUNK_MAX_CHARS
-            if len(content) <= max_chars:
-                return [{**ch, "_chunk_id": f"ch_{base_idx}"}]
-            parts = _split_for_embedding(content, max_chars)
-            return [
-                {**ch, "content": part, "_chunk_id": f"ch_{base_idx}_part_{i}"}
-                for i, part in enumerate(parts)
-            ]
-
-        def _insert_chunk(ch: dict[str, Any], ch_hash: str, old_ck: Chunk | None) -> int:
-            merged = self._merge_image_descriptions(
-                ch["content"], ch.get("title", ""), image_descriptions
+        # 3. 插入 content_blocks
+        block_id_to_db_id: dict[str, int] = {}
+        for block in content_blocks:
+            section_title = block.get("section_title", "")
+            block_hash = hashlib.md5(block["content"].encode()).hexdigest()[:16]
+            meta = _build_metadata(section_title, block_hash, None)
+            db_id = self.db.insert_block(
+                doc_id=doc_id,
+                block_id=block["block_id"],
+                content=block["content"],
+                seq_index=block["seq_index"],
+                metadata=meta,
             )
-            chunk_id = ch.get("_chunk_id", f"ch_{len(chunk_db_ids)}")
+            block_id_to_db_id[block["block_id"]] = db_id
+
+        # 4. 插入 heading_maps（block_ids 替换为 db_ids）
+        for hm in heading_maps:
+            db_ids = [
+                block_id_to_db_id[bid]
+                for bid in hm.get("block_ids", [])
+                if bid in block_id_to_db_id
+            ]
+            if db_ids:
+                self.db.insert_heading_map(
+                    doc_id=doc_id,
+                    heading_title=hm["heading_title"],
+                    heading_level=hm["heading_level"],
+                    parent_heading=hm.get("parent_heading") or None,
+                    block_db_ids=db_ids,
+                    content_summary=hm.get("content_summary") or None,
+                )
+
+        # 5. 兼容层：同时写入 chunks 表（用于增量分析和现有测试）
+        # 按 section_title 聚合 blocks，每个 section 写入一个 chunk
+        chunk_db_ids: list[int] = []
+        section_groups: dict[str, list[dict]] = {}
+        for block in content_blocks:
+            st = block.get("section_title", "")
+            section_groups.setdefault(st, []).append(block)
+
+        for section_title, blocks in section_groups.items():
+            section_content = "\n\n".join(b["content"] for b in blocks)
+            section_hash = hashlib.md5(section_content.encode()).hexdigest()[:16]
+            meta = _build_metadata(section_title, section_hash, None)
             ck = Chunk(
                 doc_id=doc_id,
-                chunk_id=chunk_id,
-                content=merged,
+                chunk_id=f"section_{section_title}"[:64],
+                content=section_content,
                 chunk_type="text",
-                chapter_title=ch["title"],
-                metadata=_build_metadata(ch["title"], ch_hash, old_ck),
+                chapter_title=section_title,
+                metadata=meta,
             )
             db_id = self.db.insert_chunk(ck)
             chunk_db_ids.append(db_id)
-            return db_id
 
-        for ch, old_cks in unchanged:
-            base_idx = len(chunk_db_ids)
-            subs = _maybe_split_chapter(ch, base_idx)
-            # 只有当新旧 sub-chunk 数量一致时才按索引复用 embedding
-            # （_split_for_embedding 是确定性函数，content_hash 不变则拆分结果不变）
-            if old_cks and len(subs) == len(old_cks):
-                for sub, old_ck in zip(subs, old_cks):
-                    _insert_chunk(sub, sub["content_hash"], old_ck)
-            else:
-                for sub in subs:
-                    _insert_chunk(sub, sub["content_hash"], None)
-        for ch in changed:
-            base_idx = len(chunk_db_ids)
-            for sub in _maybe_split_chapter(ch, base_idx):
-                _insert_chunk(sub, sub["content_hash"], None)
-        for ch in added:
-            base_idx = len(chunk_db_ids)
-            for sub in _maybe_split_chapter(ch, base_idx):
-                _insert_chunk(sub, sub["content_hash"], None)
-
-        if not chapters:
+        if not content_blocks and not chapters:
             merged = self._merge_image_descriptions(full_text, "", image_descriptions)
             ck = Chunk(
                 doc_id=doc_id,
@@ -1997,9 +2193,9 @@ class DocGraphPipeline:
             db_id = self.db.insert_chunk(ck)
             chunk_db_ids.append(db_id)
 
-        # 4. 更新 chunk 状态为 embedded（向量化由独立 stage6 完成）
+        # 6. 更新 chunk 状态为 done（兼容层，不向量化）
         for db_id in chunk_db_ids:
-            self.db.update_chunk_status(db_id, "embedded")
+            self.db.update_chunk_status(db_id, "done")
 
     def _merge_image_descriptions(
         self,
