@@ -403,8 +403,7 @@ class BatchClient(BaseBatchClient):
                 files=files,
                 data={"purpose": "batch"},
             )
-            resp.raise_for_status()
-        return resp.json()["id"]
+        return resp["id"]
 
     def _create_batch(self, file_id: str) -> str:
         payload: dict[str, Any] = {

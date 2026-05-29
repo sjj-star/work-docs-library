@@ -27,7 +27,7 @@ class VectorIndex:
         self.id_map_path = id_map_path or Config.ID_MAP_PATH
         self._lock_path = self.index_path.with_suffix(".lock")
         self._lock_fd: int | None = None
-        self._index: faiss.IndexFlatIP | None = None
+        self._index: faiss.Index | None = None
         self._id_map: list[int] = []  # faiss internal id -> chunk db id
         self._db_ids: set[int] = set()  # 已索引的 chunk_db_id 集合（防重复）
         self._load()
@@ -109,6 +109,7 @@ class VectorIndex:
 
     def _save(self) -> None:
         """原子保存 FAISS 索引和 id_map（临时文件 + rename）。."""
+        assert self._index is not None
         # 原子写入索引
         tmp_index = self.index_path.with_suffix(".faiss.tmp")
         faiss.write_index(self._index, str(tmp_index))
