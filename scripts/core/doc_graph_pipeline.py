@@ -344,7 +344,7 @@ def _build_content_blocks_and_maps(
                 {
                     "heading_title": section.title,
                     "heading_level": section.level,
-                    "parent_heading": root.title if root.title else "",
+                    "parent_heading": root.title or None,
                     "block_ids": list(section_block_ids),
                 }
             )
@@ -355,7 +355,7 @@ def _build_content_blocks_and_maps(
                     {
                         "heading_title": child.title,
                         "heading_level": child.level,
-                        "parent_heading": section.title,
+                        "parent_heading": section.title or None,
                         "block_ids": list(section_block_ids),
                     }
                 )
@@ -364,7 +364,7 @@ def _build_content_blocks_and_maps(
                         {
                             "heading_title": gc.title,
                             "heading_level": gc.level,
-                            "parent_heading": child.title,
+                            "parent_heading": child.title or None,
                             "block_ids": list(section_block_ids),
                         }
                     )
@@ -1897,14 +1897,21 @@ class DocGraphPipeline:
         all_items: list[tuple[int, list[float]]] = []
         reembed_db_ids: set[int] = set()
 
+        # 1. 收集复用 embedding（统一使用 block_db_id，无偏移）
+        sqlite_items: list[tuple[int, list[float]]] = []
+        faiss_items: list[tuple[int, list[float]]] = []
+        reembed_block_ids: set[int] = set()
+
         for block in db_blocks:
             emb = block["metadata"].get("embedding")
+            block_db_id = block["id"]
             if emb:
-                all_items.append((block["id"] + _BLOCK_FAISS_OFFSET, emb))
+                sqlite_items.append((block_db_id, emb))
+                faiss_items.append((block_db_id + _BLOCK_FAISS_OFFSET, emb))
             else:
-                reembed_db_ids.add(block["id"] + _BLOCK_FAISS_OFFSET)
+                reembed_block_ids.add(block_db_id)
 
-        if not reembed_db_ids:
+        if not reembed_block_ids:
             logger.info(f"所有 block 已有 embedding，跳过 stage6 | doc_id={doc_id}")
             for block in db_blocks:
                 self.db.update_block_status(block["id"], "done")
@@ -1923,9 +1930,10 @@ class DocGraphPipeline:
                 try:
                     for req in requests:
                         custom_id = req.get("custom_id", "")
-                        # custom_id 格式: embed_dbid_{db_id}
+                        # custom_id 格式: embed_dbid_{faiss_id}
                         try:
-                            db_id = int(custom_id.split("_")[-1]) - _BLOCK_FAISS_OFFSET
+                            faiss_id = int(custom_id.split("_")[-1])
+                            block_db_id = faiss_id - _BLOCK_FAISS_OFFSET
                         except (ValueError, IndexError):
                             logger.warning(f"无法从 custom_id 解析 db_id | custom_id={custom_id}")
                             continue
@@ -1934,18 +1942,19 @@ class DocGraphPipeline:
                             logger.warning(f"JSONL request 中 input 为空 | custom_id={custom_id}")
                             continue
                         emb = embedder.embed_single(text)
-                        all_items.append((db_id, emb))
+                        sqlite_items.append((block_db_id, emb))
+                        faiss_items.append((faiss_id, emb))
                 finally:
                     embedder.close()
 
-        # 4. 统一写入 SQLite 和 FAISS（带失败回滚）
-        if all_items:
-            self.db.update_blocks_embedded_batch(all_items)
+        # 4. 统一写入 SQLite（block_db_id）和 FAISS（faiss_id），带失败回滚
+        if sqlite_items:
+            self.db.update_blocks_embedded_batch(sqlite_items)
             try:
-                self.vec.add_batch(all_items)
+                self.vec.add_batch(faiss_items)
             except Exception as e:
                 logger.error(f"FAISS 添加失败，回滚 SQLite embedding | doc_id={doc_id} | error={e}")
-                for block_db_id, _ in all_items:
+                for block_db_id, _ in sqlite_items:
                     block = self.db.get_block_by_db_id(block_db_id)
                     if block:
                         meta = dict(block["metadata"])
@@ -2154,6 +2163,11 @@ class DocGraphPipeline:
 
         # 5. 兼容层：同时写入 chunks 表（用于增量分析和现有测试）
         # 按 section_title 聚合 blocks，每个 section 写入一个 chunk
+        # 使用原始 chapter content hash（与 _incremental_analysis 一致）
+        chapter_hash_map: dict[str, str] = {}
+        for ch in chapters:
+            chapter_hash_map[ch["title"]] = hashlib.md5(ch["content"].encode()).hexdigest()[:16]
+
         chunk_db_ids: list[int] = []
         section_groups: dict[str, list[dict]] = {}
         for block in content_blocks:
@@ -2162,7 +2176,10 @@ class DocGraphPipeline:
 
         for section_title, blocks in section_groups.items():
             section_content = "\n\n".join(b["content"] for b in blocks)
-            section_hash = hashlib.md5(section_content.encode()).hexdigest()[:16]
+            # 优先使用原始 chapter content hash（与增量分析一致），fallback 到聚合内容 hash
+            section_hash = chapter_hash_map.get(
+                section_title, hashlib.md5(section_content.encode()).hexdigest()[:16]
+            )
             meta = _build_metadata(section_title, section_hash, None)
             ck = Chunk(
                 doc_id=doc_id,
@@ -2193,7 +2210,13 @@ class DocGraphPipeline:
             db_id = self.db.insert_chunk(ck)
             chunk_db_ids.append(db_id)
 
-        # 6. 更新 chunk 状态为 done（兼容层，不向量化）
+        # 6. 更新 content_blocks 状态为 embedded
+        for block in content_blocks:
+            block_db_id = block_id_to_db_id.get(block["block_id"])
+            if block_db_id:
+                self.db.update_block_status(block_db_id, "embedded")
+
+        # 7. 更新 chunk 状态为 done（兼容层，不向量化）
         for db_id in chunk_db_ids:
             self.db.update_chunk_status(db_id, "done")
 

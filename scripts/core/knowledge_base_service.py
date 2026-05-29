@@ -51,10 +51,14 @@ class _EntityChunkBridge:
         return refs
 
     def rebuild(self, db: KnowledgeDB) -> None:
-        """全量重建：遍历 SQLite 所有 chunks 的 metadata."""
+        """全量重建：遍历 SQLite 所有 content_blocks 和 chunks 的 metadata."""
         self._forward.clear()
         self._reverse.clear()
         for doc in db.list_documents():
+            # 优先遍历 content_blocks（方案C主存储）
+            for block in db.query_blocks_by_doc(doc.doc_id):
+                self.attach(block["id"], self._extract_refs(block))
+            # 兼容层 chunks
             for ck in db.query_by_doc(doc.doc_id):
                 self.attach(ck.id, self._extract_refs(ck))
         logger.info(
