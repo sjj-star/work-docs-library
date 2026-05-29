@@ -94,9 +94,7 @@ class BaseLLMClient:
             for item in m["content"]
             if isinstance(item, dict) and item.get("type") == "image_url"
         )
-        logger.info(
-            f"LLM 请求开始 | text_len={text_len} | images={img_count} | timeout={timeout}s"
-        )
+        logger.info(f"LLM 请求开始 | text_len={text_len} | images={img_count} | timeout={timeout}s")
         start_time = time.time()
 
         for attempt in range(self.MAX_RETRY_ATTEMPTS):

@@ -70,7 +70,12 @@ class BaseBatchClient(ABC):
         self.MAX_FILE_SIZE_MB = Config.BATCH_MAX_FILE_SIZE_MB
 
     def _post(
-        self, url: str, payload: dict | None = None, files: dict | None = None, data: dict | None = None, timeout: int | None = None
+        self,
+        url: str,
+        payload: dict | None = None,
+        files: dict | None = None,
+        data: dict | None = None,
+        timeout: int | None = None,
     ) -> dict[str, Any]:
         timeout = timeout or Config.LLM_TIMEOUT
         """发送 POST 请求."""
@@ -79,7 +84,9 @@ class BaseBatchClient(ABC):
             headers = {k: v for k, v in self.headers.items() if k.lower() != "content-type"}
             resp = self._session.post(url, headers=headers, files=files, data=data, timeout=timeout)
         else:
-            resp = self._session.post(url, headers=self.headers, json=payload, data=data, timeout=timeout)
+            resp = self._session.post(
+                url, headers=self.headers, json=payload, data=data, timeout=timeout
+            )
         resp.raise_for_status()
         return resp.json()
 
@@ -391,7 +398,6 @@ class BatchClient(BaseBatchClient):
                 files = {"file": (file_path.name, f, self.upload_mime_type)}
             else:
                 files = {"file": (file_path.name, f)}
-            headers = {k: v for k, v in self.headers.items() if k.lower() != "content-type"}
             resp = self._post(
                 self.files_url,
                 files=files,
@@ -426,5 +432,3 @@ class BatchClient(BaseBatchClient):
 
     def _delete_file(self, file_id: str) -> None:
         self._delete(f"{self.files_url}/{file_id}")
-
-

@@ -760,9 +760,7 @@ class NetworkXGraphStore(GraphStore):
                     new_score = self._completeness_score(entity.properties)
                     old_doc_id = self._find_property_source(existing_doc_props, k, current_val)
                     if old_doc_id:
-                        old_score = self._completeness_score(
-                            existing_doc_props.get(old_doc_id, {})
-                        )
+                        old_score = self._completeness_score(existing_doc_props.get(old_doc_id, {}))
                         if new_score > old_score:
                             merged_props[k] = v
                     else:
@@ -902,9 +900,7 @@ class NetworkXGraphStore(GraphStore):
                     new_score = self._completeness_score(relation.properties)
                     old_doc_id = self._find_property_source(existing_doc_props, k, current_val)
                     if old_doc_id:
-                        old_score = self._completeness_score(
-                            existing_doc_props.get(old_doc_id, {})
-                        )
+                        old_score = self._completeness_score(existing_doc_props.get(old_doc_id, {}))
                         if new_score > old_score:
                             merged_props[k] = v
                     else:
