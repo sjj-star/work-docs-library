@@ -24,7 +24,7 @@
 | 核心架构决策（Batch API、NetworkX、零数据丢失等 11 项） | `DESIGN.md` 第 1–10 章 | 每项决策的选择原因、实现细节与权衡 |
 | Pipeline 六阶段拆分与中间产物持久化 | `DESIGN.md` 第 19 章 | 产物清单、状态管理、开发约束 |
 | 防御性编程与状态安全原则（7 条） | `DESIGN.md` 第 20 章 | 2026-04 审计 21 项缺陷的教训总结 |
-| Chunk/Sub-chunk 概念与生成链路 | `DESIGN.md` 第 16 章 | 概念定义、继承表、切分策略、设计意图 |
+| Block/Sub-block 概念与生成链路 | `DESIGN.md` 第 16 章 | 概念定义、继承表、切分策略、设计意图 |
 | Prompt 设计演进与策略约束 | `DESIGN.md` 第 22 章 | 三步提取流程、代码排除规则、属性格式规范、变更历史 |
 | 配置系统与完整配置项速查 | `README.md`「配置说明」 | 四层优先级、全部活跃配置项（~45 项） |
 | 环境隔离与测试基础设施 | `README.md`「开发与测试」 | conftest.py 三重隔离机制 |
@@ -167,7 +167,7 @@
 | `test_graph_store.py` | NetworkX 图谱存储 CRUD、冲突检测、属性索引、子图、路径搜索、持久化、`doc_properties` 测试 |
 | `test_batch_clients.py` | Batch API 客户端（Kimi + BigModel）Mock 测试 |
 | `test_knowledge_base_service.py` | KnowledgeBaseService 统一服务层测试 |
-| `test_knowledge_base_service_queries.py` | 语义-图谱联合查询、chunk+实体联合返回测试 |
+| `test_knowledge_base_service_queries.py` | 语义-图谱联合查询、block+实体联合返回测试 |
 | `test_bigmodel_parser_client.py` | BigModel 解析客户端全路径覆盖测试 |
 | `test_entity_extractor.py` | EntityExtractor multimodal batch 请求构建测试 |
 | `test_batch_builder.py` | BatchBuilder 切分保护与空 content 过滤测试 |
@@ -208,7 +208,7 @@ monkeypatch.setattr(
 - ✅ **图谱动态更新接口**：Plugin 暴露 4 个写工具
 - ✅ **冲突检测与日志**
 - ✅ **语义-图谱联合查询**
-- ✅ **chunk+实体联合返回**
+- ✅ **block+实体联合返回**
 - ✅ **用户反馈机制**
 - ✅ **IC 关系扩展**
 - ✅ **处理器架构图谱扩展（C28x+CLA）**
@@ -220,7 +220,7 @@ monkeypatch.setattr(
 - ✅ **Embedding 同步单文本 API**
 - ✅ **环境隔离三重机制**：彻底根治 `.env` 污染测试环境的问题（`fc7fb38` 未根治，通过 conftest.py 清除+阻止 load_dotenv+临时目录重定向彻底解决）
 - ✅ **存储粒度与查询粒度解耦（方案C）**：引入 `content_blocks` 表作为存储粒度（按 `##` section 聚合后切分），`heading_maps` 表作为查询粒度（`##`/`###` 共享同一 block 集合），batch 数量减少 40-50%，API 成本降低
-- ✅ **FAISS ID 偏移**：`_BLOCK_FAISS_OFFSET = 10_000_000` 避免 content_blocks 与兼容层 chunks 在 FAISS 中冲突
+- ✅ **FAISS ID 偏移**：`_BLOCK_FAISS_OFFSET = 10_000_000` 避免 block db_id 与旧 chunks ID 在 FAISS 中冲突
 - ✅ **352 个测试全部通过**（2 个 skipped 为正常）
 
 ### 下一阶段（精确到下一步）

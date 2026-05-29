@@ -14,7 +14,7 @@
   "tools": [
     {
       "name": "ingest",
-      "description": "提取并存储文档到知识库，生成 embedding 和 chunk。一键式完成全部六阶段处理。",
+      "description": "提取并存储文档到知识库，生成 embedding 和 content_block。一键式完成全部六阶段处理。",
       "command": [
         ".venv/bin/python3",
         "scripts/plugin_router.py",
@@ -71,7 +71,7 @@
     },
     {
       "name": "query",
-      "description": "按章节标题或概念查询 chunk",
+      "description": "按章节标题或概念查询 content_block",
       "command": [
         ".venv/bin/python3",
         "scripts/plugin_router.py",
@@ -167,7 +167,7 @@
     },
     {
       "name": "get_content",
-      "description": "获取文档的完整章节或 chunk 原始内容（不截断），可选同时返回关联的图谱实体和关系。with_entities=true 时必须同时提供 chunk_db_id",
+      "description": "获取文档的完整章节或 content_block 原始内容（不截断），可选同时返回关联的图谱实体和关系。with_entities=true 时必须同时提供 chunk_db_id",
       "command": [
         ".venv/bin/python3",
         "scripts/plugin_router.py",
@@ -186,7 +186,7 @@
           },
           "chunk_db_id": {
             "type": "integer",
-            "description": "Chunk 数据库 ID"
+            "description": "Block 数据库 ID"
           },
           "with_entities": {
             "type": "boolean",
@@ -546,7 +546,7 @@
     },
     {
       "name": "graph_provenance",
-      "description": "查询知识图谱实体的来源溯源：从实体追溯到提取它的原始文档、章节和 chunk。用于调试和验证图谱准确性。",
+      "description": "查询知识图谱实体的来源溯源：从实体追溯到提取它的原始文档、章节和 content_block。用于调试和验证图谱准确性。",
       "command": [
         ".venv/bin/python3",
         "scripts/plugin_router.py",
@@ -657,7 +657,7 @@
     },
     {
       "name": "doc_ingest_results",
-      "description": "从 Batch API 结果文件解析实体、构建图谱、保存 chunks（不含向量化，向量化由 doc_submit_embed_batches 完成）",
+      "description": "从 Batch API 结果文件解析实体、构建图谱、保存 content_blocks（不含向量化，向量化由 doc_submit_embed_batches 完成）",
       "command": [
         ".venv/bin/python3",
         "scripts/plugin_router.py",
@@ -691,7 +691,7 @@
     },
     {
       "name": "doc_build_embed_jsonl",
-      "description": "阶段5：从已入库的 chunks 构建 Embedding Batch JSONL 文件。本地生成，不调用 API，可审查后执行 doc_submit_embed_batches",
+      "description": "阶段5：从已入库的 content_blocks 构建 Embedding Batch JSONL 文件。本地生成，不调用 API，可审查后执行 doc_submit_embed_batches",
       "command": [
         ".venv/bin/python3",
         "scripts/plugin_router.py",

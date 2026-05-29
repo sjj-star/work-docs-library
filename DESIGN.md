@@ -85,7 +85,7 @@
 **具体措施**：
 - `BatchBuilder` 按 `#` 硬边界、`##` 可合并 构建 batch，确保不跨 `#` 截断
 - 图片不单独处理，按原文引用顺序嵌入到文档流中，与文本统一送入 LLM
-- 图片必须先由 LLM 文字化（`image_descriptions`），再合并到 chunk 文本中向量化
+- 图片必须先由 LLM 文字化（`image_descriptions`），再合并到 block 文本中向量化
 
 **权衡**：
 - batch 数量可能增加，导致 Batch API 调用次数上升
@@ -139,7 +139,7 @@
 - **单用户场景**：本项目为本地部署的 Kimi CLI Plugin，无多用户并发需求
 - **零运维**：无需安装、配置、维护数据库服务，一个 `.db` 文件即完整数据库
 - **事务简单**：`KnowledgeDB._connect()` 使用上下文管理器，自动 commit/close
-- **足够当前需求**：当前 Schema 包含 `_schema_meta`（版本管理）、`documents`（文档元数据）、`chunks`（内容块）、`conflict_logs`（同名实体属性冲突日志）、`feedback`（实体/关系用户反馈）五张表，无复杂查询
+- **足够当前需求**：当前 Schema 包含 `_schema_meta`（版本管理）、`documents`（文档元数据）、`content_blocks`（内容块）、`heading_maps`（标题映射）、`conflict_logs`（同名实体属性冲突日志）、`feedback`（实体/关系用户反馈）六张表，无复杂查询
 
 **权衡**：
 - 单进程写入为主；FAISS 已加 `fcntl` 进程级文件锁防并发覆盖，但不建议多进程并发 reprocess
@@ -159,7 +159,7 @@
 **具体规则**：
 - `#` → 文档标题（书名），永不跨 `#` 合并
 - `##` → 章节，硬边界（不跨 `##` 合并）
-- `###` → 子章节/小节，基本 chunk 单位，内容较短时与同层级兄弟合并
+- `###` → 子章节/小节，基本 block 单位，内容较短时与同层级兄弟合并
 - `#` 和第一个 `##` 之间的文字 → **移动**到第一个 `##` 的 preface（父节点 content 清空，子节点 content 前置）
 
 > 注：BatchBuilder 的硬边界与合并规则详见第15节。
@@ -314,7 +314,7 @@ ChapterParser.parse_tree() → _collect_section_content() → _build_content_blo
 **权衡**：
 - 查询 "2.1.1" 返回整个 2.1 section 的内容，粒度略粗。若需精确到子章节的内容切片，可后续优化 heading_maps 的映射策略
 - 增量更新仍以 `###` 计算 content_hash，但 `##` 下任何 `###` 变更会导致整个 section 的 blocks 重新生成
-- 兼容层 `chunks` 表保留但不再由 pipeline 写入，`_EntityChunkBridge` 仍读取 chunks 表（未来可移除兼容层）
+- ~~兼容层 `chunks` 表已废弃并删除~~。`_EntityChunkBridge` 从 `content_blocks` 表全量重建
 
 ---
 
@@ -372,10 +372,10 @@ def _collect_section_content(node):
 
 ### 入库（`_save_blocks_to_db`）
 
-1. **清理旧数据**：删除旧 blocks、heading_maps、chunks，同时清理 FAISS 中旧向量
+1. **清理旧数据**：删除旧 blocks、heading_maps，同时清理 FAISS 中旧向量（使用偏移 ID）
 2. **插入 content_blocks**：每个 block 的 metadata 包含 `content_hash`、按 `section_title` 过滤的 `extracted_entities` / `extracted_relations` / `image_descriptions`
 3. **插入 heading_maps**：`block_ids` 替换为 SQLite `db_id`，`##` 和 `###` 都指向同一 block 集合
-4. **兼容层**：按 `section_title` 聚合 blocks，同时写入 `chunks` 表（用于增量分析和现有测试的 `_EntityChunkBridge`）
+4. ~~兼容层已删除~~：不再写入 `chunks` 表
 
 ### Content Block 与 Sub-block 的独立性
 
@@ -398,14 +398,14 @@ Sub-block 继承父 section 的属性，但有自己的 `db_id`：
 - 每个 block（包括 sub-block）独立向量化
 - block 在 SQLite、FAISS、`_EntityChunkBridge` 中都是**一等公民**
 - 不存在"一个 block 对应多个向量"或"多个 block 合并为一个向量"的情况
-- `_BLOCK_FAISS_OFFSET` 确保 block db_id 与兼容层 chunk db_id 在 FAISS 中不冲突
+- `_BLOCK_FAISS_OFFSET` 确保 block db_id 在 FAISS 中唯一（偏移后不与旧 chunks ID 冲突）
 
 ### `LLM_BATCH_MAX_CHARS` 与 `CHUNK_MAX_CHARS` 的分工
 
 | 配置 | 默认值 | 作用阶段 | 说明 |
 |------|--------|---------|------|
 | `LLM_BATCH_MAX_CHARS` | 10000 | Stage 2 | 控制 LLM batch 请求的最大字符数，按 `##` section 聚合后若超限则切分为 sub-batch |
-| `CHUNK_MAX_CHARS` | 6000 | Stage 4（兼容层） | 控制兼容层 `chunks` 表的切分粒度，仅影响旧代码路径 |
+| ~~`CHUNK_MAX_CHARS`~~ | ~~6000~~ | ~~Stage 4（兼容层）~~ | ~~已废弃，兼容层 `chunks` 表已删除~~ |
 
 ---
 
@@ -423,7 +423,7 @@ Sub-block 继承父 section 的属性，但有自己的 `db_id`：
 
 ### FAISS ID 偏移（`_BLOCK_FAISS_OFFSET = 10_000_000`）
 
-content_blocks 表和兼容层 chunks 表共享同一个 FAISS 向量索引，但两者的 `db_id` 都从 1 开始自增，可能冲突。
+content_blocks 表的 `db_id` 从 1 开始自增。旧架构中兼容层 chunks 表也使用自增 ID，两者共享 FAISS 索引时可能冲突。
 
 ```python
 # stage6 入库：block db_id 存入 FAISS 时加偏移
@@ -435,48 +435,47 @@ if faiss_id >= _BLOCK_FAISS_OFFSET:
 ```
 
 **原因**：
-- 兼容层 `chunks` 表仍由 `_save_blocks_to_db` 写入（供增量分析和桥接索引使用）
-- 若不加偏移，block db_id=1 和 chunk db_id=1 在 FAISS 中指向同一向量，造成数据污染
+- 若不加偏移，block db_id=1 和旧 chunk db_id=1 在 FAISS 中可能指向同一向量，造成数据污染
 - 偏移量 10_000_000 足够大，可覆盖任何合理的 db_id 范围
 
 **权衡**：
-- 未来移除 chunks 兼容层后，可去掉偏移，直接用 block db_id 作为 faiss_id
-- 偏移增加了 `semantic_search` 和 `stage6` 的复杂度，但隔离了新旧数据，避免迁移期数据损坏
+- 偏移增加了 `semantic_search` 和 `stage6` 的复杂度，需解析 `custom_id` 还原 block_db_id
+- 未来清理旧 FAISS 索引后，可考虑是否保留偏移
 
 ---
 
 ## 为什么需要 EntityChunkBridge 双向桥接索引？
 
-**选择**：在 `KnowledgeBaseService` 内部维护一个纯内存的 `_EntityChunkBridge`，建立 `chunk_db_id ↔ (entity_type, entity_name)` 的双向多对多映射。零 schema 变更、零数据模型变更，从 SQLite `chunk.metadata["extracted_entities"]` 构建（兼容层 chunks 表由 `_save_blocks_to_db` 按 section 聚合写入，metadata 结构与 content_blocks 一致）。
+**选择**：在 `KnowledgeBaseService` 内部维护一个纯内存的 `_EntityChunkBridge`，建立 `block_db_id ↔ (entity_type, entity_name)` 的双向多对多映射。零 schema 变更、零数据模型变更，从 SQLite `content_blocks.metadata["extracted_entities"]` 构建。
 
 **原因**：
-- **补齐单向关联的缺失**：原有架构中 chunk → entity 的关联已存在（通过 `metadata.extracted_entities`），但 entity → chunk 的反向查询缺失。`graph_provenance` 此前通过逐文档遍历所有 chunks 做暴力扫描（O(N)），不可扩展
-- **打通不同粒度空间**：FAISS 向量索引操作的是 chunk 粒度（文本片段 + embedding），NetworkX 图谱操作的是 entity 粒度（结构化实体 + 关系）。桥接索引使两者可以双向导航
+- **补齐单向关联的缺失**：原有架构中 block → entity 的关联已存在（通过 `metadata.extracted_entities`），但 entity → block 的反向查询缺失。`graph_provenance` 此前通过逐文档遍历所有 blocks 做暴力扫描（O(N)），不可扩展
+- **打通不同粒度空间**：FAISS 向量索引操作的是 block 粒度（文本片段 + embedding），NetworkX 图谱操作的是 entity 粒度（结构化实体 + 关系）。桥接索引使两者可以双向导航
 - **支持策略层灵活组合**：机制层只提供原子操作（`_chunk_to_entities` / `_entity_to_chunks` / `_get_chunk` / `_semantic_hits` / `_get_subgraph`），策略层可自由组合出任意跨粒度查询（语义→图谱→语义闭环、路径文本证据链等）
 
 **实现**：
 ```python
-_forward:  dict[int, set[_EntityRef]]     # chunk_id → {EntityRef}
-_reverse:  dict[_EntityRef, set[int]]     # EntityRef → {chunk_id}
+_forward:  dict[int, set[_EntityRef]]     # block_id → {EntityRef}
+_reverse:  dict[_EntityRef, set[int]]     # EntityRef → {block_id}
 ```
 
 **生命周期**：
 - `KnowledgeBaseService.__init__` → `bridge.rebuild()` 全量构建
 - `ingest_document` / `reprocess_document` 完成后 → `_sync_bridge_for_doc()` 增量同步
-- `attach()` 幂等设计：同一 chunk 重复 attach 会先 detach 旧绑定，避免索引累积
+- `attach()` 幂等设计：同一 block 重复 attach 会先 detach 旧绑定，避免索引累积
 - `detach()` 双向清理：同时清除 `_forward` 和 `_reverse`，空集合自动删除
 
 **不同粒度关联矩阵**：
 
 | 方向 | 粒度 | 已有/新增 | 机制 |
 |------|------|----------|------|
-| chunk → entity | 向量→图谱 | 已有 | `metadata.extracted_entities` |
-| entity → chunk | 图谱→向量 | **新增** | `_entity_to_chunks()` O(1) |
+| block → entity | 向量→图谱 | 已有 | `metadata.extracted_entities` |
+| entity → block | 图谱→向量 | **新增** | `_entity_to_chunks()` O(1) |
 | document → entity | 文档→图谱 | 已有 | `GraphEntity.source_doc_ids` |
 | entity → document | 图谱→文档 | 已有 | `GraphEntity.source_doc_ids` |
 | chapter → entity | 章节→图谱 | 已有 | `GraphEntity.source_chapter` |
-| chunk → subgraph | 向量→子图 | 已有 | `search_with_graph()` |
-| subgraph → chunk | 子图→向量 | **可组合** | 子图实体 → `_entity_to_chunks()` |
+| block → subgraph | 向量→子图 | 已有 | `search_with_graph()` |
+| subgraph → block | 子图→向量 | **可组合** | 子图实体 → `_entity_to_chunks()` |
 
 **权衡**：
 - 内存索引，重启需重建（但 `KnowledgeBaseService` 为长生命周期单例，初始化成本可忽略：几百文档 × 几十实体）
@@ -489,10 +488,10 @@ _reverse:  dict[_EntityRef, set[int]]     # EntityRef → {chunk_id}
 **设计**：`search_with_graph()` 使用原子操作组合实现语义搜索与图谱查询的联合。
 
 **原子操作层（机制，无策略参数）**：
-- `_semantic_hits(query, top_k)` → FAISS 搜索，返回 `[(chunk_db_id, score), ...]`
-- `_get_chunk(chunk_db_id)` → 深拷贝获取 Chunk 对象
-- `_chunk_to_entities(chunk_db_id)` → 桥接索引正向查询，返回 `set[_EntityRef]`
-- `_entity_to_chunks(entity_type, name)` → 桥接索引反向查询，返回 `set[chunk_db_id]`
+- `_semantic_hits(query, top_k)` → FAISS 搜索，返回 `[(block_db_id, score), ...]`
+- `_get_chunk(block_db_id)` → 深拷贝获取 Chunk 对象（内存表示）
+- `_chunk_to_entities(block_db_id)` → 桥接索引正向查询，返回 `set[_EntityRef]`
+- `_entity_to_chunks(entity_type, name)` → 桥接索引反向查询，返回 `set[block_db_id]`
 - `get_entity(type, name)` / `get_subgraph(type, name, depth)` → 图谱空间查询
 
 **策略组合示例**：
@@ -508,12 +507,12 @@ graph_provenance 优化（图谱→向量）:
   _semantic_hits → _chunk_to_entities → get_subgraph → 子图实体 _entity_to_chunks → _get_chunk
 ```
 
-**chunk+实体联合返回**：`get_content_with_entities(chunk_db_id)` 使用 `_get_chunk` + `_chunk_to_entities` + `get_entity` + `get_entity_relations`，返回 chunk 内容 + 全局图中最新状态的关联实体/关系（深拷贝隔离）。
+**block+实体联合返回**：`get_content_with_entities(block_db_id)` 使用 `_get_chunk` + `_chunk_to_entities` + `get_entity` + `get_entity_relations`，返回 block 内容 + 全局图中最新状态的关联实体/关系（深拷贝隔离）。
 
 **Agent 自主推理能力**：
 - Agent 可先用 `search_with_graph` 找到相关文本和图谱实体
 - 再用 `graph_neighbors`/`graph_path`/`graph_subgraph` 做多跳推理
-- 通过 `find_chunks_by_entity` 从任意实体反向查找支撑它的原始文本 chunks
+- 通过 `find_chunks_by_entity` 从任意实体反向查找支撑它的原始文本 blocks
 - 发现错误时用 `graph_feedback` 标记，`feedback_score` 实时汇总到实体属性
 - 发现缺失/错误关联时用 `graph_add_entity`/`graph_add_relation`/`graph_update_entity` 动态修正
 
@@ -669,7 +668,7 @@ graph_query(entity_type="Product", name="TMS320F28379D")
 **状态管理**：
 - `PROCESSING` → stage3 提交中
 - `BATCH_SUBMITTED` → stage3 完成，等待 stage4
-- `embedded` → stage4 完成（chunks 已入库，图谱已构建，但未向量化）
+- `embedded` → stage4 完成（content_blocks 已入库，图谱已构建，但未向量化）
 - `DONE` → stage6 完成（向量化已入库）
 
 **权衡**：
@@ -886,12 +885,12 @@ Step 1: 内容分类（8 种类型）
 | **Embedding 维度不可变** | FAISS 索引创建后维度固定 | 更换模型时删除旧索引并重新处理 |
 | **JSONL 100MB 限制** | Kimi/BigModel Batch API 的硬性限制 | `submit_parallel_batches()` 自动拆分并行提交 |
 | **NetworkX 内存上限** | 全局图为内存存储，随文档数量增长可能达到 GB 级 | 当前单机目标规模可接受；预留 Neo4j 迁移接口 |
-| **图片需先文字化** | embedding-3 不支持图片输入 | LLM 先生成 `image_descriptions`，再合并到 chunk 文本 |
+| **图片需先文字化** | embedding-3 不支持图片输入 | LLM 先生成 `image_descriptions`，再合并到 block 文本 |
 | **本地 PDF 解析目录页换行** | 目录页多行条目保留为多行 | 目录页对知识提取影响小，接受此行为 |
 | **本地 PDF 解析依赖 TOC** | 无 TOC 的 PDF 回退到启发式规则 | `_fallback_heading_detection` 提供降级方案 |
 | **_is_heading 仅识别 Markdown #** | 已删除数字编号/中文编号匹配，目录条目（如 "1 Introduction 7"）不再被识别为 heading | 目录文本被收集为 heading 之间的 content，可能混入正文 batch；当前接受此行为，后续可通过机制层策略处理 |
 | **冲突日志无关系级记录** | `add_relation` 冲突只记录 property_key，不记录完整关系上下文 | 冲突日志包含 from/to/type 信息，可定位 |
-| **反馈不反向更新 chunk metadata** | 全局图更新后，chunk metadata 中的 extracted_entities 仍是处理时快照 | `get_content_with_entities` 查全局图获取最新状态 |
+| **反馈不反向更新 block metadata** | 全局图更新后，block metadata 中的 extracted_entities 仍是处理时快照 | `get_content_with_entities` 查全局图获取最新状态 |
 
 ---
 

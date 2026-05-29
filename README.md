@@ -114,7 +114,7 @@ flowchart TB
 4. **阶段4（解析入库，不含向量化）**：从 `results.jsonl` 解析 `entities`/`relationships`/`image_descriptions`，复用未变 section 的缓存实体/关系。`GraphStore`（NetworkX）构建图谱，**同名同类型实体自动去重合并**，每个文档保存独立子图 `graphs/{doc_id}.json`。同时保存每个文档的原始属性快照到 `doc_properties[doc_id]`，支持按文档精确查询。提取产品型号建立 `Product --[HAS_MODULE]--> Module` 关系。content_blocks 和 heading_maps 写入 SQLite，content_block 状态设为 `embedded`；每个 block 的 `metadata.extracted_entities` 缓存该 block 中提及的实体引用，作为后续跨粒度桥接索引的唯一数据源
 5. **阶段5（构建 Embedding JSONL）**：从 SQLite 查询状态为 `embedded` 且暂无 `metadata.embedding` 的 content_blocks，每个 block 生成一个单文本 request（`custom_id` 编码 `db_id + _BLOCK_FAISS_OFFSET`），生成 `{doc_id}_embed.jsonl`
 6. **阶段6（同步 Embedding 向量化）**：读取 `{doc_id}_embed.jsonl`，逐条调用同步 Embedding API（默认 BigModel `embedding-3`），解析 `custom_id` 还原 block `db_id`（减去 `_BLOCK_FAISS_OFFSET`），结果写入 SQLite `metadata.embedding` + FAISS `IndexFlatIP`（block db_id 加偏移存入），content_block 状态更新为 `done`
-7. **跨粒度桥接索引**：`KnowledgeBaseService` 内部维护 `_EntityChunkBridge`，在 `__init__` 时从所有 chunks 的 `metadata.extracted_entities` 全量构建 `chunk_db_id ↔ (entity_type, entity_name)` 双向映射。`ingest_document` / `reprocess_document` 完成后自动同步。提供 O(1) 的正向查询（chunk→entities）和反向查询（entity→chunks），打通向量空间与图谱空间
+7. **跨粒度桥接索引**：`KnowledgeBaseService` 内部维护 `_EntityChunkBridge`，在 `__init__` 时从所有 content_blocks 的 `metadata.extracted_entities` 全量构建 `block_db_id ↔ (entity_type, entity_name)` 双向映射。`ingest_document` / `reprocess_document` 完成后自动同步。提供 O(1) 的正向查询（block→entities）和反向查询（entity→blocks），打通向量空间与图谱空间
 8. **全局图谱重建**：`KnowledgeBaseService.ingest_document()` 完成后**全量重建**全局图 `graphs/global.json`（`clear()` + 遍历所有子图重新加载），确保无幽灵残留，实现**跨文档知识互通**
 
 ### 输入文档约束
@@ -307,10 +307,10 @@ cp scripts/.env.example scripts/.env
 - **输出**: `batch/{doc_id}_embed.jsonl`
 - **分组逻辑**: 每个需要向量化的 block 生成一个独立 request，`custom_id` 编码 `db_id + _BLOCK_FAISS_OFFSET`（格式 `embed_block_{db_id + offset}`），`body.input` 为单字符串
 - **产物格式**: `embed.jsonl` 每行 body.input 是单个字符串（block content）
-- **干预**: 编辑 `embed.jsonl`（删除不想向量化的 chunks）
+- **干预**: 编辑 `embed.jsonl`（删除不想向量化的 blocks）
 - **⚠️ 关键限制**:
   - 删除行：可直接删除，不影响其他行（每个 request 独立）
-  - 新增行：不建议新增（新 chunk 需先有 db_id）
+  - 新增行：不建议新增（新 block 需先有 db_id）
 - **触发下一阶段**: `/doc_submit_embed_batches {doc_id}`
 
 #### 阶段6: 同步 Embedding 向量化
@@ -373,11 +373,11 @@ Kimi CLI 通过 `plugin.json` 注册以下工具：
 | `doc_parse` | 阶段1：PDF → Markdown + 图片（可手动调整） |
 | `doc_build_batches` | 阶段2：Markdown → Batch JSONL（本地生成，不调用 API） |
 | `doc_submit_batches` | 阶段3：读取 `batch/{doc_id}.jsonl`（支持用户编辑后重新提交），提交 Batch API 并保存原始结果文件 |
-| `doc_build_embed_jsonl` | 阶段5：从已入库 chunks 构建 Embedding Batch JSONL（本地，可审查） |
+| `doc_build_embed_jsonl` | 阶段5：从已入库 content_blocks 构建 Embedding Batch JSONL（本地，可审查） |
 | `doc_submit_embed_batches` | 阶段6：提交 Embedding Batch API 并解析结果入库（完成向量化） |
-| `doc_ingest_results` | 阶段4：从结果文件解析实体、构建图谱、保存 chunks（不含向量化） |
+| `doc_ingest_results` | 阶段4：从结果文件解析实体、构建图谱、保存 content_blocks（不含向量化） |
 | `semantic_search` | 语义向量搜索（`graph_depth=0`）+ 可选关联图谱扩展（`graph_depth>0`） |
-| `query` | 按章节、关键词、概念查询 chunk |
+| `query` | 按章节、关键词、概念查询 content_block |
 | `status` | 列出所有已导入文档，或查看指定文档的详细状态与进度 |
 | `toc` | 查看文档目录 |
 | `reprocess` | 强制重新处理文档 |
@@ -390,7 +390,7 @@ Kimi CLI 通过 `plugin.json` 注册以下工具：
 | `graph_delete_relation` | 删除关系 |
 | `graph_feedback` | 提交（`action=submit`）或查询（`action=query`）对实体/关系的反馈 |
 | `graph_conflicts` | 查询冲突日志 |
-| `graph_provenance` | 实体来源溯源：从图谱实体通过桥接索引 O(1) 反向查找原始文档 chunk（调试与验证） |
+| `graph_provenance` | 实体来源溯源：从图谱实体通过桥接索引 O(1) 反向查找原始文档 content_block（调试与验证） |
 | `rebuild_global_graph` | 全量重建全局图谱（修复不一致） |
 | `config` | 打印当前生效配置（支持脱敏） |
 
@@ -441,7 +441,7 @@ Kimi CLI 通过 `plugin.json` 注册以下工具：
 | `WORKDOCS_EMBEDDING_DIMENSION` | `embedding.dimension` | `1024` | 向量维度 |
 | `WORKDOCS_EMBEDDING_BATCH_ENDPOINT` | `embedding.batch_endpoint` | `/v4/embeddings` | ~~Embedding Batch API endpoint~~（已废弃，Embedding 改为同步单文本 API） |
 | `WORKDOCS_EMBED_BATCH_TIMEOUT` | `embedding.batch_timeout` | `3600` | ~~Embedding Batch API 轮询超时（秒）~~（已废弃） |
-| `WORKDOCS_CHUNK_MAX_CHARS` | `chunk.max_chars` | `6000` | **兼容层 chunks 表的最大字符数上限**。仅影响 `_save_blocks_to_db()` 写入兼容层 chunks 时的切分。主存储 `content_blocks` 使用 `LLM_BATCH_MAX_CHARS`（默认 10000）控制切分 |
+| `WORKDOCS_CHUNK_MAX_CHARS` | `chunk.max_chars` | `6000` | ~~**兼容层 chunks 表的最大字符数上限**~~（已废弃，兼容层 chunks 表已删除）。主存储 `content_blocks` 使用 `LLM_BATCH_MAX_CHARS`（默认 10000）控制切分 |
 | `WORKDOCS_EMBED_MAX_RETRIES` | `embedding.max_retries` | `3` | Embedding 同步请求最大重试次数 |
 | `WORKDOCS_EMBED_RETRY_BACKOFF` | `embedding.retry_backoff` | `2` | Embedding 重试退避系数（秒） |
 | `WORKDOCS_EMBED_TIMEOUT` | `embedding.timeout` | `120` | Embedding 同步请求超时（秒） |
@@ -582,19 +582,19 @@ config.json 方式（持久化）：
 | `block_db_ids` | JSON 数组，指向 `content_blocks.id` 列表 |
 | `content_summary` | 内容摘要（可选） |
 
-#### `chunks` — 内容块（兼容层，不再由 pipeline 写入）
+#### `chunks` — 内容块（~~兼容层~~，已废弃）
 | 字段 | 说明 |
 |------|------|
 | `id` (PK, AUTOINCREMENT) | SQLite 自增 ID |
 | `doc_id` (FK) | 所属文档 |
-| `chunk_id` | 逻辑 ID |
+| ~~`chunk_id`~~ | ~~逻辑 ID~~ |
 | `content` | 原始提取内容 |
-| `chunk_type` | `text` / `table` / `image_desc` |
+| ~~`chunk_type`~~ | ~~`text` / `table` / `image_desc`~~ |
 | `chapter_title` | 所属章节 |
 | `metadata` | JSON：嵌入向量、content_hash、extracted_entities 等 |
 | `status` | `pending` → `embedded` → `done` |
 
-> ⚠️ `chunks` 表保留用于兼容层：`_save_blocks_to_db()` 按 `section_title` 聚合 content_blocks 后同时写入 chunks 表，供增量分析和 `_EntityChunkBridge` 使用。未来移除兼容层后可删除此表。
+> ⚠️ `chunks` 表已废弃，不再由 pipeline 写入。所有内容存储已迁移至 `content_blocks` + `heading_maps`。
 
 ### 四存储系统架构
 
@@ -602,10 +602,10 @@ config.json 方式（持久化）：
 
 | 存储 | 职责 | 持久化 | 原子性 |
 |------|------|--------|--------|
-| **SQLite** | 文档元数据、content_blocks、heading_maps、chunks（兼容层） | `workdocs.db` | 单连接事务（自动 commit） |
+| **SQLite** | 文档元数据、content_blocks、heading_maps | `workdocs.db` | 单连接事务（自动 commit） |
 | **FAISS** | 向量索引（语义搜索） | `faiss.index` + `id_map.json` | 文件级原子写入（临时文件 + rename）+ `fcntl` 进程锁 |
 | **NetworkX** | 全局知识图谱（实体+关系） | `{doc_id}.json`（子图）+ `global.json`（全局图） | 内存操作 + 文件原子写入 |
-| **Bridge** | chunk/block ↔ 实体 双向索引 | 纯内存（重启从 SQLite 重建） | 内存级 |
+| **Bridge** | block ↔ 实体 双向索引 | 纯内存（重启从 SQLite 重建） | 内存级 |
 
 #### `content_blocks.metadata` JSON 结构
 
@@ -645,7 +645,7 @@ pending ────────────────────────
 | 方向 | 关联机制 | 一致性保证 |
 |------|---------|-----------|
 | SQLite block → FAISS | `block.id`（db_id）+ `_BLOCK_FAISS_OFFSET` → `_id_map[faiss_id]` | FAISS 已加 `fcntl` 进程锁，修改前 `_reload()` 磁盘最新状态；SQLite + FAISS 仍非分布式事务，但单进程内已防并发覆盖 |
-| FAISS → SQLite | `_id_map[faiss_id]` → `db.get_block_by_db_id(db_id)` 或 `db.get_chunk_by_db_id(db_id)` | 搜索时回查 SQLite 获取最新内容 |
+| FAISS → SQLite | `_id_map[faiss_id]` → `db.get_block_by_db_id(db_id)` | 搜索时回查 SQLite 获取最新内容 |
 | SQLite block → Graph | `block.metadata["extracted_entities"]` | 实体提取时写入 block metadata，作为 Bridge 索引的数据源 |
 | Graph → SQLite block | `_EntityChunkBridge._reverse[EntityRef]` | ingest/reprocess 完成后 `_sync_bridge_for_doc()` 增量同步 |
 | Graph 子图 → 全局图 | `ingest_document()` 增量合并；`reprocess_document()` 先移除旧贡献再合并 | `_save_global_graph()` 原子持久化到 `global.json`。崩溃后可从子图 `rebuild_global_graph()` 重建。 |
@@ -723,7 +723,7 @@ WORKDOCS_PARSER_API_KEY=your-api-key
 
 为减少过度提取和跨类型误提取，Prompt 要求 LLM 按以下三步执行：
 
-1. **Step 1 — 内容分类**：先将 chunk 内容归类为 9 种类型之一（寄存器字段描述表格、信号/参数表格、代码示例、架构描述、协议状态机、勘误/电气规格、概述/介绍、指令参考、其他）
+1. **Step 1 — 内容分类**：先将 block 内容归类为 9 种类型之一（寄存器字段描述表格、信号/参数表格、代码示例、架构描述、协议状态机、勘误/电气规格、概述/介绍、指令参考、其他）
 2. **Step 2 — 按类型提取**：仅在对应类型范围内提取实体
    - RegisterField **只能从寄存器字段描述表格**中提取
    - 代码示例中**禁止提取任何实体**（零容忍）
