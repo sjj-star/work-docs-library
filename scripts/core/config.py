@@ -121,6 +121,9 @@ class Config:
     LLM_BATCH_MAX_CHARS: int = 0  # 将在下方初始化
     LLM_BATCH_TIMEOUT: int = 0  # 将在下方初始化
 
+    # Content Block 存储粒度配置（向量化粒度，字符数限制）
+    BLOCK_MAX_CHARS: int = 0  # 将在下方初始化
+
     # --- API Endpoint 配置（服务商无感化） ---
     LLM_BATCH_ENDPOINT: str = _resolve_config(
         "WORKDOCS_LLM_BATCH_ENDPOINT", "llm.batch_endpoint", "/v1/chat/completions"
@@ -192,6 +195,9 @@ class Config:
         )
         cls.LLM_BATCH_MAX_CHARS = int(
             _resolve_config("WORKDOCS_LLM_BATCH_MAX_CHARS", "llm.batch_max_chars", "10000")
+        )
+        cls.BLOCK_MAX_CHARS = int(
+            _resolve_config("WORKDOCS_BLOCK_MAX_CHARS", "block.max_chars", "6000")
         )
         cls.LLM_BATCH_TIMEOUT = int(
             _resolve_config("WORKDOCS_LLM_BATCH_TIMEOUT", "llm.batch_timeout", "3600")

@@ -287,28 +287,103 @@ class KnowledgeDB:
         return self._rows_to_blocks(rows)
 
     def query_by_heading(self, doc_id: str, heading_title: str) -> list[dict]:
-        """按标题查询关联的 content_blocks."""
+        """按标题子串匹配查询关联的 content_blocks（按 heading_level 排序）."""
+        if not heading_title:
+            return []
         with self._connect() as conn:
-            row = conn.execute(
-                "SELECT block_db_ids FROM heading_maps WHERE doc_id = ? AND heading_title = ?",
+            rows = conn.execute(
+                "SELECT block_db_ids FROM heading_maps "
+                "WHERE doc_id = ? AND heading_title LIKE '%' || ? || '%' "
+                "ORDER BY heading_level, heading_title",
                 (doc_id, heading_title),
-            ).fetchone()
-            if not row:
+            ).fetchall()
+            if not rows:
                 return []
-            block_ids = json.loads(row["block_db_ids"] or "[]")
+            block_ids: list[int] = []
+            seen: set[int] = set()
+            for row in rows:
+                for bid in json.loads(row["block_db_ids"] or "[]"):
+                    if bid not in seen:
+                        seen.add(bid)
+                        block_ids.append(bid)
             if not block_ids:
                 return []
             placeholders = ",".join("?" * len(block_ids))
-            rows = conn.execute(
+            cb_rows = conn.execute(
                 f"SELECT * FROM content_blocks WHERE id IN ({placeholders}) ORDER BY seq_index",
                 tuple(block_ids),
             ).fetchall()
-        return self._rows_to_blocks(rows)
+        return self._rows_to_blocks(cb_rows)
+
+    def query_by_heading_recursive(
+        self, doc_id: str, heading_title: str
+    ) -> list[dict]:
+        """递归查询标题及其所有子标题关联的 content_blocks.
+
+        先按子串匹配找到目标标题，再递归收集 parent_heading 指向它的所有子标题.
+
+        先按子串匹配找到目标标题，再递归收集 parent_heading 指向它的所有子标题.
+        """
+        with self._connect() as conn:
+            # 1. 找到匹配的目标标题（按层级排序，取第一个最匹配的）
+            target_rows = conn.execute(
+                "SELECT heading_title, block_db_ids FROM heading_maps "
+                "WHERE doc_id = ? AND heading_title LIKE '%' || ? || '%' "
+                "ORDER BY heading_level, heading_title",
+                (doc_id, heading_title),
+            ).fetchall()
+            if not target_rows:
+                return []
+
+            target_title = target_rows[0]["heading_title"]
+            all_block_ids: list[int] = []
+            seen: set[int] = set()
+
+            def _collect(title: str) -> None:
+                # 收集当前标题的 blocks
+                rows = conn.execute(
+                    "SELECT block_db_ids FROM heading_maps "
+                    "WHERE doc_id = ? AND heading_title = ?",
+                    (doc_id, title),
+                ).fetchall()
+                for row in rows:
+                    for bid in json.loads(row["block_db_ids"] or "[]"):
+                        if bid not in seen:
+                            seen.add(bid)
+                            all_block_ids.append(bid)
+                # 递归收集子标题
+                child_rows = conn.execute(
+                    "SELECT heading_title FROM heading_maps "
+                    "WHERE doc_id = ? AND parent_heading = ?",
+                    (doc_id, title),
+                ).fetchall()
+                for cr in child_rows:
+                    _collect(cr["heading_title"])
+
+            _collect(target_title)
+
+            if not all_block_ids:
+                return []
+            placeholders = ",".join("?" * len(all_block_ids))
+            cb_rows = conn.execute(
+                f"SELECT * FROM content_blocks WHERE id IN ({placeholders}) ORDER BY seq_index",
+                tuple(all_block_ids),
+            ).fetchall()
+        return self._rows_to_blocks(cb_rows)
 
     def delete_blocks_by_doc(self, doc_id: str) -> None:
         """删除文档的所有 content_blocks."""
         with self._connect() as conn:
             conn.execute("DELETE FROM content_blocks WHERE doc_id = ?", (doc_id,))
+
+    def query_heading_maps_by_doc(self, doc_id: str) -> list[dict]:
+        """获取文档的所有 heading_maps."""
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM heading_maps WHERE doc_id = ? ORDER BY heading_level, heading_title",
+                (doc_id,),
+            ).fetchall()
+        return [dict(r) for r in rows]
 
     def delete_heading_maps_by_doc(self, doc_id: str) -> None:
         """删除文档的所有 heading_maps."""

@@ -295,10 +295,15 @@ def _build_content_blocks_and_maps(
     对每个 ## 节点：
     1. 聚合自身 + 所有子孙 content（保留 Markdown 层级）
     2. 如果是第一个 section 且 root 有 content，将 root content 作为 preface
-    3. 按 max_chars 切分为 blocks
+    3. 按 BLOCK_MAX_CHARS 切分为向量化粒度 blocks
     4. 记录每个 block 的 seq_index
 
-    heading_maps 简化处理：## 和 ### 标题都映射到该 section 的所有 block_ids.
+    heading_maps：##/###/#### 都映射到该 section 的所有 block_ids.
+    LLM batch 阶段（BatchBuilder）将同一 section 的多个 blocks 聚合为更大粒度.
+
+    Args:
+        tree_chapters: 章节树
+        max_chars: 保留参数（兼容旧调用），实际使用 Config.BLOCK_MAX_CHARS
     """
     content_blocks: list[dict] = []
     heading_maps: list[dict] = []
@@ -320,7 +325,8 @@ def _build_content_blocks_and_maps(
             if not aggregated:
                 continue
 
-            chunks = split_text_by_paragraphs(aggregated, max_chars)
+            # 按向量化粒度细切（激活 _split_for_embedding）
+            chunks = _split_for_embedding(aggregated, Config.BLOCK_MAX_CHARS)
 
             section_block_ids: list[str] = []
             for chunk in chunks:
@@ -607,10 +613,11 @@ def _split_for_embedding(text: str, max_chars: int) -> list[str]:
 
         if current:
             if len(current) > max_chars:
-                logger.warning(
-                    f"Embedding 文本仍超长，保留原样 | chars={len(current)} | max_chars={max_chars}"
-                )
-            result.append(current)
+                # 兜底：按字符硬切分（极端情况，如无标点长文本）
+                for i in range(0, len(current), max_chars):
+                    result.append(current[i : i + max_chars])
+            else:
+                result.append(current)
 
     return result if result else [text]
 
@@ -626,25 +633,34 @@ class BatchBuilder:
     ) -> list[list[dict[str, str]]]:
         """构建 batch 请求列表.
 
-        每个 content_block 生成一个 batch。若 block content 超过 max_chars，
-        按段落边界切分为 sub-batch。
+        按 section_title 聚合 content_blocks，保持 LLM 大粒度提取。
+        聚合后若超过 max_chars，再按段落边界切分为 sub-batch。
 
         Args:
             content_blocks: content_block 列表，每个 dict 包含 block_id, content, section_title
-            max_chars: 每批最大字符数
+            max_chars: 每批最大字符数（LLM_BATCH_MAX_CHARS）
 
         Returns:
             每个内部列表代表一个 batch，包含一个或多个 chunk dict
 
         """
-        batches: list[list[dict[str, str]]] = []
+        from collections import defaultdict
 
+        # 按 section_title 分组聚合
+        section_groups: defaultdict[str, list[str]] = defaultdict(list)
         for block in content_blocks:
-            content = block.get("content", "")
-            if not content:
-                continue
             title = block.get("section_title", "")
-            chunks = cls._split_if_needed(title, content, max_chars)
+            content = block.get("content", "")
+            if content:
+                section_groups[title].append(content)
+
+        batches: list[list[dict[str, str]]] = []
+        for title, contents in section_groups.items():
+            aggregated = "\n\n".join(contents).strip()
+            if not aggregated:
+                continue
+            # 聚合后若超过上限，再切分
+            chunks = cls._split_if_needed(title, aggregated, max_chars)
             for chunk_content in chunks:
                 batches.append([{"title": title, "content": chunk_content}])
 

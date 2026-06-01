@@ -411,6 +411,7 @@ class KnowledgeBaseService:
         chapter: str | None = None,
         chapter_regex: str | None = None,
         concept: str | None = None,
+        include_children: bool = False,
         top_k: int = Config.PLUGIN_QUERY_TOP_K,
     ) -> list[Chunk]:
         """统一 chunk 结构化查询（基于 content_blocks + heading_maps）.
@@ -420,6 +421,7 @@ class KnowledgeBaseService:
             chapter: 章节标题子串匹配
             chapter_regex: 章节标题正则匹配
             concept: 概念名匹配（需 doc_id）
+            include_children: 是否包含子章节内容（仅 chapter 查询有效）
             top_k: 最大返回数量
 
         Returns:
@@ -432,7 +434,10 @@ class KnowledgeBaseService:
         if chapter is not None:
             if not doc_id:
                 raise ValueError("chapter query requires doc_id")
-            blocks = self.db.query_by_heading(doc_id, chapter)
+            if include_children:
+                blocks = self.db.query_by_heading_recursive(doc_id, chapter)
+            else:
+                blocks = self.db.query_by_heading(doc_id, chapter)
             for block in blocks:
                 results.append(
                     Chunk(
@@ -449,12 +454,28 @@ class KnowledgeBaseService:
         elif chapter_regex:
             if not doc_id:
                 raise ValueError("chapter_regex query requires doc_id")
-            # 基于 content_blocks 的正则查询
+            # 利用 heading_maps 索引缩小范围，避免全表扫描
             import re
 
             compiled = re.compile(chapter_regex)
-            for block in self.db.query_blocks_by_doc(doc_id):
-                if compiled.search(block["metadata"].get("section_title", "")):
+            # 先查 heading_maps 获取候选标题
+            candidate_titles: set[str] = set()
+            for hm in self.db.query_heading_maps_by_doc(doc_id):
+                if compiled.search(hm["heading_title"]):
+                    candidate_titles.add(hm["heading_title"])
+            # 聚合匹配的 block_db_ids
+            seen_ids: set[int] = set()
+            all_block_ids: list[int] = []
+            for title in candidate_titles:
+                for block in self.db.query_by_heading(doc_id, title):
+                    bid = block["id"]
+                    if bid not in seen_ids:
+                        seen_ids.add(bid)
+                        all_block_ids.append(bid)
+            # 按 seq_index 查询 content_blocks
+            for bid in sorted(all_block_ids):
+                block = self.db.get_block_by_db_id(bid)
+                if block:
                     results.append(
                         Chunk(
                             id=block["id"],
