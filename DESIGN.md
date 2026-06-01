@@ -19,7 +19,7 @@
 
 1. **处理时间不可接受**：BigModel Embedding Batch API 的实际处理时间高达 **9 小时**，而同步单文本 API 仅需**分钟级**完成。9 小时的等待使 pipeline 失去实用价值。
 
-2. **Tokenizer 不透明导致切分策略复杂**：BigModel embedding-3 的 tokenizer 与 tiktoken 不存在固定比例关系（对数字/单独字母接近字符级编码，对自然语言使用子词编码），导致按 token 分组的逻辑复杂且容易触发 3072 token 上限错误。实验后改为纯字符数限制（`CHUNK_MAX_CHARS = 6000`），彻底解决了分组问题。
+2. **Tokenizer 不透明导致切分策略复杂**：BigModel embedding-3 的 tokenizer 与 tiktoken 不存在固定比例关系（对数字/单独字母接近字符级编码，对自然语言使用子词编码），导致按 token 分组的逻辑复杂且容易触发 3072 token 上限错误。当前使用 tiktoken 本地估算 token 数，配合段落→句子三级语义保护切分（`_split_for_embedding`），按 3000 tokens 动态分组，彻底解决了超限问题。
 
 **经验**：Batch API 的延迟不是统一的——LLM Batch API（分钟级）与 Embedding Batch API（小时级）有数量级差异。当外部 tokenizer 不透明时，**字符数限制是比 token 估算更可靠的切分策略**。
 
@@ -400,12 +400,11 @@ Sub-block 继承父 section 的属性，但有自己的 `db_id`：
 - 不存在"一个 block 对应多个向量"或"多个 block 合并为一个向量"的情况
 - `_BLOCK_FAISS_OFFSET` 确保 block db_id 在 FAISS 中唯一（偏移后不与旧 chunks ID 冲突）
 
-### `LLM_BATCH_MAX_CHARS` 与 `CHUNK_MAX_CHARS` 的分工
+### `LLM_BATCH_MAX_CHARS` 与 Embedding 切分策略
 
 | 配置 | 默认值 | 作用阶段 | 说明 |
 |------|--------|---------|------|
 | `LLM_BATCH_MAX_CHARS` | 10000 | Stage 2 | 控制 LLM batch 请求的最大字符数，按 `##` section 聚合后若超限则切分为 sub-batch |
-| ~~`CHUNK_MAX_CHARS`~~ | ~~6000~~ | ~~Stage 4（兼容层）~~ | ~~已废弃，兼容层 `chunks` 表已删除~~ |
 
 ---
 
