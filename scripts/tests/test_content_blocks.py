@@ -94,21 +94,28 @@ def test_build_content_blocks_with_subsections():
 
 
 def test_build_content_blocks_split_by_max_chars():
-    """超长的 section content 应按 max_chars 切分为多个 blocks."""
-    root = ChapterNode(level=1, title="Doc", content="")
-    long_content = "A" * 300 + "\n\n" + "B" * 300
-    sec1 = ChapterNode(level=2, title="Section 1", content=long_content)
-    root.children = [sec1]
+    """超长的 section content 应按 BLOCK_MAX_CHARS 切分为多个 blocks."""
+    from core.config import Config
 
-    content_blocks, heading_maps = _build_content_blocks_and_maps([root], max_chars=400)
+    original_max = Config.BLOCK_MAX_CHARS
+    Config.BLOCK_MAX_CHARS = 400
+    try:
+        root = ChapterNode(level=1, title="Doc", content="")
+        long_content = "A" * 300 + "\n\n" + "B" * 300
+        sec1 = ChapterNode(level=2, title="Section 1", content=long_content)
+        root.children = [sec1]
 
-    # 应切分为至少 2 个 blocks
-    assert len(content_blocks) >= 2
-    assert all(block["section_title"] == "Section 1" for block in content_blocks)
+        content_blocks, heading_maps = _build_content_blocks_and_maps([root], max_chars=400)
 
-    # heading_maps 中 Section 1 应指向所有 blocks
-    sec1_hm = next(hm for hm in heading_maps if hm["heading_title"] == "Section 1")
-    assert len(sec1_hm["block_ids"]) == len(content_blocks)
+        # 应切分为至少 2 个 blocks
+        assert len(content_blocks) >= 2
+        assert all(block["section_title"] == "Section 1" for block in content_blocks)
+
+        # heading_maps 中 Section 1 应指向所有 blocks
+        sec1_hm = next(hm for hm in heading_maps if hm["heading_title"] == "Section 1")
+        assert len(sec1_hm["block_ids"]) == len(content_blocks)
+    finally:
+        Config.BLOCK_MAX_CHARS = original_max
 
 
 def test_build_content_blocks_seq_index():
