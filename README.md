@@ -109,7 +109,7 @@ flowchart TB
 **数据流说明：**
 
 1. **阶段1（解析）**：`BigModelParserClient` 调用 **BigModel 专用** Expert API 解析 PDF，输出 Markdown 文本（含 `![alt](images/xxx.jpg)` 图片引用）+ `images/` 目录（⚠️ 该 API 非 OpenAI-compatible，仅支持 BigModel 厂商；失败时自动 fallback 到本地 `PDFParser`，输出格式完全一致）
-2. **阶段2（构建 LLM Batch）**：`ChapterParser.parse_tree()` 将 Markdown 解析为树形章节结构（`#` 文档标题，`##` 章节，`###+` 子章节）。`_collect_section_content()` 按 `##` section 递归聚合自身 content + 所有子孙 content（保留 Markdown 层级）。`_build_content_blocks_and_maps()` 将聚合后的 content 按 `max_chars` 切分为 content_blocks，同时构建 `heading_maps`（`##` 和 `###` 都映射到同一 section 的 block 集合）。`BatchBuilder.build_batches()` 接收 content_blocks 列表，超长内容按段落边界（`\n\n+`）切分为 sub-batch，同时保护代码块/表格不被截断。`EntityExtractor` 流式解析图片引用，按原文顺序构建 multimodal content（文本 → `[image_id: alt]` → base64 图片），生成 `{doc_id}.jsonl` + `{doc_id}_batch_info.json`
+2. **阶段2（构建 LLM Batch）**：`ChapterParser.parse_tree()` 将 Markdown 解析为树形章节结构（`#` 文档标题，`##` 章节，`###+` 子章节）。`_collect_section_content()` 按 `##` section 递归聚合自身 content + 所有子孙 content（保留 Markdown 层级）。`_build_content_blocks_and_maps()` 使用 `_split_for_embedding()` 按 `BLOCK_MAX_CHARS`（默认 6000）将聚合内容切分为**向量化粒度**的 content_blocks（段落→句子→字符硬切分兜底，保护代码块/表格）。同时构建 `heading_maps`（`##`/`###`/`####` 都映射到同一 section 的 block 集合）。`BatchBuilder.build_batches()` **按 `section_title` 聚合**多个 content_blocks 为 LLM batch request，保持 LLM 大粒度提取；聚合后若超过 `LLM_BATCH_MAX_CHARS` 再按段落边界切分。`EntityExtractor` 流式解析图片引用，按原文顺序构建 multimodal content，生成 `{doc_id}.jsonl` + `{doc_id}_batch_info.json`
 3. **阶段3（提交 LLM Batch）**：**优先读取** `batch/{doc_id}.jsonl`（支持用户编辑后重新提交），结合 `batch/{doc_id}_batch_info.json` 做增量过滤，仅对变更/新增章节的 requests 提交 Batch API。超大 JSONL 自动按 100MB 拆分并行提交。结果保存为 `{doc_id}_results.jsonl`，增量摘要保存为 `{doc_id}_incremental.json` 供阶段4校验一致性
 4. **阶段4（解析入库，不含向量化）**：从 `results.jsonl` 解析 `entities`/`relationships`/`image_descriptions`，复用未变 section 的缓存实体/关系。`GraphStore`（NetworkX）构建图谱，**同名同类型实体自动去重合并**，每个文档保存独立子图 `graphs/{doc_id}.json`。同时保存每个文档的原始属性快照到 `doc_properties[doc_id]`，支持按文档精确查询。提取产品型号建立 `Product --[HAS_MODULE]--> Module` 关系。content_blocks 和 heading_maps 写入 SQLite，content_block 状态设为 `embedded`；每个 block 的 `metadata.extracted_entities` 缓存该 block 中提及的实体引用，作为后续跨粒度桥接索引的唯一数据源
 5. **阶段5（构建 Embedding JSONL）**：从 SQLite 查询状态为 `embedded` 且暂无 `metadata.embedding` 的 content_blocks，每个 block 生成一个单文本 request（`custom_id` 编码 `db_id + _BLOCK_FAISS_OFFSET`），生成 `{doc_id}_embed.jsonl`
@@ -334,8 +334,17 @@ cp scripts/.env.example scripts/.env
 
 ### 4. 按章节查询
 
+支持子串匹配和递归子标题查询：
+
 ```bash
-/query --doc-id <DOC_HASH> --chapter "System Architecture"
+# 子串匹配："CPU" 可匹配 "2.1 CPU Architecture"
+/query --doc-id <DOC_HASH> --chapter "CPU"
+
+# 正则匹配（利用 heading_maps 索引，避免全表扫描）
+/query --doc-id <DOC_HASH> --chapter-regex "^2\\."
+
+# 包含子章节内容（自动包含 2.1.1、2.1.2 等）
+/query --doc-id <DOC_HASH> --chapter "2.1" --include-children
 ```
 
 ### 5. 查看已导入文档
@@ -427,7 +436,8 @@ Kimi CLI 通过 `plugin.json` 注册以下工具：
 | `WORKDOCS_LLM_MODE` | `llm.mode` | `batch` | LLM 实体提取模式：`batch`（Batch API，成本为同步的 50%，默认）或 `chat`（同步 Chat API，逐条调用，适合调试或 Batch API 不可用时回退） |
 | `WORKDOCS_LLM_BATCH_ENDPOINT` | `llm.batch_endpoint` | `/v1/chat/completions` | LLM Batch API endpoint |
 | `WORKDOCS_LLM_BATCH_COMPLETION_WINDOW` | `llm.completion_window` | `24h` | Batch 完成窗口（如 `24h`） |
-| `WORKDOCS_LLM_BATCH_MAX_CHARS` | `llm.batch_max_chars` | `10000` | 每个 LLM batch 最大文本字符数 |
+| `WORKDOCS_LLM_BATCH_MAX_CHARS` | `llm.batch_max_chars` | `10000` | 每个 LLM batch 最大文本字符数（LLM 聚合粒度） |
+| `WORKDOCS_BLOCK_MAX_CHARS` | `block.max_chars` | `6000` | content_blocks 存储切分粒度（向量化粒度），基于 BigModel embedding-3 经验值 |
 | `WORKDOCS_LLM_BATCH_TIMEOUT` | `llm.batch_timeout` | `3600` | LLM Batch API 轮询超时（秒） |
 | `WORKDOCS_LLM_MAX_RETRIES` | `llm.max_retries` | `3` | LLM 同步请求最大重试次数 |
 | `WORKDOCS_LLM_RETRY_BACKOFF` | `llm.retry_backoff` | `2` | LLM 重试退避系数（秒） |

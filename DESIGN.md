@@ -19,7 +19,7 @@
 
 1. **处理时间不可接受**：BigModel Embedding Batch API 的实际处理时间高达 **9 小时**，而同步单文本 API 仅需**分钟级**完成。9 小时的等待使 pipeline 失去实用价值。
 
-2. **Tokenizer 不透明导致切分策略复杂**：BigModel embedding-3 的 tokenizer 与 tiktoken 不存在固定比例关系（对数字/单独字母接近字符级编码，对自然语言使用子词编码），导致按 token 分组的逻辑复杂且容易触发 3072 token 上限错误。当前使用 tiktoken 本地估算 token 数，配合段落→句子三级语义保护切分（`_split_for_embedding`），按 3000 tokens 动态分组，彻底解决了超限问题。
+2. **Tokenizer 不透明导致切分策略复杂**：BigModel embedding-3 的 tokenizer 不透明，无法可靠估算 token 数。项目放弃 token-based 切分，改用**纯字符数限制**（`BLOCK_MAX_CHARS = 6000`），配合段落→句子三级语义保护切分（`_split_for_embedding`），确保每段不超过 embedding API 的 3072 tokens 上限。字符数限制比 token 估算更可靠，因为 GLM tokenizer 对中文编码效率较高（1-1.5 tokens/字符），6000 字符是保守经验值。
 
 **经验**：Batch API 的延迟不是统一的——LLM Batch API（分钟级）与 Embedding Batch API（小时级）有数量级差异。当外部 tokenizer 不透明时，**字符数限制是比 token 估算更可靠的切分策略**。
 
@@ -287,32 +287,35 @@
 
 ## 14. 为什么存储粒度与查询粒度解耦？
 
-**选择**：引入 `content_blocks` 表作为**存储粒度**（LLM batch 和向量化的基本单位），引入 `heading_maps` 表作为**查询粒度**（按章节检索的入口），两者通过 `block_db_ids` 字段关联。
+**选择**：引入 `content_blocks` 表作为**存储粒度**（向量化粒度，~6000 字符），引入 `heading_maps` 表作为**查询粒度**（按章节检索的入口），两者通过 `block_db_ids` 字段关联。LLM 实体提取时，`BatchBuilder` 将同一 section 的多个 content_blocks 聚合为大粒度 batch request。
 
 **原因**：
-- **查询粒度和存储粒度天然不同**：用户查询 "2.1 GPIO Configuration" 时，期望看到该小节及其所有子章节（2.1.1, 2.1.2）的内容聚合。但如果按 `###` 粒度存储并直接向量化，同一 section 的子章节内容分散在不同 batch，上下文割裂
-- **减少 batch 数量**：按 `##` section 聚合后，HRPWM 文档 batch 数量从 26 降至 13（-50%），ARM 文档从 15 降至 9（-40%），API 成本直接降低
-- **保留子章节查询能力**：`heading_maps` 中 `###` 标题映射到其父 `##` section 的所有 blocks，用户查询 "2.1.1" 仍能获取整个 2.1 section 的内容
-- **独立演进**：存储粒度可随 LLM context window 扩展而增大（减少切分），查询粒度可随 heading_maps 策略优化而精细化，两者互不阻塞
+- **向量化粒度与 LLM 粒度天然不同**：向量化 API（BigModel embedding-3）有严格的 3072 tokens 上限，而 LLM（kimi-k2.5）支持 256K 上下文。存储粒度应服从更严格的向量化上限，LLM 提取时聚合多个小 block 即可保持大粒度
+- **减少向量化超限错误**：按 6000 字符切分存储，向量化时直接提交无需二次切分，避免 API 硬性报错
+- **保留子章节查询能力**：`heading_maps` 中 `###` 标题映射到其父 `##` section 的所有 blocks，用户查询 "2.1.1" 仍能获取整个 2.1 section 的内容。支持 `LIKE` 子串匹配和递归子标题查询
+- **独立演进**：存储粒度由 `BLOCK_MAX_CHARS` 控制，LLM 聚合粒度由 `LLM_BATCH_MAX_CHARS` 控制，查询粒度由 `heading_maps` 策略控制，三者互不阻塞
 
 **实现**：
 
 ```
 ChapterParser.parse_tree() → _collect_section_content() → _build_content_blocks_and_maps()
-    → content_blocks[] + heading_maps[]
+    → content_blocks[]（向量化粒度） + heading_maps[]（查询粒度）
+    → BatchBuilder.build_batches()（按 section 聚合 blocks → LLM 粒度）
 ```
 
 **content_blocks 的生成**：
 1. 按 `##` section 聚合自身 content + 所有子孙 content（保留 Markdown 层级）
-2. 若聚合后 content 超过 `max_chars`（默认 10000），按段落边界切分为多个 blocks
-3. 每个 block 有独立 `block_id`（`b_0`, `b_1`…）和全局 `seq_index`
+2. 使用 `_split_for_embedding()` 按 `BLOCK_MAX_CHARS`（默认 6000）切分为向量化粒度 blocks
+3. 切分策略：段落边界 → 句子边界 → 字符硬切分（兜底），保护代码块/表格不被截断
+4. 每个 block 有独立 `block_id`（`b_0`, `b_1`…）和全局 `seq_index`
 
 **heading_maps 的映射**：
-- `##` 标题 → 该 section 的所有 block_db_ids
-- `###` 及以下 → 同样映射到该 section 的 block_db_ids（简化处理，避免子章节内容割裂）
+- `##`/`###`/`####` 标题 → 该 section 的所有 block_db_ids
+- 支持 `LIKE '%title%'` 子串匹配查询
+- 支持递归查询：输入 "2.1" 可自动包含 "2.1.1"、"2.1.2" 等子章节内容
 
 **权衡**：
-- 查询 "2.1.1" 返回整个 2.1 section 的内容，粒度略粗。若需精确到子章节的内容切片，可后续优化 heading_maps 的映射策略
+- content_blocks 数量增加 3-5 倍（粒度变细），但单条更小，FAISS 搜索精度提升
 - 增量更新仍以 `###` 计算 content_hash，但 `##` 下任何 `###` 变更会导致整个 section 的 blocks 重新生成
 - ~~兼容层 `chunks` 表已废弃并删除~~。`_EntityChunkBridge` 从 `content_blocks` 表全量重建
 
@@ -400,11 +403,17 @@ Sub-block 继承父 section 的属性，但有自己的 `db_id`：
 - 不存在"一个 block 对应多个向量"或"多个 block 合并为一个向量"的情况
 - `_BLOCK_FAISS_OFFSET` 确保 block db_id 在 FAISS 中唯一（偏移后不与旧 chunks ID 冲突）
 
-### `LLM_BATCH_MAX_CHARS` 与 Embedding 切分策略
+### `LLM_BATCH_MAX_CHARS` 与 `BLOCK_MAX_CHARS` 的分工
 
 | 配置 | 默认值 | 作用阶段 | 说明 |
 |------|--------|---------|------|
-| `LLM_BATCH_MAX_CHARS` | 10000 | Stage 2 | 控制 LLM batch 请求的最大字符数，按 `##` section 聚合后若超限则切分为 sub-batch |
+| `LLM_BATCH_MAX_CHARS` | 10000 | Stage 2 | 控制 LLM batch 请求的最大字符数。BatchBuilder 将同一 section 的多个 content_blocks 聚合后，若超限再切分 |
+| `BLOCK_MAX_CHARS` | 6000 | Stage 2 | 控制 content_blocks 的存储切分粒度（向量化粒度）。基于 BigModel embedding-3 经验值，6000 字符通常不超过 3072 tokens 上限 |
+
+**三层粒度解耦**：
+- **存储粒度** = `BLOCK_MAX_CHARS`（~6000 字符）：content_blocks 表中的每条记录
+- **LLM 提取粒度** = `LLM_BATCH_MAX_CHARS`（~10000 字符）：BatchBuilder 聚合同一 section 的多个 blocks
+- **查询粒度** = `heading_maps`：任意层级标题映射到 block 集合
 
 ---
 
@@ -414,11 +423,16 @@ Sub-block 继承父 section 的属性，但有自己的 `db_id`：
 
 | 查询方式 | 实现 | 返回内容 |
 |---------|------|---------|
-| `query_by_heading("2.1")` | `heading_maps` 表 `heading_title` 匹配 | 该 section 的所有 content_blocks |
-| `query_by_heading("2.1.1")` | `heading_maps` 表 `heading_title` 匹配 | 父 section（2.1）的所有 content_blocks |
+| `query_by_heading("CPU")` | `heading_maps` 表 `heading_title LIKE '%CPU%'` 子串匹配 | 匹配的 section 的所有 content_blocks（按 heading_level 排序） |
+| `query_by_heading_recursive("2.1")` | 先匹配标题，再递归收集 `parent_heading = 目标标题` 的所有子标题 | 该 section 及其所有子章节的 content_blocks |
+| `chapter_regex("^2\\.")` | 先查 heading_maps 缩小范围，内存中正则过滤 | 匹配标题对应的 content_blocks |
 | `semantic_search("GPIO")` | FAISS 搜索 | 匹配的 content_blocks |
 
-**关键设计**：`##` 和 `###` 共享同一 block 集合，保证查询时不遗漏子章节内容。`heading_level` 和 `parent_heading` 字段保留层级关系，供前端展示目录结构使用。
+**关键设计**：
+- `query_by_heading` 支持 `LIKE` 子串匹配，用户输入 "CPU" 可匹配 "2.1 CPU Architecture"
+- `chapter_regex` 利用 heading_maps 索引（`idx_headings_title`）避免全表扫描 content_blocks
+- `##`/`###`/`####` 共享同一 block 集合，保证查询时不遗漏子章节内容
+- `heading_level` 和 `parent_heading` 字段保留层级关系，支持递归子标题查询
 
 ### FAISS ID 偏移（`_BLOCK_FAISS_OFFSET = 10_000_000`）
 
