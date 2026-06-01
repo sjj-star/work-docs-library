@@ -74,7 +74,7 @@ def test_kbservice_get_chunk_content_by_chunk_id(tmp_path, monkeypatch):
 
 
 def test_kbservice_get_chunk_content_missing_chunk():
-    """get_chunk_content 找不到 chunk 时抛出 ValueError."""
+    """get_chunk_content 找不到 block 时抛出 ValueError."""
     svc = KnowledgeBaseService()
     with pytest.raises(ValueError, match="not found"):
         svc.get_chunk_content(chunk_db_id=99999)
@@ -248,7 +248,7 @@ def test_bridge_rebuild_from_db(tmp_path, monkeypatch):
 
 
 def test_bridge_attach_detach_idempotent():
-    """Attach 幂等：同一 chunk 重复 attach 不会累积；detach 后双向清理."""
+    """Attach 幂等：同一 block 重复 attach 不会累积；detach 后双向清理."""
     from core.knowledge_base_service import _EntityChunkBridge, _EntityRef
 
     bridge = _EntityChunkBridge()
@@ -294,7 +294,7 @@ def test_bridge_forward_reverse_consistency():
     assert bridge._reverse[_EntityRef("Register", "A")] == {10, 20}
     assert bridge._reverse[_EntityRef("Register", "B")] == {10}
 
-    # detach 一个 chunk 后 reverse 自动清理空集合
+    # detach 一个 block 后 reverse 自动清理空集合
     bridge.detach(20)
     ref_a = _EntityRef("Register", "A")
     assert ref_a not in bridge._reverse or bridge._reverse[ref_a] == {10}

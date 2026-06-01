@@ -895,7 +895,7 @@ def tool_graph_conflicts(params: dict) -> dict:
 
 
 def tool_graph_provenance(params: dict) -> dict:
-    """查询知识图谱实体的来源溯源（实体 → 来源 chunk → 原始文档）.
+    """查询知识图谱实体的来源溯源（实体 → 来源 block → 原始文档）.
 
     参数:
         entity_type: 实体类型（required）
@@ -920,7 +920,7 @@ def tool_graph_provenance(params: dict) -> dict:
         doc = svc.get_document(src_doc_id)
         doc_title = doc.title if doc else src_doc_id
 
-        # 通过桥接索引反向查找包含该实体的 chunks（O(1) 而非 O(N) 扫描）
+        # 通过桥接索引反向查找包含该实体的 blocks（O(1) 而非 O(N) 扫描）
         chunks = svc.find_chunks_by_entity(entity_type, name, doc_id=src_doc_id)
         for ck in chunks:
             for me in ck.metadata.get("extracted_entities", []):

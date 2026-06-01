@@ -28,8 +28,8 @@ class VectorIndex:
         self._lock_path = self.index_path.with_suffix(".lock")
         self._lock_fd: int | None = None
         self._index: faiss.Index | None = None
-        self._id_map: list[int] = []  # faiss internal id -> chunk db id
-        self._db_ids: set[int] = set()  # 已索引的 chunk_db_id 集合（防重复）
+        self._id_map: list[int] = []  # faiss internal id -> block db id
+        self._db_ids: set[int] = set()  # 已索引的 block_db_id 集合（防重复）
         self._load()
 
     def _acquire_lock(self) -> None:

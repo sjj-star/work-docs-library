@@ -441,7 +441,6 @@ Kimi CLI 通过 `plugin.json` 注册以下工具：
 | `WORKDOCS_EMBEDDING_DIMENSION` | `embedding.dimension` | `1024` | 向量维度 |
 | `WORKDOCS_EMBEDDING_BATCH_ENDPOINT` | `embedding.batch_endpoint` | `/v4/embeddings` | ~~Embedding Batch API endpoint~~（已废弃，Embedding 改为同步单文本 API） |
 | `WORKDOCS_EMBED_BATCH_TIMEOUT` | `embedding.batch_timeout` | `3600` | ~~Embedding Batch API 轮询超时（秒）~~（已废弃） |
-| `WORKDOCS_CHUNK_MAX_CHARS` | `chunk.max_chars` | `6000` | ~~**兼容层 chunks 表的最大字符数上限**~~（已废弃，兼容层 chunks 表已删除）。主存储 `content_blocks` 使用 `LLM_BATCH_MAX_CHARS`（默认 10000）控制切分 |
 | `WORKDOCS_EMBED_MAX_RETRIES` | `embedding.max_retries` | `3` | Embedding 同步请求最大重试次数 |
 | `WORKDOCS_EMBED_RETRY_BACKOFF` | `embedding.retry_backoff` | `2` | Embedding 重试退避系数（秒） |
 | `WORKDOCS_EMBED_TIMEOUT` | `embedding.timeout` | `120` | Embedding 同步请求超时（秒） |
@@ -581,20 +580,6 @@ config.json 方式（持久化）：
 | `parent_heading` | 父标题 |
 | `block_db_ids` | JSON 数组，指向 `content_blocks.id` 列表 |
 | `content_summary` | 内容摘要（可选） |
-
-#### `chunks` — 内容块（~~兼容层~~，已废弃）
-| 字段 | 说明 |
-|------|------|
-| `id` (PK, AUTOINCREMENT) | SQLite 自增 ID |
-| `doc_id` (FK) | 所属文档 |
-| ~~`chunk_id`~~ | ~~逻辑 ID~~ |
-| `content` | 原始提取内容 |
-| ~~`chunk_type`~~ | ~~`text` / `table` / `image_desc`~~ |
-| `chapter_title` | 所属章节 |
-| `metadata` | JSON：嵌入向量、content_hash、extracted_entities 等 |
-| `status` | `pending` → `embedded` → `done` |
-
-> ⚠️ `chunks` 表已废弃，不再由 pipeline 写入。所有内容存储已迁移至 `content_blocks` + `heading_maps`。
 
 ### 四存储系统架构
 

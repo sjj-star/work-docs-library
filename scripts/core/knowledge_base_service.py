@@ -84,7 +84,7 @@ class _EntityChunkBridge:
         return set(self._forward.get(chunk_db_id, set()))
 
     def get_chunks(self, entity_ref: _EntityRef) -> set[int]:
-        """反向查询：提及该实体的所有 chunks（O(1)）."""
+        """反向查询：提及该实体的所有 blocks（O(1)）."""
         return set(self._reverse.get(entity_ref, set()))
 
 
