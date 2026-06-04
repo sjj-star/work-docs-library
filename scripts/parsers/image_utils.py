@@ -9,8 +9,8 @@ from PIL import Image
 def compress_image(
     src_path: str | Path,
     dst_path: str | Path,
-    max_edge: int = Config.LLM_VISION_MAX_EDGE,
-    quality: int = Config.LLM_VISION_QUALITY,
+    max_edge: int = Config.IMAGE_MAX_SIZE,
+    quality: int = Config.IMAGE_QUALITY,
 ) -> Path:
     """compress_image 函数."""
     img = Image.open(src_path)

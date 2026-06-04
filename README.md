@@ -442,8 +442,13 @@ Kimi CLI 通过 `plugin.json` 注册以下工具：
 | `WORKDOCS_LLM_MAX_RETRIES` | `llm.max_retries` | `3` | LLM 同步请求最大重试次数 |
 | `WORKDOCS_LLM_RETRY_BACKOFF` | `llm.retry_backoff` | `2` | LLM 重试退避系数（秒） |
 | `WORKDOCS_LLM_TIMEOUT` | `llm.timeout` | `120` | LLM 同步请求超时（秒） |
-| `WORKDOCS_LLM_VISION_MAX_EDGE` | `llm.vision_max_edge` | `1024` | 图片压缩最长边（px） |
-| `WORKDOCS_LLM_VISION_QUALITY` | `llm.vision_quality` | `85` | JPEG 压缩质量 1-100 |
+| **图片配置** | | | |
+| `WORKDOCS_IMAGE_MAX_SIZE` | `image.max_size` | `1024` | 图片压缩最长边（px） |
+| `WORKDOCS_IMAGE_QUALITY` | `image.quality` | `80` | JPEG 压缩质量 1-100（color 模式默认） |
+| `WORKDOCS_IMAGE_GRAYSCALE_QUALITY` | `image.grayscale_quality` | `75` | JPEG L 模式质量（grayscale 模式默认） |
+| `WORKDOCS_IMAGE_GRAYSCALE_CHROMA_DIST` | `image.grayscale_chroma_dist` | `15.0` | 色度距离阈值（像素值 [0,255]） |
+| `WORKDOCS_IMAGE_GRAYSCALE_LOW_CHROMA_RATIO` | `image.grayscale_low_chroma_ratio` | `0.95` | 低色度像素占比阈值，超过即判定为 grayscale/blackwhite |
+| `WORKDOCS_IMAGE_BLACKWHITE_EDGE_RATIO` | `image.blackwhite_edge_ratio` | `0.90` | 亮度边缘（<20 或 >235）占比阈值，超过且低色度即判定为 blackwhite |
 | **Embedding 配置** | | | |
 | `WORKDOCS_EMBEDDING_API_KEY` | `embedding.api_key` | 空 | BigModel API Key（向量化用） |
 | `WORKDOCS_EMBEDDING_BASE_URL` | `embedding.endpoint` | `https://open.bigmodel.cn/api/paas/v4` | BigModel Base URL |
@@ -793,7 +798,7 @@ Prompt 中显式规定格式，确保 LLM 输出统一：
 3. **JSONL 大小限制**：单个 JSONL 文件不能超过 100MB，超大文档会自动拆分为多个并行 batch
 4. **Embedding 维度不可变**：FAISS 索引创建后维度固定。更换模型导致维度变化时，必须删除旧索引并重新处理
 5. **FAISS 与 SQLite 非原子**：已缓解——FAISS 操作加 `fcntl` 进程锁，修改前 `_reload()` 磁盘最新状态。极端情况仍可通过 `reprocess` 重建
-6. **图片压缩**：`LLM_VISION_MAX_EDGE`（默认 1024）和 `LLM_VISION_QUALITY`（默认 85）控制 base64 图片大小
+6. **图片压缩**：`IMAGE_MAX_SIZE`（默认 1024）将图片最长边缩放到 1024px，经 API 实测可将单张图片 token 消耗降低约 80%（如 9342×5442 原图 4176 tokens → 1024 缩放后 825 tokens）。三层分类策略（blackwhite→PNG 1-bit、grayscale→JPEG L、color→JPEG RGB）基于色度距离自动选择最小体积格式，显著减小 JSONL 文件大小和网络传输开销，但不影响 API token 计费（Kimi Vision 按分辨率动态计费，与格式/质量无关）
 7. **NetworkX 内存上限**：全局图为内存存储，数百个文档 × 万页级时可能达到 GB 级。当前单机目标规模可接受，预留 Neo4j 迁移接口
 8. **输入文档约束**：Markdown 图片引用 `![name](images/path.jpg)` 中的 `name` 将作为 `image_id`，建议填写有意义的名称
 9. **PDF 解析依赖 BigModel 专用 API**：文档提取主路径使用 BigModel 专有 Expert API（`/files/parser/create`），非 OpenAI-compatible，无法直接切换至其他厂商。若 BigModel 不可用，可依赖本地 `PDFParser`（PyMuPDF）作为 fallback，输出格式与 BigModel 完全一致，但解析质量可能略有差异

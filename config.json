@@ -10,9 +10,15 @@
     "batch_timeout": "",
     "max_retries": "",
     "retry_backoff": "",
-    "timeout": "",
-    "vision_max_edge": "",
-    "vision_quality": ""
+    "timeout": ""
+  },
+  "image": {
+    "max_size": "",
+    "quality": "",
+    "grayscale_quality": "",
+    "grayscale_chroma_dist": "",
+    "grayscale_low_chroma_ratio": "",
+    "blackwhite_edge_ratio": ""
   },
   "embedding": {
     "api_key": "",
@@ -25,7 +31,7 @@
     "retry_backoff": "",
     "timeout": ""
   },
-  "chunk": {
+  "block": {
     "max_chars": ""
   },
   "parser": {

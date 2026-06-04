@@ -315,9 +315,7 @@ class KnowledgeDB:
             ).fetchall()
         return self._rows_to_blocks(cb_rows)
 
-    def query_by_heading_recursive(
-        self, doc_id: str, heading_title: str
-    ) -> list[dict]:
+    def query_by_heading_recursive(self, doc_id: str, heading_title: str) -> list[dict]:
         """递归查询标题及其所有子标题关联的 content_blocks.
 
         先按子串匹配找到目标标题，再递归收集 parent_heading 指向它的所有子标题.
@@ -342,8 +340,7 @@ class KnowledgeDB:
             def _collect(title: str) -> None:
                 # 收集当前标题的 blocks
                 rows = conn.execute(
-                    "SELECT block_db_ids FROM heading_maps "
-                    "WHERE doc_id = ? AND heading_title = ?",
+                    "SELECT block_db_ids FROM heading_maps WHERE doc_id = ? AND heading_title = ?",
                     (doc_id, title),
                 ).fetchall()
                 for row in rows:

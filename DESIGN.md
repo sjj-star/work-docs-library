@@ -123,11 +123,16 @@
 **实现细节**：
 - 正则 `r"!\[([^\]]*)\]\(([^)]+)\)"` 匹配 Markdown 图片引用
 - `image_id` 直接使用 `[]` 中的 alt 文本，要求解析器生成的 alt 有意义且唯一
-- 图片压缩：`LLM_VISION_MAX_EDGE=1024`、`LLM_VISION_QUALITY=85`，平衡清晰度与成本
+- 图片压缩：`_compress_image_to_base64` 将图片最长边缩放到 `IMAGE_MAX_SIZE`（默认 1024），并基于色度距离自动选择最优存储格式（PNG 1-bit / JPEG L / JPEG RGB）
+
+**关于 Token 计费的关键发现**（经 API 实测 + 官方文档确认）：
+- Kimi Vision API 对图片采用**动态 token 计算**：**分辨率越高，token 越多**；与格式（PNG/JPEG）、颜色模式（RGB/L/1-bit）、压缩质量完全无关
+- 原始大图（如 9342×5442）可达 **4176 tokens/张**；经 `IMAGE_MAX_SIZE=1024` 缩放后降至约 **825 tokens/张**，节省 **80%**
+- 三层分类策略（PNG 1-bit 等）**不减少 API token 消耗**，其价值在于显著减小 base64 体积，降低 JSONL 文件大小和网络传输开销
 
 **权衡**：
 - 图片必须先由 LLM 文字化，才能进入 embedding；当前 embedding 模型（embedding-3）不支持图片输入
-- base64 编码增加 JSONL 体积，超大文档更容易触发 100MB 拆分阈值
+- base64 编码增加 JSONL 体积，超大文档更容易触发 100MB 拆分阈值；PNG 1-bit 格式可将 blackwhite 图片体积压缩约 5-9 倍，有效缓解此问题
 
 ---
 

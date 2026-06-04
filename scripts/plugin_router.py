@@ -969,6 +969,7 @@ def tool_config(params: dict) -> dict:
 
     groups: dict[str, dict[str, Any]] = {
         "LLM 配置": {},
+        "图片配置": {},
         "Embedding 配置": {},
         "解析器配置": {},
         "Batch 配置": {},
@@ -990,8 +991,12 @@ def tool_config(params: dict) -> dict:
         "LLM_MAX_RETRIES": "LLM 配置",
         "LLM_RETRY_BACKOFF": "LLM 配置",
         "LLM_TIMEOUT": "LLM 配置",
-        "LLM_VISION_MAX_EDGE": "LLM 配置",
-        "LLM_VISION_QUALITY": "LLM 配置",
+        "IMAGE_MAX_SIZE": "图片配置",
+        "IMAGE_QUALITY": "图片配置",
+        "IMAGE_GRAYSCALE_QUALITY": "图片配置",
+        "IMAGE_GRAYSCALE_CHROMA_DIST": "图片配置",
+        "IMAGE_GRAYSCALE_LOW_CHROMA_RATIO": "图片配置",
+        "IMAGE_BLACKWHITE_EDGE_RATIO": "图片配置",
         "EMBEDDING_API_KEY": "Embedding 配置",
         "EMBEDDING_BASE_URL": "Embedding 配置",
         "EMBEDDING_MODEL": "Embedding 配置",

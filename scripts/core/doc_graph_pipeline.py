@@ -18,11 +18,13 @@ import hashlib
 import io
 import json
 import logging
+import math
 import re
 from pathlib import Path
 from typing import Any
 
 import fitz
+import numpy as np
 from parsers.pdf_parser import PDFParser
 from PIL import Image
 
@@ -598,26 +600,34 @@ def _split_for_embedding(text: str, max_chars: int) -> list[str]:
         sentences = re.split(r"(?<=[.!?。！？])\s+", part)
         current = ""
         current_chars = 0
+
+        def _flush_current() -> None:
+            """将 current 加入 result，超长时先硬切分."""
+            nonlocal current, current_chars
+            if not current:
+                return
+            if len(current) > max_chars:
+                for i in range(0, len(current), max_chars):
+                    result.append(current[i : i + max_chars])
+            else:
+                result.append(current)
+            current = ""
+            current_chars = 0
+
         for s in sentences:
             s = s.strip()
             if not s:
                 continue
             s_chars = len(s)
             if current_chars + s_chars > max_chars and current:
-                result.append(current)
+                _flush_current()
                 current = s
                 current_chars = s_chars
             else:
                 current = (current + " " + s).strip() if current else s
                 current_chars += s_chars
 
-        if current:
-            if len(current) > max_chars:
-                # 兜底：按字符硬切分（极端情况，如无标点长文本）
-                for i in range(0, len(current), max_chars):
-                    result.append(current[i : i + max_chars])
-            else:
-                result.append(current)
+        _flush_current()
 
     return result if result else [text]
 
@@ -706,21 +716,56 @@ class EntityExtractor:
 
     @staticmethod
     def _compress_image_to_base64(img_path: Path) -> str:
-        """压缩图片并转为 base64 data URL."""
+        """压缩图片并转为 base64 data URL.
+
+        三层分类策略（基于色度距离）：
+        - blackwhite: 低色度 + 亮度边缘 → PNG 1-bit（最小体积）
+        - grayscale: 低色度 → JPEG L mode
+        - color: 其他 → JPEG RGB
+        """
+        max_size = Config.IMAGE_MAX_SIZE
+        chroma_threshold = Config.IMAGE_GRAYSCALE_CHROMA_DIST
+        low_chroma_threshold = Config.IMAGE_GRAYSCALE_LOW_CHROMA_RATIO
+        edge_threshold = Config.IMAGE_BLACKWHITE_EDGE_RATIO
         try:
             with Image.open(img_path) as img:
-                img = img.convert("RGB")
+                # 条件缩放
                 w, h = img.size
-                max_edge = Config.LLM_VISION_MAX_EDGE
-                quality = Config.LLM_VISION_QUALITY
-                if max(w, h) > max_edge:
-                    ratio = max_edge / max(w, h)
+                if max(w, h) > max_size:
+                    ratio = max_size / max(w, h)
                     img = img.resize((int(w * ratio), int(h * ratio)), Image.Resampling.LANCZOS)
+
+                # RGB 数组用于色度分析
+                rgb = np.array(img.convert("RGB"), dtype=np.float32)
+                r, g, b = rgb[:, :, 0], rgb[:, :, 1], rgb[:, :, 2]
+
+                # 色度距离：sqrt((r-g)^2 + (r-b)^2 + (g-b)^2) / sqrt(3)，范围 [0, 255]
+                chroma_dist = np.sqrt((r - g) ** 2 + (r - b) ** 2 + (g - b) ** 2) / math.sqrt(3)
+                low_chroma_ratio = float(np.mean(chroma_dist < chroma_threshold))
+
+                # 亮度分布分析：边缘亮度（<20 或 >235）占比
+                brightness = 0.299 * r + 0.587 * g + 0.114 * b
+                edge_ratio = float(np.mean((brightness < 20.0) | (brightness > 235.0)))
+
                 buf = io.BytesIO()
-                img.save(buf, format="JPEG", quality=quality)
-                b64 = base64.b64encode(buf.getvalue()).decode()
-                return f"data:image/jpeg;base64,{b64}"
-        except Exception as e:
+                if low_chroma_ratio > low_chroma_threshold and edge_ratio > edge_threshold:
+                    # blackwhite → PNG 1-bit（比 JPEG 小约 9 倍）
+                    img.convert("1").save(buf, format="PNG")
+                    b64 = base64.b64encode(buf.getvalue()).decode()
+                    return f"data:image/png;base64,{b64}"
+                elif low_chroma_ratio > low_chroma_threshold:
+                    # grayscale → JPEG L mode
+                    img.convert("L").save(
+                        buf, format="JPEG", quality=Config.IMAGE_GRAYSCALE_QUALITY
+                    )
+                    b64 = base64.b64encode(buf.getvalue()).decode()
+                    return f"data:image/jpeg;base64,{b64}"
+                else:
+                    # color → JPEG RGB
+                    img.convert("RGB").save(buf, format="JPEG", quality=Config.IMAGE_QUALITY)
+                    b64 = base64.b64encode(buf.getvalue()).decode()
+                    return f"data:image/jpeg;base64,{b64}"
+        except (OSError, Image.UnidentifiedImageError, ValueError) as e:
             logger.warning(f"图片压缩失败 | path={img_path} | error={e}")
             return ""
 
@@ -1492,9 +1537,7 @@ class DocGraphPipeline:
             "unchanged_titles": [ch["title"] for ch, _ in unchanged],
             "changed_titles": [ch["title"] for ch in changed],
             "added_titles": [ch["title"] for ch in added],
-            "removed_titles": [
-                b["metadata"].get("section_title", "") for b in removed
-            ],
+            "removed_titles": [b["metadata"].get("section_title", "") for b in removed],
             "result_md_hash": hashlib.md5(
                 (
                     Config.DB_PATH.parent / Config.PARSE_OUTPUT_DIR / doc_id / "result.md"

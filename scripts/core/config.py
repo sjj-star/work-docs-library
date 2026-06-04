@@ -202,12 +202,34 @@ class Config:
         cls.LLM_BATCH_TIMEOUT = int(
             _resolve_config("WORKDOCS_LLM_BATCH_TIMEOUT", "llm.batch_timeout", "3600")
         )
-        # Vision 图片配置（LLM multimodal batch）
-        cls.LLM_VISION_MAX_EDGE = int(
-            _resolve_config("WORKDOCS_LLM_VISION_MAX_EDGE", "llm.vision_max_edge", "1024")
+        # Image 图片处理配置
+        cls.IMAGE_MAX_SIZE = int(
+            _resolve_config("WORKDOCS_IMAGE_MAX_SIZE", "image.max_size", "1024")
         )
-        cls.LLM_VISION_QUALITY = int(
-            _resolve_config("WORKDOCS_LLM_VISION_QUALITY", "llm.vision_quality", "85")
+        cls.IMAGE_QUALITY = int(_resolve_config("WORKDOCS_IMAGE_QUALITY", "image.quality", "80"))
+        cls.IMAGE_GRAYSCALE_QUALITY = int(
+            _resolve_config("WORKDOCS_IMAGE_GRAYSCALE_QUALITY", "image.grayscale_quality", "75")
+        )
+        cls.IMAGE_GRAYSCALE_CHROMA_DIST = float(
+            _resolve_config(
+                "WORKDOCS_IMAGE_GRAYSCALE_CHROMA_DIST",
+                "image.grayscale_chroma_dist",
+                "15.0",
+            )
+        )
+        cls.IMAGE_GRAYSCALE_LOW_CHROMA_RATIO = float(
+            _resolve_config(
+                "WORKDOCS_IMAGE_GRAYSCALE_LOW_CHROMA_RATIO",
+                "image.grayscale_low_chroma_ratio",
+                "0.95",
+            )
+        )
+        cls.IMAGE_BLACKWHITE_EDGE_RATIO = float(
+            _resolve_config(
+                "WORKDOCS_IMAGE_BLACKWHITE_EDGE_RATIO",
+                "image.blackwhite_edge_ratio",
+                "0.90",
+            )
         )
 
         # Batch 轮询/超时
