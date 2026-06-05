@@ -276,6 +276,65 @@ class Config:
             _resolve_config("WORKDOCS_PARSER_POLL_INTERVAL", "parser.poll_interval", "3")
         )
 
+        # PDF Parser 参数（Milestone 1-3 配置化）
+        cls.PARSER_MIN_IMAGE_WIDTH = int(
+            _resolve_config("WORKDOCS_PARSER_MIN_IMAGE_WIDTH", "parser.min_image_width", "100")
+        )
+        cls.PARSER_MIN_IMAGE_HEIGHT = int(
+            _resolve_config("WORKDOCS_PARSER_MIN_IMAGE_HEIGHT", "parser.min_image_height", "100")
+        )
+        cls.PARSER_PAGE_RENDER_DPI = int(
+            _resolve_config("WORKDOCS_PARSER_PAGE_RENDER_DPI", "parser.page_render_dpi", "100")
+        )
+        cls.PARSER_TABLE_DETECTION_ENABLED = (
+            _resolve_config(
+                "WORKDOCS_PARSER_TABLE_DETECTION_ENABLED", "parser.table_detection_enabled", "true"
+            ).lower()
+            == "true"
+        )
+        cls.PARSER_TABLE_OVERLAP_THRESHOLD = float(
+            _resolve_config(
+                "WORKDOCS_PARSER_TABLE_OVERLAP_THRESHOLD", "parser.table_overlap_threshold", "0.5"
+            )
+        )
+        cls.PARSER_TABLE_MIN_ROWS = int(
+            _resolve_config("WORKDOCS_PARSER_TABLE_MIN_ROWS", "parser.table_min_rows", "2")
+        )
+        cls.PARSER_TABLE_MIN_COLS = int(
+            _resolve_config("WORKDOCS_PARSER_TABLE_MIN_COLS", "parser.table_min_cols", "2")
+        )
+        cls.PARSER_TABLE_MIN_HEIGHT_PT = float(
+            _resolve_config(
+                "WORKDOCS_PARSER_TABLE_MIN_HEIGHT_PT", "parser.table_min_height_pt", "20.0"
+            )
+        )
+        cls.PARSER_TABLE_MIN_WIDTH_RATIO = float(
+            _resolve_config(
+                "WORKDOCS_PARSER_TABLE_MIN_WIDTH_RATIO", "parser.table_min_width_ratio", "0.15"
+            )
+        )
+        cls.PARSER_TAB_MERGE_THRESHOLD_PT = float(
+            _resolve_config(
+                "WORKDOCS_PARSER_TAB_MERGE_THRESHOLD_PT", "parser.tab_merge_threshold_pt", "4.0"
+            )
+        )
+        cls.PARSER_IMAGE_SIZE_LIMIT = float(
+            _resolve_config("WORKDOCS_PARSER_IMAGE_SIZE_LIMIT", "parser.image_size_limit", "0.05")
+        )
+        cls.PARSER_MAX_IMAGES_PER_PAGE = int(
+            _resolve_config(
+                "WORKDOCS_PARSER_MAX_IMAGES_PER_PAGE", "parser.max_images_per_page", "30"
+            )
+        )
+        cls.PARSER_IMAGE_MERGE_Y_THRESHOLD = float(
+            _resolve_config(
+                "WORKDOCS_PARSER_IMAGE_MERGE_Y_THRESHOLD", "parser.image_merge_y_threshold", "20.0"
+            )
+        )
+        cls.PARSER_IMAGE_JPEG_QUALITY = int(
+            _resolve_config("WORKDOCS_PARSER_IMAGE_JPEG_QUALITY", "parser.image_jpeg_quality", "90")
+        )
+
         # Plugin 默认值
         cls.PLUGIN_SEARCH_TOP_K = int(
             _resolve_config("WORKDOCS_PLUGIN_SEARCH_TOP_K", "plugin.search_top_k", "5")

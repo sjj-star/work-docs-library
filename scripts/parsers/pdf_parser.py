@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any, cast
 
 import fitz  # pymupdf
+import pymupdf4llm
 from core.config import Config
 from PIL import Image
 
@@ -20,9 +21,9 @@ class PDFParser:
     """PDFParser 类."""
 
     SUPPORTED = (".pdf",)
-    MIN_IMAGE_WIDTH = 100
-    MIN_IMAGE_HEIGHT = 100
-    PAGE_RENDER_DPI = 100
+    MIN_IMAGE_WIDTH = Config.PARSER_MIN_IMAGE_WIDTH
+    MIN_IMAGE_HEIGHT = Config.PARSER_MIN_IMAGE_HEIGHT
+    PAGE_RENDER_DPI = Config.PARSER_PAGE_RENDER_DPI
 
     # Heuristics for distinguishing body text from diagram labels
     BODY_TEXT_MAX_HEIGHT_RATIO = 0.35
@@ -78,8 +79,19 @@ class PDFParser:
     DIAGRAM_SIDE_AREA_RATIO = 2.5
 
     # Table-region detection for figure extraction
-    TABLE_MIN_HEIGHT_PT = 20.0
-    TABLE_MIN_WIDTH_RATIO = 0.15
+    TABLE_MIN_HEIGHT_PT = Config.PARSER_TABLE_MIN_HEIGHT_PT
+    TABLE_MIN_WIDTH_RATIO = Config.PARSER_TABLE_MIN_WIDTH_RATIO
+
+    # Table detection enhancement (Milestone 1)
+    TABLE_DETECTION_ENABLED = Config.PARSER_TABLE_DETECTION_ENABLED
+    TABLE_LIKELY_INDICATORS = [
+        r"^\s*[-=]{3,}\s*$",  # separator lines
+        r"\|\s*\w",  # markdown-style pipes
+        r"\w+\s{3,}\w+\s{3,}\w+\s{3,}\w+",  # at least 4 columns
+    ]
+    TABLE_OVERLAP_DIAGRAM_THRESHOLD = Config.PARSER_TABLE_OVERLAP_THRESHOLD
+    TABLE_MIN_ROWS = Config.PARSER_TABLE_MIN_ROWS
+    TABLE_MIN_COLS = Config.PARSER_TABLE_MIN_COLS
 
     @classmethod
     def _is_likely_body_text(cls, txt: str, rect: fitz.Rect, page_rect: fitz.Rect) -> bool:
@@ -678,6 +690,7 @@ class PDFParser:
         # 4. 逐页处理
         all_image_paths: list[Path] = []
         page_markdowns: list[str] = []
+        problem_pages: dict[int, dict[str, bool]] = {}  # 【Milestone 3】问题页面记录
 
         for page_num in range(total_pages):
             page = doc.load_page(page_num)
@@ -703,8 +716,24 @@ class PDFParser:
                     text_blocks, heading_threshold, has_bold_fonts
                 )
 
-            # 4c. 提取嵌入图片
+            # 4b3. 【Milestone 1】表格检测与 Markdown 转换（Layer 1）
+            table_elements = self._detect_and_convert_tables(page, text_blocks, diagram_regions)
+            # 从文本流中剥离表格区域，避免重复输出
+            text_blocks = self._strip_table_text_blocks(text_blocks, table_elements)
+
+            # 记录问题页面：table caption 存在但 Layer 1 未检测到表格
+            if PDFParser._should_trigger_p4l_fallback(text_blocks, table_elements):
+                problem_pages[page_idx] = {"missing_tables": True}
+
+            # 4c. 提取嵌入图片（主路径：保留现有 caption 关联优势）
             raster_images = self._extract_raster_images(doc, page, page_idx, img_dir)
+
+            # 4c2. 【Milestone 2】补充提取：get_image_info() 过滤链
+            # 当 _extract_raster_images() 中 get_image_bbox() 失败时，
+            # get_image_info() 直接提供 bbox，避免断链。
+            fallback_images = self._extract_images_via_image_info(page, page_idx, img_dir)
+            # 合并：fallback 只补充 raster_images 未覆盖的位置
+            raster_images = self._merge_image_lists(raster_images, fallback_images)
 
             # 4d. 渲染矢量图
             diagram_images = self._render_diagrams(
@@ -714,14 +743,29 @@ class PDFParser:
             all_image_paths.extend([img["path"] for img in raster_images])
             all_image_paths.extend([img["path"] for img in diagram_images])
 
-            # 4e. 合并排序生成 Markdown
-            page_md = self._build_page_markdown(text_blocks, raster_images, diagram_images)
+            # 4e. 合并排序生成 Markdown（含表格元素）
+            page_md = self._build_page_markdown(
+                text_blocks, raster_images, diagram_images, table_elements
+            )
             page_markdowns.append(page_md)
+
+        # 4f. 【Milestone 3】PyMuPDF4LLM fallback：对问题页面补充检测
+        if problem_pages:
+            logger.info(f"PyMuPDF4LLM fallback 触发 | 问题页面: {list(problem_pages.keys())}")
+            p4l_results = self._call_pymupdf4llm_for_pages(doc, list(problem_pages.keys()), img_dir)
+            page_markdowns = self._fuse_p4l_tables_into_pages(
+                page_markdowns, p4l_results, problem_pages
+            )
 
         doc.close()
 
         # 5. 根据章节结构组织整体 Markdown
         markdown_text = self._organize_by_chapters(page_markdowns, chapter_map, toc)
+
+        # 6. 【Milestone 2】最终存在性校验：移除断链图片引用
+        markdown_text, all_image_paths = self._validate_image_links(
+            markdown_text, all_image_paths, img_dir
+        )
 
         logger.info(
             f"PDF 解析完成 | file={file_path.name} | pages={total_pages} | "
@@ -732,6 +776,287 @@ class PDFParser:
     # -----------------------------------------------------------------------
     # 新增辅助方法
     # -----------------------------------------------------------------------
+
+    @classmethod
+    def _is_page_likely_has_tables(cls, text_blocks: list[dict[str, Any]]) -> bool:
+        """判断页面是否可能有表格（预筛选，避免无表格页面调用 find_tables）。"""
+        for block in text_blocks:
+            text = block.get("text", "")
+            for pattern in cls.TABLE_LIKELY_INDICATORS:
+                if re.search(pattern, text, re.MULTILINE):
+                    return True
+        return False
+
+    @classmethod
+    def _table_overlaps_diagram(
+        cls, table_bbox: fitz.Rect, diagram_regions: list[fitz.Rect]
+    ) -> bool:
+        """判断表格区域是否与 diagram 区域重叠（保护位域图不被表格化）。"""
+        table_area = table_bbox.get_area()
+        if table_area <= 0:
+            return False
+        for dr in diagram_regions:
+            # 使用 +table_bbox 创建副本，因为 intersect() 会修改原对象
+            intersect = (+table_bbox).intersect(dr)
+            if (
+                intersect.get_area() > 0
+                and intersect.get_area() / table_area > cls.TABLE_OVERLAP_DIAGRAM_THRESHOLD
+            ):
+                return True
+        return False
+
+    def _detect_and_convert_tables(
+        self,
+        page: fitz.Page,
+        text_blocks: list[dict[str, Any]],
+        diagram_regions: list[fitz.Rect],
+    ) -> list[dict[str, Any]]:
+        """检测页面表格并转换为 Markdown 表格元素。
+
+        保留现有 caption-gated 策略作为基础，对无 caption 但特征明显的
+        页面补充检测。使用 PyMuPDF 原生 Table.to_markdown() 格式化。
+
+        返回: [{"type": "table", "y0": float, "y1": float, "text": str}, ...]
+        """
+        if not self.TABLE_DETECTION_ENABLED:
+            return []
+
+        # 1. 保留现有策略：table caption 页面强制检测
+        has_table_caption = any(
+            re.match(self.TABLE_CAPTION_RE, block.get("text", "")) for block in text_blocks
+        )
+
+        # 2. 新增补充：无 caption 但表格特征明显的页面
+        likely_has_tables = has_table_caption or self._is_page_likely_has_tables(text_blocks)
+
+        if not likely_has_tables:
+            return []
+
+        table_elements: list[dict[str, Any]] = []
+        try:
+            tabs = page.find_tables(strategy="lines_strict")
+            if tabs is None:
+                return table_elements
+            for tab in tabs.tables:
+                # 过滤：至少 2 行 2 列（复用 PyMuPDF4LLM 过滤逻辑）
+                if tab.row_count < self.TABLE_MIN_ROWS or tab.col_count < self.TABLE_MIN_COLS:
+                    continue
+
+                tab_bbox = fitz.Rect(tab.bbox)
+
+                # 位域图保护
+                if self._table_overlaps_diagram(tab_bbox, diagram_regions):
+                    continue
+
+                # 复用 PyMuPDF 原生格式化（与 PyMuPDF4LLM 内部等价）
+                md_table = tab.to_markdown(clean=False)
+                if not md_table.strip():
+                    continue
+
+                table_elements.append(
+                    {
+                        "type": "table",
+                        "y0": tab_bbox.y0,
+                        "y1": tab_bbox.y1,
+                        "text": md_table.strip(),
+                        "bbox": tab_bbox,
+                    }
+                )
+        except Exception as e:
+            page_num = cast(int, page.number) if page is not None else -1
+            logger.warning(f"表格检测异常 page {page_num + 1}: {e}")
+
+        return table_elements
+
+    @staticmethod
+    def _strip_table_text_blocks(
+        text_blocks: list[dict[str, Any]], table_elements: list[dict[str, Any]]
+    ) -> list[dict[str, Any]]:
+        """从文本块列表中移除落在表格区域内的块。"""
+        if not table_elements:
+            return text_blocks
+
+        kept_blocks = []
+        for block in text_blocks:
+            block_center_y = (block["y0"] + block["y1"]) / 2
+            inside_table = False
+            for te in table_elements:
+                if te["bbox"].y0 <= block_center_y <= te["bbox"].y1:
+                    inside_table = True
+                    break
+            if not inside_table:
+                kept_blocks.append(block)
+        return kept_blocks
+
+    @staticmethod
+    def _should_trigger_p4l_fallback(
+        text_blocks: list[dict[str, Any]],
+        table_elements: list[dict[str, Any]],
+    ) -> bool:
+        """判断当前页面是否需要触发 PyMuPDF4LLM fallback。
+
+        触发条件：页面存在 table caption，但 Layer 1 自研检测未输出任何表格。
+        """
+        has_table_caption = any(
+            re.match(PDFParser.TABLE_CAPTION_RE, block.get("text", "")) for block in text_blocks
+        )
+        return has_table_caption and not table_elements
+
+    def _call_pymupdf4llm_for_pages(
+        self,
+        doc: fitz.Document,
+        problem_pages: list[int],
+        img_dir: Path,
+    ) -> dict[int, dict[str, Any]]:
+        """对问题页面批量调用 PyMuPDF4LLM Legacy Mode，获取补充表格数据。
+
+        使用 use_layout(False) 启用 Legacy Mode，确保 table_strategy 等参数生效。
+        hdr_info=False 禁用 heading 检测，规避标题扁平化缺陷。
+        margins=0 规避 #251 bbox 包含 bug。
+
+        返回: {page_idx (1-based): {"text": str, "tables": [...], "images": [...]}}
+        """
+        if not problem_pages:
+            return {}
+
+        try:
+            pymupdf4llm.use_layout(False)
+            results = cast(
+                list[dict[str, Any]],
+                pymupdf4llm.to_markdown(
+                    doc,
+                    pages=[p - 1 for p in problem_pages],  # 0-based
+                    page_chunks=True,
+                    table_strategy="lines",  # 比 lines_strict 更宽松，覆盖边缘场景
+                    write_images=True,
+                    image_path=str(img_dir / "p4l_fallback"),
+                    image_format="png",
+                    margins=0,
+                    hdr_info=False,  # 禁用 heading 检测
+                ),
+            )
+            return {p: r for p, r in zip(problem_pages, results)}
+        except Exception as e:
+            logger.warning(f"PyMuPDF4LLM fallback 调用失败: {e}")
+            return {}
+
+    @staticmethod
+    def _extract_tables_from_p4l_text(text: str) -> list[str]:
+        """从 PyMuPDF4LLM 页面 text 中提取 Markdown 表格块。
+
+        匹配标准 Markdown 表格格式：
+        | Header1 | Header2 |
+        |---------|---------|
+        | Cell1   | Cell2   |
+        """
+        if not text:
+            return []
+
+        # 匹配完整的 Markdown 表格块
+        pattern = re.compile(
+            r"(?:^|\n)(\|[^\n]+\|\n\|[-:\s|]+\|\n(?:\|[^\n]+\|\n?)*)",
+            re.MULTILINE,
+        )
+        tables = []
+        for match in pattern.finditer(text):
+            table_md = match.group(1).strip()
+            if table_md:
+                tables.append(table_md)
+        return tables
+
+    @staticmethod
+    def _fuse_p4l_tables_into_pages(
+        page_markdowns: list[str],
+        p4l_results: dict[int, dict[str, Any]],
+        problem_pages: dict[int, dict[str, bool]],
+    ) -> list[str]:
+        """将 PyMuPDF4LLM 提取的表格融合到对应页面的 Markdown 中。
+
+        融合策略：
+        1. 从 p4l_results[page_idx]["text"] 中提取 Markdown 表格
+        2. 将表格追加到对应页面 Markdown 的末尾（避免破坏现有结构）
+        3. 若页面已有 Markdown 表格（Layer 1 已检测到），则不重复添加
+        """
+        result = list(page_markdowns)
+        for page_idx, flags in problem_pages.items():
+            if "missing_tables" not in flags:
+                continue
+
+            p4l_page = p4l_results.get(page_idx)
+            if not p4l_page:
+                continue
+
+            text = p4l_page.get("text", "")
+            p4l_tables = PDFParser._extract_tables_from_p4l_text(text)
+            if not p4l_tables:
+                continue
+
+            page_md = result[page_idx - 1]
+
+            # 若页面已有 Markdown 表格结构，跳过融合（Layer 1 已覆盖）
+            has_existing_table = re.search(r"\|[^\n]+\|\n\|[-:\s|]+\|", page_md) is not None
+            if has_existing_table:
+                continue
+
+            # 追加表格到页面末尾
+            fused = page_md.rstrip() + "\n\n" + "\n\n".join(p4l_tables) + "\n"
+            result[page_idx - 1] = fused
+
+        return result
+
+    @staticmethod
+    def _merge_image_lists(
+        primary: list[dict[str, Any]],
+        fallback: list[dict[str, Any]],
+        y_threshold: float | None = None,
+    ) -> list[dict[str, Any]]:
+        """合并主路径和 fallback 图片列表，fallback 只补充未覆盖的位置。
+
+        去重策略：若 fallback 图片的 y 中心与 primary 中任一图片的 y 中心
+        差距 < y_threshold，视为同一图片，跳过。
+        """
+        if y_threshold is None:
+            y_threshold = Config.PARSER_IMAGE_MERGE_Y_THRESHOLD
+        result = list(primary)
+        for fb_img in fallback:
+            fb_y = (fb_img["y0"] + fb_img["y1"]) / 2
+            duplicate = any(
+                abs(fb_y - ((p_img["y0"] + p_img["y1"]) / 2)) < y_threshold for p_img in primary
+            )
+            if not duplicate:
+                result.append(fb_img)
+        return result
+
+    @staticmethod
+    def _validate_image_links(
+        markdown_text: str, image_paths: list[Path], img_dir: Path
+    ) -> tuple[str, list[Path]]:
+        """移除 Markdown 中指向不存在或空文件的图片引用，同步清理路径列表。
+
+        仅校验 images/ 目录下的本地文件引用，外部 URL 保留。
+        """
+        # 1. 过滤出有效路径
+        valid_paths = [p for p in image_paths if p.exists() and p.stat().st_size > 0]
+        valid_names = {p.name for p in valid_paths}
+
+        # 2. 扫描 Markdown，替换断链引用
+        def _replace_broken(match: re.Match) -> str:
+            _alt = match.group(1)
+            rel_path = match.group(2)
+            filename = Path(rel_path).name
+            # 外部 URL 或有效文件保留
+            if rel_path.startswith(("http://", "https://", "data:")):
+                return match.group(0)
+            if filename in valid_names:
+                return match.group(0)
+            logger.warning(f"移除断链图片引用: {rel_path}")
+            return ""
+
+        cleaned_md = re.sub(r"!\[(.*?)\]\((.*?)\)", _replace_broken, markdown_text)
+        # 清理因移除引用产生的多余空行
+        cleaned_md = re.sub(r"\n{3,}", "\n\n", cleaned_md)
+
+        return cleaned_md, valid_paths
 
     @staticmethod
     def _extract_horizontal_decorations(page: fitz.Page) -> list[tuple[float, float]]:
@@ -1044,7 +1369,7 @@ class PDFParser:
 
     # 制表位/排版伪换行与真正段落换行的区分阈值（pt）
     # 目录页编号与标题的 y0 差通常在 2–4pt；正文段落折行在 9–12pt 以上
-    TAB_MERGE_THRESHOLD_PT = 4.0
+    TAB_MERGE_THRESHOLD_PT = Config.PARSER_TAB_MERGE_THRESHOLD_PT
 
     def _get_page_text_blocks(
         self,
@@ -1170,6 +1495,123 @@ class PDFParser:
             region_captions[i] = best_caption
         return region_captions
 
+    def _extract_images_via_image_info(
+        self,
+        page: fitz.Page,
+        page_idx: int,
+        img_dir: Path,
+        image_size_limit: float | None = None,
+        max_images_per_page: int | None = None,
+    ) -> list[dict[str, Any]]:
+        """使用 page.get_image_info() 提取页面图片（替代 get_images + get_image_bbox）。
+
+        复用 PyMuPDF4LLM 的图片检测过滤链：
+        1. get_image_info() 获取图片元数据（含 bbox，不依赖定位）
+        2. 尺寸过滤：width/height >= image_size_limit * page_size
+        3. 去重：删除被大图片完全包含的小图片
+        4. 限制：最多 max_images_per_page 张
+
+        优势：get_image_info() 直接返回 bbox，不依赖 get_image_bbox() 定位，
+        避免 bbox 定位失败导致的断链问题。
+        """
+        if image_size_limit is None:
+            image_size_limit = Config.PARSER_IMAGE_SIZE_LIMIT
+        if max_images_per_page is None:
+            max_images_per_page = Config.PARSER_MAX_IMAGES_PER_PAGE
+
+        images: list[dict[str, Any]] = []
+        try:
+            img_info = page.get_image_info()
+        except Exception as e:
+            logger.warning(f"get_image_info() failed on page {page_idx}: {e}")
+            return images
+
+        # 转换 bbox 为 fitz.Rect
+        for i in range(len(img_info)):
+            img_info[i]["bbox"] = fitz.Rect(img_info[i]["bbox"])
+
+        clip = page.rect
+
+        # 过滤：尺寸、clip 交集、最小 3px
+        img_info = [
+            item
+            for item in img_info
+            if item["bbox"].width >= image_size_limit * clip.width
+            and item["bbox"].height >= image_size_limit * clip.height
+            and item["bbox"].intersects(clip)
+            and item["bbox"].width > 3
+            and item["bbox"].height > 3
+        ]
+
+        # 按面积降序排序
+        img_info.sort(key=lambda i: abs(i["bbox"]), reverse=True)
+
+        # 去重：删除被大图片完全包含的小图片
+        for i in range(len(img_info) - 1, 0, -1):
+            r = img_info[i]["bbox"]
+            if r.is_empty:
+                del img_info[i]
+                continue
+            for j in range(i):
+                if r in img_info[j]["bbox"]:
+                    del img_info[i]
+                    break
+
+        # 限制数量
+        img_info = img_info[:max_images_per_page]
+
+        for img_index, item in enumerate(img_info, start=1):
+            bbox = item["bbox"]
+            try:
+                # 通过 xref 提取原始图片数据
+                xref = item.get("xref")
+                if xref is None:
+                    # 无 xref 时回退到页面区域渲染
+                    pix = page.get_pixmap(clip=bbox, dpi=self.PAGE_RENDER_DPI)
+                    img_path = img_dir / f"page_{page_idx}_img_{img_index:02d}.jpg"
+                    pix.save(img_path)
+                    # 渲染后检查是否为低内容图片
+                    pil_check = Image.open(img_path)
+                    if self._is_low_content_image(pil_check):
+                        img_path.unlink(missing_ok=True)
+                        continue
+                else:
+                    parent = page.parent
+                    if parent is None:
+                        continue
+                    base_image = parent.extract_image(xref)
+                    image_bytes = base_image["image"]
+                    pil_img = Image.open(io.BytesIO(image_bytes))
+
+                    if (
+                        pil_img.width < self.MIN_IMAGE_WIDTH
+                        or pil_img.height < self.MIN_IMAGE_HEIGHT
+                    ):
+                        continue
+                    if self._is_low_content_image(pil_img):
+                        continue
+
+                    img_path = img_dir / f"page_{page_idx}_img_{img_index:02d}.jpg"
+                    if pil_img.mode in ("RGBA", "P"):
+                        pil_img = pil_img.convert("RGB")
+                    pil_img.save(img_path, format="JPEG", quality=Config.PARSER_IMAGE_JPEG_QUALITY)
+
+                rel_path = f"images/{img_path.name}"
+                images.append(
+                    {
+                        "type": "image",
+                        "y0": bbox.y0,
+                        "y1": bbox.y1,
+                        "path": img_path,
+                        "rel_path": rel_path,
+                        "alt": f"Page {page_idx} Image {img_index}",
+                    }
+                )
+            except Exception as e:
+                logger.warning(f"Failed to extract image_info item on page {page_idx}: {e}")
+
+        return images
+
     def _extract_raster_images(
         self,
         doc: fitz.Document,
@@ -1201,7 +1643,7 @@ class PDFParser:
                 img_path = img_dir / f"page_{page_idx}_img_{img_index}.jpg"
                 if pil_img.mode in ("RGBA", "P"):
                     pil_img = pil_img.convert("RGB")
-                pil_img.save(img_path, format="JPEG", quality=90)
+                pil_img.save(img_path, format="JPEG", quality=Config.PARSER_IMAGE_JPEG_QUALITY)
 
                 rel_path = f"images/{img_path.name}"
                 images.append(
@@ -1238,7 +1680,7 @@ class PDFParser:
                 # pixmap 保存为 PNG 后转 JPEG
                 png_buf = io.BytesIO(pix.tobytes("png"))
                 pil_img = Image.open(png_buf).convert("RGB")
-                pil_img.save(img_path, format="JPEG", quality=90)
+                pil_img.save(img_path, format="JPEG", quality=Config.PARSER_IMAGE_JPEG_QUALITY)
 
                 rel_path = f"images/{img_path.name}"
                 alt = diagram_captions.get(i - 1, f"Page {page_idx} Diagram {i}")
@@ -1261,13 +1703,15 @@ class PDFParser:
         text_blocks: list[dict[str, Any]],
         raster_images: list[dict[str, Any]],
         diagram_images: list[dict[str, Any]],
+        table_elements: list[dict[str, Any]] | None = None,
     ) -> str:
-        r"""将文本块和图片按 y 坐标排序，生成页面 Markdown。.
+        r"""将文本块、表格和图片按 y 坐标排序，生成页面 Markdown。.
 
         非 heading 文本块中的 \n 是 PyMuPDF 的段落内换行，替换为空格以保持同一段落。
         不同文本块之间的 \n\n 是段落分隔。
         """
-        elements = text_blocks + raster_images + diagram_images
+        table_elements = table_elements or []
+        elements = text_blocks + raster_images + diagram_images + table_elements
         elements.sort(key=lambda e: e["y0"])
 
         parts = []
@@ -1282,6 +1726,8 @@ class PDFParser:
                     parts.append(elem["text"])
             elif elem["type"] == "image":
                 parts.append(f"\n![{elem['alt']}]({elem['rel_path']})\n")
+            elif elem["type"] == "table":
+                parts.append(f"\n{elem['text']}\n")
 
         return "\n\n".join(parts)
 

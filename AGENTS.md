@@ -149,7 +149,7 @@
 - **Mock 优先**：所有涉及外部 API 的测试使用 Fake 客户端，**禁止调用真实 API**
 - **环境隔离**：`scripts/tests/conftest.py` 在模块级别完成三重隔离（清除环境变量、阻止 `load_dotenv` 重新加载 `.env`、重定向 Config 默认路径到临时目录），确保测试不依赖外部 `.env` 或生产数据。详见 `README.md`「开发与测试」
 - **回归即修复**：任何导致测试失败的变更必须当场修复
-- **352 个测试用例必须全部通过**（2 个 skipped 为正常：真实文档参数集为空）
+- **389 个测试用例必须全部通过**（2 个 skipped 为正常：真实文档参数集为空）
 
 ### 测试文件清单
 | 测试文件 | 说明 |
@@ -173,6 +173,9 @@
 | `test_batch_builder.py` | BatchBuilder 切分保护与空 content 过滤测试 |
 | `test_parsed_docs_jsonl.py` | 真实文档端到端 JSONL 生成测试 |
 | `test_pipeline_stages.py` | 六阶段 pipeline 拆分测试 |
+| `test_mp_find_tables_feasibility.py` | 多进程 find_tables 可行性验证（pickle/一致性/稳定性/性能/内存） |
+| `test_mp_find_tables_perf_detail.py` | 多进程 find_tables 详细性能分析（per-page breakdown/加速比/效率） |
+| `analyze_amba_empty_runs.py` | AMBA 文档 find_tables 空跑根因分析（Type A/B/C 分类） |
 
 ### Mock 方法
 使用 `monkeypatch.setattr` 替换客户端类方法：
@@ -221,9 +224,31 @@ monkeypatch.setattr(
 - ✅ **环境隔离三重机制**：彻底根治 `.env` 污染测试环境的问题（`fc7fb38` 未根治，通过 conftest.py 清除+阻止 load_dotenv+临时目录重定向彻底解决）
 - ✅ **存储粒度与查询粒度解耦（方案C）**：引入 `content_blocks` 表作为存储粒度（按 `##` section 聚合后切分），`heading_maps` 表作为查询粒度（`##`/`###` 共享同一 block 集合），batch 数量减少 40-50%，API 成本降低
 - ✅ **FAISS ID 偏移**：`_BLOCK_FAISS_OFFSET = 10_000_000` 避免 block db_id 与旧 chunks ID 在 FAISS 中冲突
-- ✅ **352 个测试全部通过**（2 个 skipped 为正常）
+- ✅ **389 个测试全部通过**
+- ✅ **PDF Parser 表格检测增强（Milestone 1）**：保留 caption-gated 策略基础上叠加预筛选补充检测，`page.find_tables(strategy="lines_strict") + Table.to_markdown()` 格式化，位域图重叠保护。TI 提取 68 表格，AMBA 提取 22 表格
+- ✅ **PDF Parser 图片检测增强（Milestone 2）**：`page.get_image_info()` 过滤链替代 `get_images() + get_image_bbox()`，双路径提取 + 存在性校验，修复 bbox 定位失败导致的断链
+- ✅ **PDF Parser PyMuPDF4LLM fallback（Milestone 3）**：对 Layer 1/2 失败的边缘页面局部调用 PyMuPDF4LLM Legacy Mode，`table_strategy="lines"` 补充检测无边框表格，`hdr_info=False` + 结构化数据隔离规避标题扁平化/页眉噪声缺陷。实际触发 12 页，产出 0 补充表格，耗时占比 <2%
+- ✅ **新增依赖**：`pymupdf4llm>=1.27.0,<2.0.0`（PyMuPDF4LLM fallback 必需）
+- ✅ **PDF Parser 配置化（Milestone 4）**：全部 14 个 Magic Number 提取到 `Config` + `config.json`，支持环境变量/配置文件/默认值三层覆盖，零硬编码
+- ✅ **性能基准测试**：TI (219页) 改进前 10.3s/0表格 → 版本A 46.2s/68表格；AMBA (585页) 改进前 8.7s/0表格 → 版本A 93.3s/22表格
+- ✅ **多进程并行化可行性分析**：4-worker 加速比 TI 2.07x / AMBA 1.61x，但 Amdahl 定律限制整体收益仅 ~1.3x，**否决实施**（投入产出比过低）
+- ✅ **AMBA 空跑根因分析**：251 页触发 find_tables → 234 页 Type A（lines_strict 完全未检测到表格）。根因：AMBA 大量使用无竖线表格（空白对齐+水平线），lines_strict 策略检测率仅 9%（16/194）
 
 ### 下一阶段（精确到下一步）
 1. **可视化**：图谱可视化导出（Graphviz / D3.js）
 2. **评估体系**：实体提取准确率、关系提取召回率的自动化评估
 3. **DOCX/XLSX 接入 pipeline**：当前解析器代码存在但未接入 `DocGraphPipeline`
+
+### PDF Parser 表格检测已知问题与下一步方向
+
+**已完成的分析**（详见 `DESIGN.md` 新增章节）：
+- `lines_strict` 策略对 AMBA 无竖线表格检测率仅 9%（16/194 正式标题页面）
+- 正文引用句（"Table X.X describes..."）被 `TABLE_CAPTION_RE` 误匹配，导致 191 次无效触发
+- 跨页续表（93 页 "Continued from previous page"）造成碎片化检测
+- P4L fallback 实际价值极低（12 页触发，0 补充表格产出）
+
+**下一步方向**（按优先级）：
+1. **收紧 TABLE_CAPTION_RE**：排除包含 describes/shows/lists/gives/provides 等动词的引用句（预估可跳过 ~24 页，节省 ~0.8s）
+2. **跳过跨页续表**：检测 "Continued from previous page" 直接跳过 find_tables（预估可跳过 ~33 页，节省 ~1.0s）
+3. **评估 `lines` 策略回退**：`lines_strict` 检测率 9% vs `lines` 预估 >50%，但需验证位域图误检风险是否可接受
+4. **to_markdown 性能**：TI 中 to_markdown 耗时比 find_tables 还高 31%，但为 PyMuPDF C 实现，外部优化空间极小

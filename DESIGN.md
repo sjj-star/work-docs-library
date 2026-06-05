@@ -734,6 +734,97 @@ graph_query(entity_type="Product", name="TMS320F28379D")
 
 ---
 
+## 18. 为什么本地 PDF Parser 使用 `lines_strict` 表格检测策略？
+
+**选择**：本地 PDF 解析器（`PDFParser` fallback）使用 `page.find_tables(strategy="lines_strict")` 作为 Layer 1 表格检测主路径，配合 caption-gated + heuristics 预筛选触发机制。
+
+**背景**：本地解析器早期无表格检测能力（0 表格产出）。Milestone 1-4 引入了完整的表格检测流水线：Layer 1 自研检测（`find_tables`）→ Layer 2 图片双路径提取 → Layer 3 PyMuPDF4LLM fallback。
+
+### 18.1 预筛选触发机制设计
+
+**双层触发**：
+1. **caption-gated（高置信）**：页面存在 `Table X.X: Title` 格式 caption 时强制检测。这是保守策略，确保有明确表格标识的页面不漏检
+2. **heuristic 补充（低置信）**：页面无 caption 但存在分隔线（`^\s*[-=]{3,}\s*$`）、markdown 竖线（`\|\s*\w`）或 4 列以上空格对齐（`\w+\s{3,}\w+\s{3,}\w+\s{3,}\w+`）时补充检测
+
+**位域图保护**：检测到的表格 bbox 与 `_find_figure_regions()` 识别的 diagram 区域做交集判断，重叠面积 >50% 时跳过，防止寄存器位域图被误表格化。
+
+### 18.2 `lines_strict` vs `lines` 策略的两难
+
+| 策略 | 对 AMBA 检测率 | 对 TI 检测率 | 位域图误检风险 |
+|------|---------------|-------------|---------------|
+| `lines_strict` | **~9%**（16/194 正式标题页） | ~70% | 极低 |
+| `lines`（更宽松） | 预估 >50% | ~85% | 中高 |
+
+**选择 `lines_strict` 的原因**：
+- 技术文档中的位域图、时序图、框图含有大量水平/竖直线条，`lines` 策略会将其误识别为表格
+- `lines_strict` 要求表格有明确的网格线结构，误检率极低
+- 宁可漏检部分无边框表格，也不接受位域图被表格化（后者会导致关键寄存器信息丢失）
+
+**已知代价**：
+- AMBA CHI 规范大量使用"无竖线"表格（仅用水平分隔线 + 空白对齐），`lines_strict` 对其几乎完全失效
+- 251 页触发 find_tables 的 AMBA 页面中，234 页（93%）Type A 空跑——`find_tables` 检测到 0 个表格
+- 这 234 页累计耗时 ~7.3s，占 AMBA find_tables 总时间的 83%
+
+### 18.3 正文引用句误触发问题
+
+`TABLE_CAPTION_RE = r"^(Table|表)\s*[A-Z]?\d+(?:[-\.]\d+)?(?:[:\.]\s*\S|\s+[A-Z]\S*)"` 过度匹配了正文引用句：
+
+```
+"Table B1.1 describes the primary function of each layer."
+"Table B2.2 shows the Request fields associated with a Request packet."
+```
+
+这些句子包含 `"Table X.X"` + 动词（describes/shows/lists），被正则匹配为 caption，导致所在页面触发 find_tables，但页面实际无对应表格（表格在附近页面）。AMBA 文档中发生 191 次此类误匹配。
+
+**根因**：AMBA 写作规范中，表格标题和正文引用句格式高度相似（都包含 `"Table X.X"`），正则无法区分。
+
+### 18.4 跨页续表碎片化
+
+AMBA 大量表格跨页分布，续页使用 `"Table X.X – Continued from previous page"` 作为 caption。按页独立调用 `find_tables()` 导致：
+- 续页上的表格只有部分行，无法构成完整表格结构
+- `find_tables` 按页独立处理，无法识别跨页上下文
+- 93 页跨页续表全部 Type A 空跑
+
+### 18.5 PyMuPDF4LLM fallback 的实际价值
+
+Layer 3 fallback 设计意图：对 Layer 1/2 未检测到表格但存在 table caption 的页面，局部调用 PyMuPDF4LLM Legacy Mode（`table_strategy="lines"`）补充检测无边框表格。
+
+**实际运行数据**：
+- 12 页触发 fallback
+- 产出补充表格：**0 个**
+- 耗时占比：<2%
+
+**根因**：PyMuPDF4LLM 的 `lines` 策略同样无法识别 AMBA 的无竖线表格；且 fallback 只处理"有 caption 但未检出"的页面，而 AMBA 中这类页面的表格本就无法被任何基于线条的算法检测。
+
+### 18.6 性能数据与优化结论
+
+| 文档 | 页数 | 改进前 | 版本 A（lines_strict） | 开销 | 表格数 |
+|------|------|--------|----------------------|------|--------|
+| TI TMS320F28335 | 219 | 10.3s / 0表格 | 46.2s / 68表格 | +348% | 68 |
+| AMBA CHI | 585 | 8.7s / 0表格 | 93.3s / 22表格 | +973% | 22 |
+
+**find_tables 流程耗时分解（单进程）**：
+
+| 文档 | find_tables | to_markdown | 合计 | 占总解析时间 |
+|------|-------------|-------------|------|-------------|
+| TI | 6.1s | 8.0s | 14.1s | ~30% |
+| AMBA | 9.4s | 7.5s | 16.9s | ~18% |
+
+**关键发现**：TI 中 `to_markdown()` 耗时（8.0s）**超过** `find_tables()`（6.1s），是隐藏瓶颈。
+
+**多进程并行化结论**（详见 AGENTS.md）：
+- 8 workers 加速比：TI 2.07x / AMBA 1.61x
+- 但 find_tables 流程仅占解析总时间的 18-30%，Amdahl 定律限制整体收益仅 ~1.3x
+- **即使 find_tables 无限加速，TI 仍需 28s+，AMBA 仍需 75s+，均无法达到 <30% 开销目标**
+- **否决实施**：代码复杂度增加不值得有限的收益
+
+**权衡**：
+- `lines_strict` 是保守的正确性优先策略，接受部分漏检
+- 性能开销是表格检测能力从无到有的必要成本（改进前 0 表格）
+- 进一步优化的空间极小：to_markdown 为 PyMuPDF C 实现不可优化；lines_strict 检测率低是算法与文档格式的固有矛盾
+
+---
+
 ## 22. 实体提取 Prompt 设计
 
 ### 22.1 设计演进：从"验证导向提取规则"到"分步引导提取"
@@ -907,6 +998,9 @@ Step 1: 内容分类（8 种类型）
 | **本地 PDF 解析目录页换行** | 目录页多行条目保留为多行 | 目录页对知识提取影响小，接受此行为 |
 | **本地 PDF 解析依赖 TOC** | 无 TOC 的 PDF 回退到启发式规则 | `_fallback_heading_detection` 提供降级方案 |
 | **_is_heading 仅识别 Markdown #** | 已删除数字编号/中文编号匹配，目录条目（如 "1 Introduction 7"）不再被识别为 heading | 目录文本被收集为 heading 之间的 content，可能混入正文 batch；当前接受此行为，后续可通过机制层策略处理 |
+| **本地 PDF 表格检测 lines_strict 策略漏检率高** | `lines_strict` 要求明确的网格线结构，对无竖线/弱线条表格（如 AMBA 大量使用的空白对齐表格）检测率仅 ~9% | 位域图保护优先于表格检测；P4L fallback 实际价值极低（12页触发/0产出）；可接受部分漏检 |
+| **TABLE_CAPTION_RE 误匹配正文引用句** | `"Table X.X describes..."` 等正文引用句被正则匹配为 caption，导致无效触发 find_tables | AMBA 文档中发生 191 次误匹配；下一步可通过排除动词关键词（describes/shows/lists/gives/provides）缓解 |
+| **跨页续表碎片化** | `find_tables()` 按页独立处理，无法识别 `"Continued from previous page"` 的跨页上下文 | AMBA 中 93 页跨页续表全部空跑；下一步可检测续表 caption 直接跳过 |
 | **冲突日志无关系级记录** | `add_relation` 冲突只记录 property_key，不记录完整关系上下文 | 冲突日志包含 from/to/type 信息，可定位 |
 | **反馈不反向更新 block metadata** | 全局图更新后，block metadata 中的 extracted_entities 仍是处理时快照 | `get_content_with_entities` 查全局图获取最新状态 |
 

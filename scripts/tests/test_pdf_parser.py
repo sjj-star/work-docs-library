@@ -975,3 +975,345 @@ def test_parse_mixed_layout_end_to_end(tmp_path):
 
     assert "1.1 Test Section" in md_text
     assert "Value A = 100" in md_text
+
+
+# ---------------------------------------------------------------------------
+# 表格检测增强测试（Milestone 1）
+# ---------------------------------------------------------------------------
+
+
+def test_is_page_likely_has_tables():
+    """版本 A 预筛选：_is_page_likely_has_tables 按指标匹配返回 True/False。"""
+    parser = PDFParser()
+
+    # 匹配指标：竖线分隔符
+    assert parser._is_page_likely_has_tables([{"text": "| Col1 | Col2 | Col3 |"}]) is True
+    # 匹配指标：分隔线
+    assert parser._is_page_likely_has_tables([{"text": "-----"}]) is True
+    # 匹配指标：4 列以上空格对齐
+    assert (
+        parser._is_page_likely_has_tables([{"text": "Name        Value       Unit        Type"}])
+        is True
+    )
+    # 不匹配任何指标
+    assert parser._is_page_likely_has_tables([{"text": "This is a normal paragraph."}]) is False
+
+
+def test_table_overlaps_diagram():
+    """_table_overlaps_diagram 应保护 diagram 区域。"""
+    parser = PDFParser()
+
+    table_bbox = fitz.Rect(100, 100, 300, 200)
+
+    # 不重叠
+    diagram_far = [fitz.Rect(400, 400, 500, 500)]
+    assert parser._table_overlaps_diagram(table_bbox, diagram_far) is False
+
+    # 部分重叠但不足阈值
+    diagram_small_overlap = [fitz.Rect(250, 150, 350, 250)]  # 约 25% 重叠
+    assert parser._table_overlaps_diagram(table_bbox, diagram_small_overlap) is False
+
+    # 大量重叠（超过阈值）
+    diagram_large_overlap = [fitz.Rect(120, 110, 290, 195)]  # ~72% 重叠
+    assert parser._table_overlaps_diagram(table_bbox, diagram_large_overlap) is True
+
+    # 完全包含
+    diagram_contains = [fitz.Rect(50, 50, 400, 300)]
+    assert parser._table_overlaps_diagram(table_bbox, diagram_contains) is True
+
+
+def test_detect_tables_with_caption(tmp_path):
+    """Parse 应检测带 caption 的表格并输出 Markdown 表格。"""
+    pdf_path = tmp_path / "table_with_caption.pdf"
+    doc = fitz.open()
+    page = doc.new_page()
+
+    # Draw a 3x3 table with lines
+    for y in [150, 200, 250, 300]:
+        page.draw_line((72, y), (400, y), color=(0, 0, 0), width=1)
+    for x in [72, 180, 290, 400]:
+        page.draw_line((x, 150), (x, 300), color=(0, 0, 0), width=1)
+
+    # Text in cells
+    page.insert_text((90, 175), "Header1", fontsize=10)
+    page.insert_text((200, 175), "Header2", fontsize=10)
+    page.insert_text((310, 175), "Header3", fontsize=10)
+    page.insert_text((90, 225), "Cell A1", fontsize=10)
+    page.insert_text((200, 225), "Cell B1", fontsize=10)
+    page.insert_text((310, 225), "Cell C1", fontsize=10)
+    page.insert_text((90, 275), "Cell A2", fontsize=10)
+    page.insert_text((200, 275), "Cell B2", fontsize=10)
+    page.insert_text((310, 275), "Cell C2", fontsize=10)
+
+    # Table caption
+    page.insert_text((72, 130), "Table 1-1. Test Table", fontsize=11)
+
+    # Body text below table
+    page.insert_text((72, 350), "This is body text after the table.", fontsize=10)
+
+    doc.save(str(pdf_path))
+    doc.close()
+
+    parser = PDFParser()
+    md_text, _ = parser.parse(str(pdf_path), output_dir=str(tmp_path / "out"))
+
+    # Should contain markdown table
+    assert "|Header1|Header2|Header3|" in md_text
+    assert "|Cell A1|Cell B1|Cell C1|" in md_text
+    # Body text should still be present
+    assert "body text after the table" in md_text
+
+
+def test_detect_tables_exception_fallback(tmp_path, monkeypatch):
+    """find_tables() 异常时应降级为纯文本输出。"""
+    pdf_path = tmp_path / "table_exc.pdf"
+    doc = fitz.open()
+    page = doc.new_page()
+    page.insert_text((72, 100), "Table 1-1. Test", fontsize=11)
+    page.insert_text((72, 150), "Some content here.", fontsize=10)
+    doc.save(str(pdf_path))
+    doc.close()
+
+    parser = PDFParser()
+
+    # Mock find_tables to raise exception
+    def _raise(*args, **kwargs):
+        raise RuntimeError("mock table error")
+
+    monkeypatch.setattr(fitz.Page, "find_tables", _raise)
+
+    md_text, _ = parser.parse(str(pdf_path), output_dir=str(tmp_path / "out"))
+
+    # Should still return text without crashing
+    assert "Some content here." in md_text
+
+
+def test_build_page_markdown_with_tables():
+    """_build_page_markdown 应正确排序表格、文本和图片元素。"""
+    parser = PDFParser()
+
+    text_blocks = [
+        {"type": "text", "y0": 50, "y1": 70, "text": "Paragraph before table"},
+        {"type": "text", "y0": 200, "y1": 220, "text": "Paragraph after table"},
+    ]
+    table_elements = [
+        {"type": "table", "y0": 100, "y1": 150, "text": "|A|B|\n|---|---|\n|1|2|"},
+    ]
+    raster_images = []
+    diagram_images = []
+
+    md = parser._build_page_markdown(text_blocks, raster_images, diagram_images, table_elements)
+
+    lines = md.split("\n")
+    # Order should be: text before, table, text after
+    assert "Paragraph before table" in lines[0]
+    assert "|A|B|" in md
+    assert "Paragraph after table" in md
+
+    # Table should appear between the two paragraphs
+    before_idx = md.find("Paragraph before table")
+    table_idx = md.find("|A|B|")
+    after_idx = md.find("Paragraph after table")
+    assert before_idx < table_idx < after_idx
+
+
+def test_strip_table_text_blocks():
+    """_strip_table_text_blocks 应移除落在表格区域内的文本块。"""
+    parser = PDFParser()
+
+    text_blocks = [
+        {"type": "text", "y0": 50, "y1": 70, "text": "Before table"},
+        {"type": "text", "y0": 110, "y1": 130, "text": "Inside table"},
+        {"type": "text", "y0": 200, "y1": 220, "text": "After table"},
+    ]
+    table_elements = [
+        {"type": "table", "y0": 100, "y1": 150, "text": "...", "bbox": fitz.Rect(0, 100, 500, 150)},
+    ]
+
+    result = parser._strip_table_text_blocks(text_blocks, table_elements)
+    texts = [b["text"] for b in result]
+
+    assert "Before table" in texts
+    assert "After table" in texts
+    assert "Inside table" not in texts
+
+
+# ---------------------------------------------------------------------------
+# 图片检测增强测试（Milestone 2）
+# ---------------------------------------------------------------------------
+
+
+def test_merge_image_lists_dedup():
+    """_merge_image_lists 应对重复位置去重。"""
+    parser = PDFParser()
+
+    primary = [
+        {"type": "image", "y0": 100, "y1": 150, "path": Path("/a.jpg")},
+    ]
+    fallback = [
+        {"type": "image", "y0": 105, "y1": 155, "path": Path("/b.jpg")},  # 接近，去重
+        {"type": "image", "y0": 300, "y1": 350, "path": Path("/c.jpg")},  # 远，保留
+    ]
+
+    merged = parser._merge_image_lists(primary, fallback, y_threshold=20.0)
+    paths = [m["path"] for m in merged]
+
+    assert Path("/a.jpg") in paths
+    assert Path("/b.jpg") not in paths  # 被去重
+    assert Path("/c.jpg") in paths
+
+
+def test_validate_image_links_removes_broken(tmp_path):
+    """_validate_image_links 应移除指向不存在文件的引用。"""
+    parser = PDFParser()
+
+    img_dir = tmp_path / "images"
+    img_dir.mkdir()
+
+    # 创建有效图片文件
+    valid_img = img_dir / "valid.jpg"
+    valid_img.write_bytes(b"fake image data")
+
+    md_text = "Some text\n\n![Valid](images/valid.jpg)\n\n![Broken](images/broken.jpg)\n\nMore text"
+    image_paths = [valid_img, tmp_path / "images" / "broken.jpg"]
+
+    cleaned_md, valid_paths = parser._validate_image_links(md_text, image_paths, img_dir)
+
+    assert "![Valid](images/valid.jpg)" in cleaned_md
+    assert "![Broken](images/broken.jpg)" not in cleaned_md
+    assert valid_paths == [valid_img]
+
+
+def test_validate_image_links_preserves_external_urls(tmp_path):
+    """_validate_image_links 应保留外部 URL 图片链接。"""
+    parser = PDFParser()
+
+    img_dir = tmp_path / "images"
+    img_dir.mkdir()
+
+    md_text = "![External](https://example.com/img.png)\n"
+    image_paths: list[Path] = []
+
+    cleaned_md, valid_paths = parser._validate_image_links(md_text, image_paths, img_dir)
+
+    assert "![External](https://example.com/img.png)" in cleaned_md
+    assert valid_paths == []
+
+
+def test_extract_images_via_image_info(tmp_path):
+    """_extract_images_via_image_info 应能提取 page.get_image_info() 检测到的图片。"""
+    import io
+
+    from PIL import Image
+
+    pdf_path = tmp_path / "img_info.pdf"
+    doc = fitz.open()
+    page = doc.new_page()
+    page.insert_text((72, 72), "Page with image", fontsize=12)
+
+    # Insert a real image with varied colors (not low-content)
+    pil_img = Image.new("RGB", (300, 200))
+    pixels = [((x * 255 // 300), (y * 255 // 200), 128) for y in range(200) for x in range(300)]
+    pil_img.putdata(pixels)
+    buf = io.BytesIO()
+    pil_img.save(buf, format="PNG")
+    page.insert_image((100, 100, 400, 300), stream=buf.getvalue())
+
+    doc.save(str(pdf_path))
+    doc.close()
+
+    parser = PDFParser()
+    doc = fitz.open(str(pdf_path))
+    page = doc.load_page(0)
+    img_dir = tmp_path / "out" / "images"
+    img_dir.mkdir(parents=True, exist_ok=True)
+
+    images = parser._extract_images_via_image_info(page, 1, img_dir)
+    doc.close()
+
+    assert len(images) >= 1
+    for img in images:
+        assert img["path"].exists()
+        assert img["path"].stat().st_size > 0
+
+
+# ---------------------------------------------------------------------------
+# PyMuPDF4LLM fallback 测试（Milestone 3）
+# ---------------------------------------------------------------------------
+
+
+def test_should_trigger_p4l_fallback():
+    """_should_trigger_p4l_fallback 应在 caption 存在但无表格时触发。"""
+    parser = PDFParser()
+
+    # 有 caption 但无表格 → 触发
+    blocks_with_caption = [{"text": "Table 1-1. Example"}]
+    assert parser._should_trigger_p4l_fallback(blocks_with_caption, []) is True
+
+    # 有 caption 且有表格 → 不触发
+    assert parser._should_trigger_p4l_fallback(blocks_with_caption, [{"type": "table"}]) is False
+
+    # 无 caption → 不触发
+    blocks_plain = [{"text": "Normal paragraph."}]
+    assert parser._should_trigger_p4l_fallback(blocks_plain, []) is False
+
+
+def test_extract_tables_from_p4l_text():
+    """_extract_tables_from_p4l_text 应从 Markdown 文本中提取表格块。"""
+    parser = PDFParser()
+
+    text = (
+        "Some paragraph\n\n"
+        "|Header1|Header2|\n"
+        "|-------|-------|\n"
+        "|Cell1|Cell2|\n\n"
+        "Another paragraph\n\n"
+        "|A|B|\n"
+        "|-|-|\n"
+        "|1|2|\n"
+    )
+    tables = parser._extract_tables_from_p4l_text(text)
+
+    assert len(tables) == 2
+    assert "|Header1|Header2|" in tables[0]
+    assert "|A|B|" in tables[1]
+
+
+def test_extract_tables_from_p4l_text_empty():
+    """_extract_tables_from_p4l_text 对空文本应返回空列表。"""
+    parser = PDFParser()
+    assert parser._extract_tables_from_p4l_text("") == []
+    assert parser._extract_tables_from_p4l_text("No table here.") == []
+
+
+def test_fuse_p4l_tables_into_pages():
+    """_fuse_p4l_tables_into_pages 应将 PyMuPDF4LLM 表格追加到对应页面。"""
+    parser = PDFParser()
+
+    page_markdowns = ["Page 1 text.", "Page 2 text."]
+    p4l_results = {
+        1: {"text": "|A|B|\n|-|-|\n|1|2|\n"},
+    }
+    problem_pages = {1: {"missing_tables": True}}
+
+    result = parser._fuse_p4l_tables_into_pages(page_markdowns, p4l_results, problem_pages)
+
+    assert "|A|B|" in result[0]
+    assert "Page 1 text." in result[0]
+    assert result[1] == "Page 2 text."
+
+
+def test_fuse_p4l_skips_if_already_has_table():
+    """_fuse_p4l_tables_into_pages 若页面已有表格则不重复添加。"""
+    parser = PDFParser()
+
+    page_markdowns = ["Page 1.\n\n|X|Y|\n|---|---|\n|1|2|\n"]
+    p4l_results = {
+        1: {"text": "|A|B|\n|-|-|\n|3|4|\n"},
+    }
+    problem_pages = {1: {"missing_tables": True}}
+
+    result = parser._fuse_p4l_tables_into_pages(page_markdowns, p4l_results, problem_pages)
+
+    # 不应添加第二个表格
+    assert result[0].count("|---|") == 1

@@ -38,7 +38,21 @@
     "api_key": "",
     "timeout": "",
     "max_retries": "",
-    "poll_interval": ""
+    "poll_interval": "",
+    "min_image_width": "",
+    "min_image_height": "",
+    "page_render_dpi": "",
+    "table_detection_enabled": "",
+    "table_overlap_threshold": "",
+    "table_min_rows": "",
+    "table_min_cols": "",
+    "table_min_height_pt": "",
+    "table_min_width_ratio": "",
+    "tab_merge_threshold_pt": "",
+    "image_size_limit": "",
+    "max_images_per_page": "",
+    "image_merge_y_threshold": "",
+    "image_jpeg_quality": ""
   },
   "batch": {
     "poll_interval": "",

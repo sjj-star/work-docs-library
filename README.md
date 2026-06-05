@@ -683,7 +683,7 @@ cd /path/to/work-docs-library
 PYTHONPATH=scripts ./.venv/bin/python -m pytest scripts/tests/ -v
 ```
 
-**当前状态：352 passed, 2 skipped, 0 failed。**
+**当前状态：389 passed, 2 skipped, 0 failed。**
 
 ### 常用测试文档
 
@@ -802,7 +802,10 @@ Prompt 中显式规定格式，确保 LLM 输出统一：
 7. **NetworkX 内存上限**：全局图为内存存储，数百个文档 × 万页级时可能达到 GB 级。当前单机目标规模可接受，预留 Neo4j 迁移接口
 8. **输入文档约束**：Markdown 图片引用 `![name](images/path.jpg)` 中的 `name` 将作为 `image_id`，建议填写有意义的名称
 9. **PDF 解析依赖 BigModel 专用 API**：文档提取主路径使用 BigModel 专有 Expert API（`/files/parser/create`），非 OpenAI-compatible，无法直接切换至其他厂商。若 BigModel 不可用，可依赖本地 `PDFParser`（PyMuPDF）作为 fallback，输出格式与 BigModel 完全一致，但解析质量可能略有差异
-10. **跨产品外设变体**：同一个外设/寄存器出现在多个产品手册中时，`doc_properties` 保存每个文档的原始属性快照，全局图的 `properties` 仍为合并后值。查询时通过 `doc_id` 参数获取指定产品的精确属性。产品型号通过启发式正则从文档标题/文件名自动提取
+10. **本地 PDF Parser 表格检测限制**：`find_tables(strategy="lines_strict")` 对无竖线/弱线条表格（如 AMBA 规范中大量使用的空白对齐表格）检测率极低（AMBA 仅 ~9%）。这是保守的正确性优先策略——`lines_strict` 误检率极低，可保护位域图不被表格化，但代价是大量无边框表格漏检。PyMuPDF4LLM fallback 对此类表格同样无效（12 页触发 / 0 产出）
+11. **正文引用句误触发表格检测**：`TABLE_CAPTION_RE` 会匹配 `"Table X.X describes..."` 等正文引用句，导致所在页面触发 `find_tables()` 但无实际表格。AMBA 文档中发生 191 次此类误匹配，是性能空跑的主要来源之一
+12. **跨页续表碎片化**：`find_tables()` 按页独立处理，无法识别 `"Continued from previous page"` 的跨页表格上下文。AMBA 中 93 页跨页续表全部空跑
+13. **跨产品外设变体**：同一个外设/寄存器出现在多个产品手册中时，`doc_properties` 保存每个文档的原始属性快照，全局图的 `properties` 仍为合并后值。查询时通过 `doc_id` 参数获取指定产品的精确属性。产品型号通过启发式正则从文档标题/文件名自动提取
 
 ### 实体提取质量已知问题（Prompt 迭代中）
 
