@@ -2,7 +2,7 @@
 
 import pytest
 from core.db import KnowledgeDB
-from core.models import Chapter, Document
+from core.models import Chapter, Chunk, Document
 
 
 @pytest.fixture
@@ -194,3 +194,33 @@ def test_feedback(db):
     )
     rel_score = db.get_relation_feedback_score("HAS_REGISTER", "Module", "TOP", "Register", "CTRL")
     assert rel_score == 0
+
+
+# -- 从 test_models.py 合并的模型默认值测试 --
+
+def test_chapter_to_dict():
+    """Chapter.to_dict() 应正确序列化."""
+    ch = Chapter(title="Intro", start_page=1, end_page=5, level=1)
+    d = ch.to_dict()
+    assert d == {"title": "Intro", "start_page": 1, "end_page": 5, "level": 1}
+
+
+def test_chunk_defaults():
+    """Chunk 默认值：metadata 应为空字典."""
+    ck = Chunk(doc_id="d1", chunk_id="c1", content="hello", chunk_type="text")
+    assert ck.metadata == {}
+
+
+def test_document_defaults():
+    """Document 默认值：status 为 pending，chapters 为空列表."""
+    import tempfile
+    from pathlib import Path
+
+    doc = Document(
+        doc_id="d1",
+        title="t",
+        source_path=str(Path(tempfile.gettempdir()) / "a.pdf"),
+        file_type="pdf",
+    )
+    assert doc.status == "pending"
+    assert doc.chapters == []

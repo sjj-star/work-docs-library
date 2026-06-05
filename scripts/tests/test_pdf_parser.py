@@ -1242,20 +1242,69 @@ def test_extract_images_via_image_info(tmp_path):
 # ---------------------------------------------------------------------------
 
 
-def test_should_trigger_p4l_fallback():
-    """_should_trigger_p4l_fallback 应在 caption 存在但无表格时触发。"""
+def test_is_strict_table_caption():
+    """_is_strict_table_caption 应区分正式标题和正文引用句。"""
     parser = PDFParser()
 
-    # 有 caption 但无表格 → 触发
+    # True positives — 正式标题
+    assert parser._is_strict_table_caption("Table B1.1: Layers of the CHI architecture") is True
+    assert parser._is_strict_table_caption("Table 1-1. Example Description") is True
+    assert parser._is_strict_table_caption("Table 1.1 Description") is True
+    assert parser._is_strict_table_caption("表 3-1: 示例") is True
+
+    # True negatives — 正文引用句
+    assert parser._is_strict_table_caption("Table B1.3 shows the representations.") is False
+    assert parser._is_strict_table_caption("Table B2.12 lists the legal combinations.") is False
+    assert parser._is_strict_table_caption("Table B1.1 describes the primary function.") is False
+    assert parser._is_strict_table_caption("Table B2.7 illustrates the responses.") is False
+    assert parser._is_strict_table_caption("Table B2.8 presents the request types.") is False
+    assert parser._is_strict_table_caption("Table B2.5 gives the fields.") is False
+    assert parser._is_strict_table_caption("Table B4.4 provides the permitted values.") is False
+    assert parser._is_strict_table_caption("Table B2.6 details the transactions.") is False
+    assert parser._is_strict_table_caption("Table B2.6 summarizes the states.") is False
+
+    # 续表 — 应保留（不排斥）
+    assert parser._is_strict_table_caption("Table B1.2 – Continued from previous page") is True
+
+    # 非 caption
+    assert parser._is_strict_table_caption("Normal paragraph.") is False
+    assert parser._is_strict_table_caption("") is False
+
+
+def test_is_strict_figure_caption():
+    """_is_strict_figure_caption 应区分正式标题和正文引用句。"""
+    parser = PDFParser()
+
+    # True positives
+    assert parser._is_strict_figure_caption("Figure 1-1. Architecture Diagram") is True
+    assert parser._is_strict_figure_caption("Figure B1.1: Protocol Stack") is True
+
+    # True negatives — 正文引用句
+    assert parser._is_strict_figure_caption("Figure B1.1 shows the stack.") is False
+    assert parser._is_strict_figure_caption("Figure 1-1 describes the flow.") is False
+
+    # 非 caption
+    assert parser._is_strict_figure_caption("Normal paragraph.") is False
+
+
+def test_should_trigger_p4l_fallback():
+    """_should_trigger_p4l_fallback 应在严格 caption 存在但无表格时触发。"""
+    parser = PDFParser()
+
+    # 有正式 caption 但无表格 → 触发
     blocks_with_caption = [{"text": "Table 1-1. Example"}]
     assert parser._should_trigger_p4l_fallback(blocks_with_caption, []) is True
 
-    # 有 caption 且有表格 → 不触发
+    # 有正式 caption 且有表格 → 不触发
     assert parser._should_trigger_p4l_fallback(blocks_with_caption, [{"type": "table"}]) is False
 
     # 无 caption → 不触发
     blocks_plain = [{"text": "Normal paragraph."}]
     assert parser._should_trigger_p4l_fallback(blocks_plain, []) is False
+
+    # 只有引用句 caption → 不触发（关键：严格过滤生效）
+    blocks_reference = [{"text": "Table B1.3 shows the representations."}]
+    assert parser._should_trigger_p4l_fallback(blocks_reference, []) is False
 
 
 def test_extract_tables_from_p4l_text():

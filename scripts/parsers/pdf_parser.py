@@ -36,10 +36,20 @@ class PDFParser:
     # Figure caption pattern
     # Matches true captions like "Figure 1-1. Description", "Figure A1.1: Description",
     # or "Figure 1-1 Description" (where the word after the number starts with a capital
-    # letter). It excludes explanatory sentences like "Figure 1-1 shows..." or
-    # "Figure 1-1 is a hierarchical...".
+    # letter).
+    # NOTE: Due to re.match() prefix-matching semantics, explanatory sentences like
+    # "Figure B1.1 shows..." are *not* excluded by this regex alone. Use
+    # _is_strict_figure_caption for semantic filtering.
     FIGURE_CAPTION_RE = r"^Figure\s+[A-Z]?\d+(?:[-\.]\d+)?(?:[:\.]\s*\S|\s+[A-Z]\S*)"
     TABLE_CAPTION_RE = r"^(Table|表)\s*[A-Z]?\d+(?:[-\.]\d+)?(?:[:\.]\s*\S|\s+[A-Z]\S*)"
+
+    # Reference verbs that indicate a body-text reference sentence rather than
+    # a true caption (e.g. "Table B1.3 shows the representations...").
+    REFERENCE_VERBS = (
+        "shows", "describes", "lists", "illustrates", "presents",
+        "gives", "provides", "details", "summarizes",
+    )
+
     CALLOUT_PREFIXES = ("A.", "B.", "C.", "D.", "E.", "F.", "G.", "H.")
     CALLOUT_NOTE_PREFIX = "Note:"
     CALLOUT_GAP_THRESHOLD = 45
@@ -92,6 +102,48 @@ class PDFParser:
     TABLE_OVERLAP_DIAGRAM_THRESHOLD = Config.PARSER_TABLE_OVERLAP_THRESHOLD
     TABLE_MIN_ROWS = Config.PARSER_TABLE_MIN_ROWS
     TABLE_MIN_COLS = Config.PARSER_TABLE_MIN_COLS
+
+    @classmethod
+    def _is_strict_table_caption(cls, text: str) -> bool:
+        """Strict table-caption detection for performance-sensitive pre-filtering.
+
+        Excludes body-text reference sentences (e.g. "Table B1.3 shows...")
+        while keeping true captions (e.g. "Table B1.3: Title").
+
+        Continued tables ("Continued from previous page") are NOT excluded —
+        they contain real tabular data and must remain eligible for future
+        detection-strategy improvements.
+        """
+        if not re.match(cls.TABLE_CAPTION_RE, text):
+            return False
+
+        # Detect reference sentences directly via a dedicated pattern.
+        # re.match() prefix-matching can truncate multi-digit numbers due to
+        # backtracking (e.g. "Table B2.12" may match only "Table B2.1"),
+        # so we do NOT rely on match.end() to locate the verb.
+        ref_pattern = (
+            r"^(Table|表)\s*[A-Z]?\d+(?:[-\.]\d+)?\s+"
+            r"(?:shows|describes|lists|illustrates|presents|gives|provides|details|summarizes)\b"
+        )
+        if re.match(ref_pattern, text, re.IGNORECASE):
+            return False
+
+        return True
+
+    @classmethod
+    def _is_strict_figure_caption(cls, text: str) -> bool:
+        """Strict figure-caption detection, analogous to _is_strict_table_caption."""
+        if not re.match(cls.FIGURE_CAPTION_RE, text):
+            return False
+
+        ref_pattern = (
+            r"^Figure\s*[A-Z]?\d+(?:[-\.]\d+)?\s+"
+            r"(?:shows|describes|lists|illustrates|presents|gives|provides|details|summarizes)\b"
+        )
+        if re.match(ref_pattern, text, re.IGNORECASE):
+            return False
+
+        return True
 
     @classmethod
     def _is_likely_body_text(cls, txt: str, rect: fitz.Rect, page_rect: fitz.Rect) -> bool:
@@ -822,8 +874,9 @@ class PDFParser:
             return []
 
         # 1. 保留现有策略：table caption 页面强制检测
+        # 使用严格 caption 过滤，排除正文引用句（如 "Table B1.3 shows..."）
         has_table_caption = any(
-            re.match(self.TABLE_CAPTION_RE, block.get("text", "")) for block in text_blocks
+            self._is_strict_table_caption(block.get("text", "")) for block in text_blocks
         )
 
         # 2. 新增补充：无 caption 但表格特征明显的页面
@@ -898,7 +951,7 @@ class PDFParser:
         触发条件：页面存在 table caption，但 Layer 1 自研检测未输出任何表格。
         """
         has_table_caption = any(
-            re.match(PDFParser.TABLE_CAPTION_RE, block.get("text", "")) for block in text_blocks
+            PDFParser._is_strict_table_caption(block.get("text", "")) for block in text_blocks
         )
         return has_table_caption and not table_elements
 

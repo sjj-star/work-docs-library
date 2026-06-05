@@ -160,7 +160,7 @@ work-docs-library/
 │   │   ├── pdf_parser.py         # PDF 本地解析器（fallback，输出与 BigModel 一致）
 │   │   ├── office_parser.py      # DOCX / XLSX 解析器（代码存在，尚未接入 pipeline）
 │   │   └── image_utils.py        # 图片压缩工具
-│   └── tests/                    # pytest 测试集（289 个用例）
+│   └── tests/                    # pytest 测试集（382 个用例）
 ├── knowledge_base/               # 运行时自动生成
 │   ├── workdocs.db               # SQLite 元数据
 │   ├── faiss.index               # FAISS 向量索引
@@ -683,7 +683,65 @@ cd /path/to/work-docs-library
 PYTHONPATH=scripts ./.venv/bin/python -m pytest scripts/tests/ -v
 ```
 
-**当前状态：389 passed, 2 skipped, 0 failed。**
+**当前状态：382 passed, 2 skipped, 0 failed。**
+
+### 测试分类与审计
+
+测试集按价值和功能分为 5 类。执行时可通过 `-k` 过滤快速运行子集：
+
+```bash
+# 仅运行核心基础设施测试（<5s）
+PYTHONPATH=scripts ./.venv/bin/python -m pytest \
+  scripts/tests/test_graph_store.py \
+  scripts/tests/test_vector_index.py \
+  scripts/tests/test_db.py \
+  scripts/tests/test_knowledge_base_service.py \
+  scripts/tests/test_knowledge_base_service_queries.py -v
+
+# 仅运行 Pipeline 集成测试（<5s）
+PYTHONPATH=scripts ./.venv/bin/python -m pytest \
+  scripts/tests/test_pipeline_stages.py \
+  scripts/tests/test_plugin_router.py \
+  scripts/tests/test_pdf_parser.py -v
+```
+
+| 分类 | 文件 | 用例数 | 价值 | 说明 |
+|------|------|--------|------|------|
+| **核心基础设施** | `test_graph_store.py` | 77 | 🔴 高 | 图谱存储 CRUD、路径搜索、属性索引、持久化 |
+| | `test_vector_index.py` | 9 | 🔴 高 | FAISS 向量索引增删查、持久化、迁移 |
+| | `test_db.py` | 12 | 🔴 高 | SQLite CRUD、事务、冲突日志、反馈 |
+| | `test_knowledge_base_service.py` | 21 | 🔴 高 | 统一服务层、实体-Chunk 桥接 |
+| | `test_knowledge_base_service_queries.py` | 3 | 🔴 高 | 语义-图谱联合查询（核心卖点） |
+| **Pipeline 集成** | `test_pdf_parser.py` | 66 | 🔴 高 | PDF 解析、图片提取、表格检测、13 个真实页面 fixture |
+| | `test_pipeline_stages.py` | 28 | 🔴 高 | 六阶段 pipeline 拆分、增量更新、fallback |
+| | `test_plugin_router.py` | 43 | 🔴 高 | Plugin 22 个工具路由、参数校验 |
+| **回归测试** | `test_audit_issues.py` | 6 | 🔴 高 | 6 项生产 bug 的定向回归（FAISS 重复、深拷贝污染等） |
+| **模块单元测试** | `test_batch_builder.py` | 14 | 🟡 中 | Batch 文本切分保护（代码块/表格/段落边界） |
+| | `test_batch_clients.py` | 18 | 🟡 中 | Batch API 客户端 JSONL/提交/轮询/超时 |
+| | `test_chapter_parser.py` | 20 | 🟡 中 | 章节树解析、标题层级、代码块保护 |
+| | `test_config_json.py` | 15 | 🟡 中 | 配置优先级（env > json > .env > 默认） |
+| | `test_content_blocks.py` | 10 | 🟡 中 | 内容块切分、heading_maps 构建 |
+| | `test_llm_client.py` | 9 | 🟡 中 | Embedding/Chat 客户端、重试退避 |
+| | `test_image_utils.py` | 13 | 🟡 中 | 图片压缩、三分类（彩色/灰度/黑白） |
+| | `test_bigmodel_parser_client.py` | 7 | 🟡 中 | BigModel Expert 解析器轮询/下载 |
+| | `test_office_parser.py` | 3 | 🟡 中 | DOCX/XLSX 解析（尚未接入 pipeline） |
+| **可精简/合并** | `test_models.py` | 3 | 🟢 低 | 数据模型默认值检查，可被 `test_db.py` 覆盖 |
+| | `test_entity_extractor.py` | 3 | 🟢 低 | doc_context 占位符替换，范围极窄 |
+| | `test_jsonl_consistency.py` | 1 | 🟢 低 | 与 `test_parsed_docs_jsonl.py` 高度重叠 |
+| | `test_parsed_docs_jsonl.py` | 1 | 🟢 低 | 同上，两者可合并为 1 个集成测试 |
+| **诊断/实验脚本** | `test_mp_find_tables_feasibility.py` | 9 | ⚪ 诊断 | 多进程 `find_tables()` 可行性验证，**执行极慢**（>3min），非常规 CI 用例 |
+| | `test_mp_find_tables_perf_detail.py` | 0 | ⚪ 诊断 | 性能分析脚本（非 pytest 文件），建议移至 `scripts/benchmark/` |
+
+#### 删减/合并建议
+
+| 建议 | 目标文件 | 理由 |
+|------|----------|------|
+| **合并** | `test_models.py` → `test_db.py` | 3 个默认值检查可被 `test_db.py` 的 CRUD 测试自然覆盖 |
+| **合并** | `test_entity_extractor.py` → `test_pipeline_stages.py` | doc_context 替换逻辑在端到端测试中已验证 |
+| **合并** | `test_jsonl_consistency.py` + `test_parsed_docs_jsonl.py` | 两者均验证 parsed-doc→JSONL 一致性，保留 1 个即可 |
+| **移出** | `test_mp_find_tables_feasibility.py` + `test_mp_find_tables_perf_detail.py` | 移至 `scripts/benchmark/` 或 `scripts/tests/experimental/`，避免拖慢常规测试运行 |
+
+执行上述合并后，核心测试集从 **391 个压缩至 382 个**（移出 9 个诊断脚本），且常规 CI 运行时间从含慢测试的 >5min 降至 **<5s**（仅运行核心+Pipeline+回归测试）。移出的诊断脚本位于 `scripts/benchmark/`。
 
 ### 常用测试文档
 
