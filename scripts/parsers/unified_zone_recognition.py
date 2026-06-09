@@ -1263,12 +1263,21 @@ class DiagramClipBuilder:
 
         return clip
 
-    @staticmethod
-    def _is_body_text(txt: str, rect: fitz.Rect, page_rect: fitz.Rect) -> bool:
+    # 图注/表格注释等常见非正文格式（允许点后无空格，如 "A.After"、"(1)In"）
+    _CALLOUT_PATTERN = re.compile(
+        r"^(?:[A-Z]\.\s*|\(\d+\)\s*|Note\s*:\s*|Notes?\s*\(\d+\)\s*)",
+        re.IGNORECASE,
+    )
+
+    @classmethod
+    def _is_body_text(cls, txt: str, rect: fitz.Rect, page_rect: fitz.Rect) -> bool:
         """Heuristic: 判断文本块是否为正文段落（复用 ZoneBuilder 逻辑）."""
         if rect.height > page_rect.height * 0.35:
             return False
         if rect.width > page_rect.width * 0.85 and rect.height > 80:
+            return False
+        # 排除图注/注释格式（如 "A. After reset...", "(1) In addition..."）
+        if cls._CALLOUT_PATTERN.match(txt):
             return False
         width_ratio = rect.width / page_rect.width
         if width_ratio > 0.52 and rect.height > 8 and len(txt) > 45:
