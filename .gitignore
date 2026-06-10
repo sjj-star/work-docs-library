@@ -35,5 +35,5 @@ checkpoint.json
 .DS_Store
 Thumbs.db
 
-# Kimi CLI plan files
-.kimi/
+# Coding Agent files
+.agents/

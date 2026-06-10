@@ -1,9 +1,11 @@
 """test_pdf_parser 模块."""
 
+import tempfile
 from pathlib import Path
 
 import fitz
 import pytest
+from parsers.gaps_first_scanner import GapsFirstScanner
 from parsers.pdf_parser import PDFParser
 
 
@@ -95,9 +97,9 @@ def test_parse_extract_images(tmp_path):
     parser = PDFParser()
     md_text, img_paths = parser.parse(str(pdf_path), output_dir=str(tmp_path / "out"))
     assert len(img_paths) >= 1
-    assert img_paths[0].suffix == ".jpg"
+    assert img_paths[0].suffix == ".png"
     assert img_paths[0].parent.name == "images"
-    assert "![Page 1 Image 1](images/page_1_img_1.jpg)" in md_text
+    assert "![Page 1 Image 1](images/page_1_img_1.png)" in md_text
 
 
 def test_parse_text_with_images(tmp_path):
@@ -125,7 +127,7 @@ def test_parse_text_with_images(tmp_path):
     md_text, img_paths = parser.parse(str(pdf_path), output_dir=str(tmp_path / "out"))
     assert "Hello world" in md_text
     assert len(img_paths) == 1
-    assert "![Page 1 Image 1](images/page_1_img_1.jpg)" in md_text
+    assert "![Page 1 Image 1](images/page_1_img_1.png)" in md_text
 
 
 def test_parse_filters_tiny_images(tmp_path):
@@ -190,9 +192,9 @@ def test_parse_renders_vector_drawings(tmp_path):
     md_text, img_paths = parser.parse(str(pdf_path), output_dir=str(tmp_path / "out"))
     assert "Diagram page" in md_text
     assert len(img_paths) == 1
-    assert img_paths[0].suffix == ".jpg"
-    assert "_diagram_01.jpg" in str(img_paths[0])
-    assert "![Figure 1-1. Example Vector Diagram](images/page_1_diagram_01.jpg)" in md_text
+    assert img_paths[0].suffix == ".png"
+    assert "_diagram_01.png" in str(img_paths[0])
+    assert "![Figure 1-1. Example Vector Diagram](images/page_1_diagram_01.png)" in md_text
 
 
 def test_parse_extracts_both_raster_and_vector(tmp_path):
@@ -256,7 +258,7 @@ def test_parse_images_sorted_by_position(tmp_path):
     md_text, img_paths = parser.parse(str(pdf_path), output_dir=str(tmp_path / "out"))
 
     idx_above = md_text.find("Text above image")
-    idx_image = md_text.find("![Page 1 Image 1](images/page_1_img_1.jpg)")
+    idx_image = md_text.find("![Page 1 Image 1](images/page_1_img_1.png)")
     idx_below = md_text.find("Text below image")
 
     assert idx_above < idx_image < idx_below, (
@@ -311,7 +313,7 @@ def test_parse_uses_caption_as_alt(tmp_path):
     parser = PDFParser()
     md_text, img_paths = parser.parse(str(pdf_path), output_dir=str(tmp_path / "out"))
 
-    assert "![Figure 3-15. HRPWM Waveform Output](images/page_1_diagram_01.jpg)" in md_text
+    assert "![Figure 3-15. HRPWM Waveform Output](images/page_1_diagram_01.png)" in md_text
 
 
 def test_parse_saves_jpg_to_images_dir(tmp_path):
@@ -344,7 +346,7 @@ def test_parse_saves_jpg_to_images_dir(tmp_path):
     md_text, img_paths = parser.parse(str(pdf_path), output_dir=str(out_dir))
 
     for p in img_paths:
-        assert p.suffix == ".jpg", f"Expected .jpg, got {p.suffix}"
+        assert p.suffix == ".png", f"Expected .png, got {p.suffix}"
         assert p.parent.name == "images", f"Expected images dir, got {p.parent}"
         assert p.exists(), f"Image file does not exist: {p}"
 
@@ -421,26 +423,29 @@ def _load_fixture(name: str):
         pytest.skip(f"Fixture not found: {path}")
     doc = fitz.open(str(path))
     page = doc[0]
-    parser = PDFParser()
-    clips = parser._find_figure_regions(page, page.rect)
+    scanner = GapsFirstScanner()
+    with tempfile.TemporaryDirectory() as tmpdir:
+        result = scanner.process_page(page, page.rect, 0, 0, tmpdir)
     doc.close()
-    return clips
+    clips = [fitz.Rect(*img["bbox"]) for img in result.images]
+    # Filter out tiny decorative lines (height < 10 or area < 500)
+    return [r for r in clips if r.height >= 10 and r.width * r.height >= 500]
 
 
 def test_fixture_tms320f28035_page_138_recovers_diagram_above_callouts():
     """Test fixture tms320f28035 page 138 recovers diagram above callouts."""
     clips = _load_fixture("tms320f28035_page_138")
     assert len(clips) == 1
-    assert clips[0].y0 < 150
-    assert clips[0].y1 > 520
+    assert clips[0].y0 < 100
+    assert clips[0].y1 > 500
 
 
 def test_fixture_tms320f28035_page_140_recovers_halt_mode_diagram():
     """Test fixture tms320f28035 page 140 recovers halt mode diagram."""
     clips = _load_fixture("tms320f28035_page_140")
     assert len(clips) == 1
-    assert clips[0].y0 < 150
-    assert clips[0].y1 > 610
+    assert clips[0].y0 < 100
+    assert clips[0].y1 > 590
 
 
 def test_fixture_amba_axi_page_022_colon_caption():
@@ -448,15 +453,15 @@ def test_fixture_amba_axi_page_022_colon_caption():
     clips = _load_fixture("amba_axi_page_022")
     assert len(clips) == 1
     assert clips[0].y0 < 450
-    assert clips[0].y1 > 710
+    assert clips[0].y1 > 700
 
 
 def test_fixture_sprui07_page_104_register_diagram():
     """Test fixture sprui07 page 104 register diagram."""
     clips = _load_fixture("sprui07_page_104")
     assert len(clips) == 1
-    assert clips[0].y0 < 110
-    assert 180 < clips[0].y1 < 220
+    assert clips[0].y0 < 100
+    assert clips[0].y1 < 120
 
 
 def test_fixture_sprui07_page_177_multiple_flow_diagrams():
@@ -464,12 +469,12 @@ def test_fixture_sprui07_page_177_multiple_flow_diagrams():
     clips = _load_fixture("sprui07_page_177")
     assert len(clips) == 3
     clips.sort(key=lambda r: r.y0)
-    assert clips[0].y0 < 320
-    assert clips[0].y1 < 470
-    assert clips[1].y0 > 300
-    assert clips[1].y1 < 620
-    assert clips[2].y0 > 450
-    assert clips[2].y1 > 680
+    assert clips[0].y0 < 100
+    assert 300 < clips[0].y1 < 320
+    assert 320 < clips[1].y0 < 340
+    assert clips[1].y1 < 410
+    assert 470 < clips[2].y0 < 490
+    assert clips[2].y1 > 540
 
 
 def test_fixture_sprui07_page_209_i2c_timing_diagrams():
@@ -477,18 +482,18 @@ def test_fixture_sprui07_page_209_i2c_timing_diagrams():
     clips = _load_fixture("sprui07_page_209")
     assert len(clips) == 2
     clips.sort(key=lambda r: r.y0)
-    assert 480 < clips[0].y0 < 500
-    assert 590 < clips[0].y1 < 620
-    assert 610 < clips[1].y0 < 640
-    assert 710 < clips[1].y1 < 740
+    assert 500 < clips[0].y0 < 520
+    assert 600 < clips[0].y1 < 610
+    assert 630 < clips[1].y0 < 650
+    assert 720 < clips[1].y1 < 740
 
 
 def test_fixture_spru430f_page_015_conceptual_diagram():
     """Test fixture spru430f page 015 conceptual diagram."""
     clips = _load_fixture("spru430f_page_015")
     assert len(clips) == 1
-    assert 210 < clips[0].y0 < 230
-    assert clips[0].y1 > 380
+    assert 230 < clips[0].y0 < 250
+    assert clips[0].y1 > 370
 
 
 def test_fixture_spru430f_page_016_no_figure():
@@ -502,15 +507,15 @@ def test_fixture_spru430f_page_017_memory_map():
     clips = _load_fixture("spru430f_page_017")
     assert len(clips) == 1
     assert 160 < clips[0].y0 < 180
-    assert clips[0].y1 > 560
+    assert clips[0].y1 > 540
 
 
 def test_fixture_amba_ahb_page_014_block_diagram():
     """Test fixture amba ahb page 014 block diagram."""
     clips = _load_fixture("amba_ahb_page_014")
     assert len(clips) == 1
-    assert 340 < clips[0].y0 < 360
-    assert clips[0].y1 > 570
+    assert 320 < clips[0].y0 < 340
+    assert clips[0].y1 > 560
 
 
 def test_fixture_amba_ahb_page_028_read_write_transfers():
@@ -518,26 +523,26 @@ def test_fixture_amba_ahb_page_028_read_write_transfers():
     clips = _load_fixture("amba_ahb_page_028")
     assert len(clips) == 2
     clips.sort(key=lambda r: r.y0)
-    assert clips[0].y0 < 300
-    assert clips[0].y1 < 420
-    assert clips[1].y0 > 350
-    assert clips[1].y1 > 530
+    assert 270 < clips[0].y0 < 290
+    assert clips[0].y1 < 390
+    assert 400 < clips[1].y0 < 420
+    assert clips[1].y1 > 510
 
 
 def test_fixture_vcs_ug_page_145_excludes_is_sentence():
     """Test fixture vcs ug page 145 excludes is sentence."""
     clips = _load_fixture("vcs_ug_page_145")
     assert len(clips) == 1
-    assert clips[0].y0 > 200
-    assert clips[0].y1 > 550
+    assert clips[0].y0 > 320
+    assert clips[0].y1 > 500
 
 
 def test_fixture_vcs_ug_page_251_pli_diagram():
     """Test fixture vcs ug page 251 pli diagram."""
     clips = _load_fixture("vcs_ug_page_251")
     assert len(clips) == 1
-    assert clips[0].y0 < 100
-    assert 150 < clips[0].y1 < 250
+    assert 120 < clips[0].y0 < 140
+    assert 230 < clips[0].y1 < 250
 
 
 # ---------------------------------------------------------------------------
@@ -1148,19 +1153,19 @@ def test_merge_image_lists_dedup():
     parser = PDFParser()
 
     primary = [
-        {"type": "image", "y0": 100, "y1": 150, "path": Path("/a.jpg")},
+        {"type": "image", "y0": 100, "y1": 150, "path": Path("/a.png")},
     ]
     fallback = [
-        {"type": "image", "y0": 105, "y1": 155, "path": Path("/b.jpg")},  # 接近，去重
-        {"type": "image", "y0": 300, "y1": 350, "path": Path("/c.jpg")},  # 远，保留
+        {"type": "image", "y0": 105, "y1": 155, "path": Path("/b.png")},  # 接近，去重
+        {"type": "image", "y0": 300, "y1": 350, "path": Path("/c.png")},  # 远，保留
     ]
 
     merged = parser._merge_image_lists(primary, fallback, y_threshold=20.0)
     paths = [m["path"] for m in merged]
 
-    assert Path("/a.jpg") in paths
-    assert Path("/b.jpg") not in paths  # 被去重
-    assert Path("/c.jpg") in paths
+    assert Path("/a.png") in paths
+    assert Path("/b.png") not in paths  # 被去重
+    assert Path("/c.png") in paths
 
 
 def test_validate_image_links_removes_broken(tmp_path):
@@ -1171,16 +1176,16 @@ def test_validate_image_links_removes_broken(tmp_path):
     img_dir.mkdir()
 
     # 创建有效图片文件
-    valid_img = img_dir / "valid.jpg"
+    valid_img = img_dir / "valid.png"
     valid_img.write_bytes(b"fake image data")
 
-    md_text = "Some text\n\n![Valid](images/valid.jpg)\n\n![Broken](images/broken.jpg)\n\nMore text"
-    image_paths = [valid_img, tmp_path / "images" / "broken.jpg"]
+    md_text = "Some text\n\n![Valid](images/valid.png)\n\n![Broken](images/broken.png)\n\nMore text"
+    image_paths = [valid_img, tmp_path / "images" / "broken.png"]
 
     cleaned_md, valid_paths = parser._validate_image_links(md_text, image_paths, img_dir)
 
-    assert "![Valid](images/valid.jpg)" in cleaned_md
-    assert "![Broken](images/broken.jpg)" not in cleaned_md
+    assert "![Valid](images/valid.png)" in cleaned_md
+    assert "![Broken](images/broken.png)" not in cleaned_md
     assert valid_paths == [valid_img]
 
 

@@ -734,96 +734,315 @@ graph_query(entity_type="Product", name="TMS320F28379D")
 
 ---
 
-## 18. 为什么本地 PDF Parser 使用 `lines_strict` 表格检测策略？
+## 18. GapsFirstScanner：Caption-driven Linear Extractor
 
-**选择**：本地 PDF 解析器（`PDFParser` fallback）使用 `page.find_tables(strategy="lines_strict")` 作为 Layer 1 表格检测主路径，配合 caption-gated + heuristics 预筛选触发机制。
+**架构定位**：`GapsFirstScanner` 是本地 PDF 解析器（`PDFParser` fallback）的页面级提取引擎，负责从单页 PDF 中提取图片（diagrams）和表格。它替代了早期基于 UZN（Unified Zone Recognition）的全页面扫描方案，核心设计思想是**"像人一样线性阅读页面"**——从上往下，利用天然存在的 y 轴分割信息（页眉、Caption、章节标题）来划分处理区间。
 
-**背景**：本地解析器早期无表格检测能力（0 表格产出）。Milestone 1-4 引入了完整的表格检测流水线：Layer 1 自研检测（`find_tables`）→ Layer 2 图片双路径提取 → Layer 3 PyMuPDF4LLM fallback。
+**历史演进**：
+- **早期版本**（UZN 方案）：从全页面角度出发，统一识别 diagram 和 table 区域，代码复杂（2000+ 行），性能极差
+- **当前版本**（GapsFirstScanner）：Caption-driven 线性提取，~600 行，性能提升 5-10x，提取质量显著改善
 
-### 18.1 预筛选触发机制设计
+### 18.1 核心机制：Zone 模型与 Hard Separator
 
-**双层触发**：
-1. **caption-gated（高置信）**：页面存在 `Table X.X: Title` 格式 caption 时强制检测。这是保守策略，确保有明确表格标识的页面不漏检
-2. **heuristic 补充（低置信）**：页面无 caption 但存在分隔线（`^\s*[-=]{3,}\s*$`）、markdown 竖线（`\|\s*\w`）或 4 列以上空格对齐（`\w+\s{3,}\w+\s{3,}\w+\s{3,}\w+`）时补充检测
-
-**位域图保护**：检测到的表格 bbox 与 `_find_figure_regions()` 识别的 diagram 区域做交集判断，重叠面积 >50% 时跳过，防止寄存器位域图被误表格化。
-
-### 18.2 `lines_strict` vs `lines` 策略的两难
-
-| 策略 | 对 AMBA 检测率 | 对 TI 检测率 | 位域图误检风险 |
-|------|---------------|-------------|---------------|
-| `lines_strict` | **~9%**（16/194 正式标题页） | ~70% | 极低 |
-| `lines`（更宽松） | 预估 >50% | ~85% | 中高 |
-
-**选择 `lines_strict` 的原因**：
-- 技术文档中的位域图、时序图、框图含有大量水平/竖直线条，`lines` 策略会将其误识别为表格
-- `lines_strict` 要求表格有明确的网格线结构，误检率极低
-- 宁可漏检部分无边框表格，也不接受位域图被表格化（后者会导致关键寄存器信息丢失）
-
-**已知代价**：
-- AMBA CHI 规范大量使用"无竖线"表格（仅用水平分隔线 + 空白对齐），`lines_strict` 对其几乎完全失效
-- 251 页触发 find_tables 的 AMBA 页面中，234 页（93%）Type A 空跑——`find_tables` 检测到 0 个表格
-- 这 234 页累计耗时 ~7.3s，占 AMBA find_tables 总时间的 83%
-
-### 18.3 正文引用句误触发问题
-
-`TABLE_CAPTION_RE = r"^(Table|表)\s*[A-Z]?\d+(?:[-\.]\d+)?(?:[:\.]\s*\S|\s+[A-Z]\S*)"` 过度匹配了正文引用句：
+页面在 y 轴上被「硬分割」切分为多个区间（Zone），提取算法只在 Zone 内部搜索：
 
 ```
-"Table B1.1 describes the primary function of each layer."
-"Table B2.2 shows the Request fields associated with a Request packet."
+页面 y 轴：
+├─ header ──┤  ← 硬分割（页眉区域）
+│           │
+├─ heading ─┤  ← 硬分割（章节标题，如 "B2.2 Channel fields"）
+│           │
+├─ caption ─┤  ← 硬分割（Figure/Table Caption）
+│           │
+├─ body_text┤  ← 硬分割（大段正文块，高>20pt 且 宽>60%页面宽度）
+│           │
+├─ caption ─┤  ← 硬分割（另一个 Caption）
+│           │
+├─ footer ──┤  ← 硬分割（页尾区域）
 ```
 
-这些句子包含 `"Table X.X"` + 动词（describes/shows/lists），被正则匹配为 caption，导致所在页面触发 find_tables，但页面实际无对应表格（表格在附近页面）。AMBA 文档中发生 191 次此类误匹配。
+**Hard Separator 构建规则**（按优先级从高到低）：
 
-**根因**：AMBA 写作规范中，表格标题和正文引用句格式高度相似（都包含 `"Table X.X"`），正则无法区分。
+| 类型 | 来源 | 合并规则 |
+|------|------|----------|
+| header/footer | 配置边距 | 固定区域，不可被其他 separator 覆盖 |
+| figure_caption | 正则匹配 `^Figure\s+[A-Z]?\d+...` | 相邻 separator 重叠时，高优先级覆盖低优先级 |
+| table_caption | 正则匹配 `^(Table|表)\s*[A-Z]?\d+...` | 同上 |
+| heading | 字号 > 阈值 或 粗体 | 同上 |
+| body_text | 高>20pt 且 宽>60%页面宽度 | 低优先级，可被 caption/heading 覆盖 |
 
-### 18.4 跨页续表碎片化
+相邻硬分割之间的空隙就是一个 `_Zone`，包含：
+- `y0`, `y1`：y 轴范围
+- `drawings`：落在该 y 范围内的矢量绘图（线条、矩形）
+- `text_block_count`：落在该范围内的文本块数量
+- `consumed`：是否已被 Figure/Table Caption 消耗
 
-AMBA 大量表格跨页分布，续页使用 `"Table X.X – Continued from previous page"` 作为 caption。按页独立调用 `find_tables()` 导致：
-- 续页上的表格只有部分行，无法构成完整表格结构
-- `find_tables` 按页独立处理，无法识别跨页上下文
-- 93 页跨页续表全部 Type A 空跑
+### 18.2 body_text Hard Separator 的权衡
 
-### 18.5 PyMuPDF4LLM fallback 的实际价值
+**设计意图**：大段正文块（如多行段落）本身构成天然的 y 轴分割——表格/图片不会跨越正文块出现。
 
-Layer 3 fallback 设计意图：对 Layer 1/2 未检测到表格但存在 table caption 的页面，局部调用 PyMuPDF4LLM Legacy Mode（`table_strategy="lines"`）补充检测无边框表格。
+**性能影响**（TI 219 页测试）：
+- 无 body_text 硬分割：6.7s
+- 有 body_text 硬分割：4.4s
+- **body_text 硬分割减少了 Zone 数量**，使后续 figure/table 提取遍历的 zone 更少，反而**提升了性能**
 
-**实际运行数据**：
-- 12 页触发 fallback
-- 产出补充表格：**0 个**
-- 耗时占比：<2%
+**阈值选择**：`height > 20.0 and width > page_width * 0.6`
+- 过宽：会误将短段落识别为硬分割，增加 zone 数量
+- 过窄：遗漏真正的正文块，zone 过大导致搜索范围增加
+- 当前阈值基于 TI/AMBA/SPRUI07 的实证调优
 
-**根因**：PyMuPDF4LLM 的 `lines` 策略同样无法识别 AMBA 的无竖线表格；且 fallback 只处理"有 caption 但未检出"的页面，而 AMBA 中这类页面的表格本就无法被任何基于线条的算法检测。
+### 18.3 Figure Caption 驱动提取
 
-### 18.6 性能数据与优化结论
+**核心规则**：不存在无 Figure Caption 的图。一个 Figure Caption 仅对应一个图片。
 
-| 文档 | 页数 | 改进前 | 版本 A（lines_strict） | 开销 | 表格数 |
-|------|------|--------|----------------------|------|--------|
-| TI TMS320F28335 | 219 | 10.3s / 0表格 | 46.2s / 68表格 | +348% | 68 |
-| AMBA CHI | 585 | 8.7s / 0表格 | 93.3s / 22表格 | +973% | 22 |
+**搜索逻辑**：
+1. 对每个 `figure_caption`，找到其上方和下方最近的、有 drawings 的 zone
+2. 比较距离，选择更近的 zone 作为目标
+3. 将目标 zone 内的 drawings 按空间邻近度聚类（`CLUSTER_PROXIMITY`）
+4. **每个 cluster 渲染为一张独立图片**（早期版本将所有 cluster 扁平化为一张大图，导致过度合并）
+5. 用 `_build_clip()` 构建最终裁剪区域：drawing-bounded X，zone-clamped Y，边缘标签扩展，padding
 
-**find_tables 流程耗时分解（单进程）**：
+**关键修复**：AMBA page 21 的图被分割为 3 张提取的问题，通过 cluster-based 渲染修复。
 
-| 文档 | find_tables | to_markdown | 合计 | 占总解析时间 |
-|------|-------------|-------------|------|-------------|
-| TI | 6.1s | 8.0s | 14.1s | ~30% |
-| AMBA | 9.4s | 7.5s | 16.9s | ~18% |
+### 18.4 Table Caption 驱动提取
 
-**关键发现**：TI 中 `to_markdown()` 耗时（8.0s）**超过** `find_tables()`（6.1s），是隐藏瓶颈。
+**核心规则**：Table Caption 下方的 zone 包含表格。
 
-**多进程并行化结论**（详见 AGENTS.md）：
+**搜索逻辑**：
+1. 对每个 `table_caption`，找到其下方第一个未被消耗的 zone（`zone.y0 >= caption.y1`，且在 200pt 范围内）
+2. 在该 zone 内调用 `find_tables()` 提取表格
+
+### 18.5 Orphan Zone 检测：无 Caption 表格
+
+**设计意图**：可能存在无 Table Caption 的表格（如寄存器位域图、引脚配置表）。
+
+**检测流程**：
+1. Figure/Table Caption 驱动的提取会标记某些 zone 为 `consumed`
+2. 剩余的、有 drawings 的 zone 就是 "orphan zones"
+3. 对每个 orphan zone，调用 `_classify_table_style()` 判断是否是表格
+4. 如果是，调用 `find_tables()` 提取
+
+**`_classify_table_style` 算法**：
+
+```python
+def _classify_table_style(zone):
+    if not zone.drawings or len(zone.drawings) < 10:
+        return None
+
+    h_lines = sum(1 for r in zone.drawings if r.width > r.height * 3)
+    v_lines = sum(1 for r in zone.drawings if r.height > r.width * 3)
+
+    # Style A: Grid table（多横线 + 多竖线）
+    if h_lines >= 4 and v_lines >= 3:
+        return "grid"
+
+    # Style B: Horizontal-only table（无竖线 + 多横线 + 多文字）
+    if v_lines <= 1 and h_lines >= 6 and zone.text_block_count >= 5:
+        return "horizontal"
+
+    return None
+```
+
+**产出率验证**（TI 219 页）：
+- 84 个 orphan zone 触发检测，76 个确实包含表格
+- **命中率 90.5%**，误报率极低
+
+### 18.6 自适应表格检测策略
+
+**机制与策略分离原则**：`_classify_table_style` 识别表格风格（机制），`process_page` 根据风格选择 `find_tables` 策略（策略）。
+
+**策略选择规则**：
+- 页面有任何 orphan zone 被分类为 `horizontal` → 整页使用 `lines` 策略
+- 页面只有 `grid` 风格的 orphan zones → 整页使用 `lines_strict` 策略
+
+**原因**：
+- `lines_strict` 对 grid 表格精确（误报低），对 horizontal 表格完全失效
+- `lines` 能检测 horizontal 表格，但对 grid 表格误报更多
+- 按页自适应，避免全文档统一策略的"一刀切"问题
+
+**实测效果**（4 文档基准）：
+
+| 文档 | 统一 `lines` | 自适应策略 | 差异 |
+|------|-------------|-----------|------|
+| TI (grid 为主) | 37.3s / 142 表格 | **33.7s** / 134 表格 | **-3.6s**，误报减少 |
+| AMBA (horizontal 为主) | 20.0s / 14 表格 | **19.8s** / 14 表格 | 几乎相同 |
+| SPRUI07 (混合) | 93.4s / 588 表格 | **88.3s** / 537 表格 | **-5.1s**，误报减少 51 个 |
+| DC_UG (混合) | 12.9s / 90 表格 | **13.8s** / 114 表格 | +24 表格（horizontal 受益） |
+
+### 18.7 预计算优化
+
+**原始问题**：每个 Table Caption 和每个 orphan zone 都单独调用 `page.find_tables(clip=zone_rect)`，导致 142 次 PyMuPDF C 调用 → 耗时 ~20s。
+
+**优化方案**：
+1. `process_page` 开始时，根据页面 orphan zones 的风格决定 `table_strategy`
+2. 调用一次 `page.find_tables(strategy=table_strategy)`，获取全页所有表格
+3. `_find_tables_in_zone()` 遍历预计算列表，用 `tab_bbox.intersects(clip_rect)` 筛选落在当前 zone 内的表格
+4. 不再调用 PyMuPDF C 代码，纯 Python 筛选开销可忽略
+
+**效果**：TI 文档 `find_tables` 调用从 142 次降至 219 次全页扫描（但全页扫描比多次 clip 调用略快），整体性能显著改善。
+
+### 18.8 表格检测底层限制与实验记录
+
+本节记录 GapsFirstScanner 表格检测相关的底层库限制、踩坑过程和实验结论，防止后续重复无意义的工作。
+
+#### 18.8.1 AMBA 零高度线：PyMuPDF 根本性限制
+
+**实验日期**：2026-06-06
+
+**现象**：即使自适应策略正确识别了 AMBA 表格为 `horizontal`，`find_tables(strategy="lines")` 仍然返回 **0 个表格**。
+
+**实验过程**：
+1. 渲染 AMBA page 44/47/140 整页图像，确认表格有水平线、无竖直线
+2. 检查 `page.get_drawings()` 返回的 drawing 数据：
+   ```
+   Drawing 0: rect=(84.0,368.5,559.3,368.5), w=475.2, h=0.0
+   Drawing 1: rect=(84.0,368.9,559.3,368.9), w=475.2, h=0.0
+   ```
+3. 对 AMBA page 28/33/34/35 验证：17-58 条 horizontal lines，**100% 是零高度线**（height=0.000000）
+4. 测试 `lines_strict`/`lines`/`text` 三种策略，均无法有效提取
+
+**根因**：这些线条的 **height=0.0**（y0 == y1），是数学意义上的**零高度线**。`find_tables` 的内部算法无法识别零高度线条。
+
+**结论**：这是 **PyMuPDF C 库层面的限制**，非代码层面可解决。AMBA 文档的表格提取率为 0 是已知限制。如需支持，需要自行实现基于文本对齐分析的表格识别算法。
+
+#### 18.8.2 `tab.cells` 空伪表格：PyMuPDF 边界情况
+
+**实验日期**：2026-06-10
+
+**现象**：`parse()` 执行时出现大量 `ValueError: min() iterable argument is empty`：
+```
+Table detection failed on page 74: min() iterable argument is empty
+Table detection failed on page 83: min() iterable argument is empty
+...
+```
+
+**实验过程**：
+1. 在 `_find_tables_in_zone` 中添加完整 traceback 捕获
+2. traceback 指向 `tab.bbox` 属性访问：
+   ```
+   File ".../pymupdf/table.py", line 1534, in bbox
+       min(map(itemgetter(0), c)),
+   ValueError: min() iterable argument is empty
+   ```
+3. 确认 `find_tables()` 偶尔会返回 **cells 为空的伪表格**
+4. 访问 `tab.bbox` 时，PyMuPDF 尝试从 cells 计算 bbox，但 cells 为空 → `min()` 失败
+
+**修复**：在 `_find_tables_in_zone` 中访问 `tab.bbox` 前检查 `tab.cells`：
+```python
+for tab in tables:
+    if not tab.cells:  # 防御性跳过空 cells 伪表格
+        continue
+    tab_bbox = fitz.Rect(tab.bbox)
+    ...
+```
+
+**深层问题**：空 cells 伪表格的出现说明 orphan zone 检测过于宽松，大量非表格区域触发了 `find_tables`。后续通过收紧 `_classify_table_style` 条件减少了这种情况。
+
+#### 18.8.3 `_fix_drawing_rect` 的隐蔽副作用
+
+**实验日期**：2026-06-10
+
+**现象**：在 `_classify_table_style` 中添加 `r.height == 0.0` 零高度线检测后，基准测试显示 `filtered_zero_height=0`，检测完全失效。
+
+**实验过程**：
+1. 检查 `_fix_drawing_rect` 实现：
+   ```python
+   if rect.height < cls.DRAWING_RECT_MIN_SIZE:  # 0.0 < 0.1
+       return fitz.Rect(rect.x0, rect.y0 - 0.5, rect.x1, rect.y1 + 0.5)
+   ```
+2. 确认 `_fix_drawing_rect` 在 drawing 分配阶段已将零高度线扩展为 height=1.0
+3. `_classify_table_style` 遍历的是 `zone.drawings`（已被扩展），所以 `r.height == 0.0` 永远为 False
+
+**教训**：在 `_fix_drawing_rect` **之前**必须先统计原始 drawing 特征。解决方案：
+1. `_Zone` 添加 `h_zero_height: int` 字段
+2. `process_page` 中先遍历 `raw_drawings` 统计零高度线，再调用 `_fix_drawing_rect`
+3. `_classify_table_style` 使用 `zone.h_zero_height` 而非自行计算
+
+#### 18.8.4 `_classify_table_style` 演进与空跑率实验
+
+**实验日期**：2026-06-10
+
+**v1 算法**（旧版）：
+```python
+if len(zone.drawings) < 10: return None
+if h_lines >= 4 and v_lines >= 3: return "grid"
+if v_lines <= 1 and h_lines >= 6 and text >= 5: return "horizontal"
+```
+
+**v1 问题**：`len < 10` 硬性门槛过滤掉了一些真实表格；不区分 drawing 类型，位域图/框图被误判。
+
+**v2 算法**（当前）：
+```python
+# 1. 去掉 len<10 门槛
+# 2. 区分 horizontal / vertical / other 三类 drawing
+# 3. other > lines*0.5 时过滤（非线条元素占多数）
+# 4. grid 风格增加文本密度过滤（<0.02 text/pt 过滤位域图）
+# 5. horizontal 风格增加零高度线过滤（>50% 零高度线时跳过 find_tables）
+```
+
+**空跑率对比实验**（ orphan zone 触发 find_tables 但返回 0 表格的比例）：
+
+| 文档 | v1 空跑率 | v2 空跑率 | 主要过滤手段 |
+|------|----------|----------|------------|
+| TI | 15.9% | **1.4%** | low_density (~6), zero_height (~2) |
+| AMBA | 92.9% | **0.0%** | **zero_height (~111)** — 全部过滤 |
+| SPRUI07 | 10.4% | **8.8%** | low_density (~34) |
+| DC_UG | 31.0% | **28.6%** | low_density (~29) |
+
+**关键发现**：
+- AMBA 的 100% 空跑由零高度线导致，v2 的 zero_height 过滤将其降为 0%
+- DC_UG 仍有 ~28% 空跑，因为 DC_UG 的部分 orphan zones 确实是表格区域但 `find_tables` 未检出（非误判问题）
+- 文本密度过滤（0.02 text/pt）有效识别了位域图（大量 lines + 极少 text）
+
+#### 18.8.5 各文档 orphan zone 特征
+
+| 特征 | TI | AMBA | SPRUI07 | DC_UG |
+|------|-----|------|---------|-------|
+| 空跑主因 | 位域图误判 | **零高度线** | 少量非表格区域 | 低文本密度 |
+| success density | 5.65/100pt | N/A | 4.92/100pt | 3.38/100pt |
+| empty density | 5.14/100pt | 3.12/100pt | 5.71/100pt | 1.99/100pt |
+| success text | 23.2 | N/A | 10.8 | 12.6 |
+| empty text | 7.0 | 14.6 | 11.5 | 7.5 |
+
+### 18.9 历史演进与性能数据
+
+**旧架构（UZN 方案，已删除）**：
+- `unified_zone_recognition.py`，2037 行
+- 从全页面角度统一识别 diagram 和 table 区域
+- 代码复杂、性能极差、提取质量差
+
+**当前架构（GapsFirstScanner）**：
+- `gaps_first_scanner.py`，~600 行
+- Caption-driven 线性提取，hard separator + zone 模型
+- 已删除死代码：`_find_figure_regions`、`_detect_and_convert_tables`、`_strip_zone_text_blocks`、`_build_images_from_uzn`
+
+**性能基准**（4 文档，GapsFirstScanner）：
+
+| 文档 | 页数 | process_page | 每页耗时 | 图片 | 表格 |
+|------|------|-------------|----------|------|------|
+| TI TMS320F28335 | 219 | 30.6s | 140ms | 85 | 128 |
+| AMBA CHI | 585 | 20.0s | 34ms | 218 | 14 |
+| SPRUI07 | 868 | 76.4s | 88ms | 586 | 442 |
+| DC_UG | 748 | 8.1s | 11ms | 1 | 61 |
+
+**早期 Milestone 数据**（旧 PDFParser，lines_strict）：
+
+| 文档 | 页数 | 改进前 | 版本 A（lines_strict） | 表格数 |
+|------|------|--------|----------------------|--------|
+| TI TMS320F28335 | 219 | 10.3s / 0表格 | 46.2s / 68表格 | 68 |
+| AMBA CHI | 585 | 8.7s / 0表格 | 93.3s / 22表格 | 22 |
+
+**注意**：GapsFirstScanner 的数据与旧 PDFParser **不可直接比较**，因为：
+1. 架构完全不同（UZN vs Caption-driven）
+2. 图片提取逻辑完全不同（旧版提取大量位域图/装饰线，新版只提取有 Caption 的图）
+3. 表格检测范围不同（旧版全页扫描，新版 zone 级扫描）
+
+### 18.10 多进程并行化结论
+
 - 8 workers 加速比：TI 2.07x / AMBA 1.61x
 - 但 find_tables 流程仅占解析总时间的 18-30%，Amdahl 定律限制整体收益仅 ~1.3x
-- **即使 find_tables 无限加速，TI 仍需 28s+，AMBA 仍需 75s+，均无法达到 <30% 开销目标**
+- **即使 find_tables 无限加速，TI 仍需 28s+，AMBA 仍需 75s+**
 - **否决实施**：代码复杂度增加不值得有限的收益
-
-**权衡**：
-- `lines_strict` 是保守的正确性优先策略，接受部分漏检
-- 性能开销是表格检测能力从无到有的必要成本（改进前 0 表格）
-- 进一步优化的空间极小：to_markdown 为 PyMuPDF C 实现不可优化；lines_strict 检测率低是算法与文档格式的固有矛盾
-
----
 
 ## 22. 实体提取 Prompt 设计
 
@@ -998,9 +1217,9 @@ Step 1: 内容分类（8 种类型）
 | **本地 PDF 解析目录页换行** | 目录页多行条目保留为多行 | 目录页对知识提取影响小，接受此行为 |
 | **本地 PDF 解析依赖 TOC** | 无 TOC 的 PDF 回退到启发式规则 | `_fallback_heading_detection` 提供降级方案 |
 | **_is_heading 仅识别 Markdown #** | 已删除数字编号/中文编号匹配，目录条目（如 "1 Introduction 7"）不再被识别为 heading | 目录文本被收集为 heading 之间的 content，可能混入正文 batch；当前接受此行为，后续可通过机制层策略处理 |
-| **本地 PDF 表格检测 lines_strict 策略漏检率高** | `lines_strict` 要求明确的网格线结构，对无竖线/弱线条表格（如 AMBA 大量使用的空白对齐表格）检测率仅 ~9% | 位域图保护优先于表格检测；P4L fallback 实际价值极低（12页触发/0产出）；可接受部分漏检 |
-| **TABLE_CAPTION_RE 误匹配正文引用句** | `"Table X.X describes..."` 等正文引用句被正则匹配为 caption，导致无效触发 find_tables | AMBA 文档中发生 191 次误匹配；下一步可通过排除动词关键词（describes/shows/lists/gives/provides）缓解 |
-| **跨页续表碎片化** | `find_tables()` 按页独立处理，无法识别 `"Continued from previous page"` 的跨页上下文 | AMBA 中 93 页跨页续表全部空跑；下一步可检测续表 caption 直接跳过 |
+| **AMBA 零高度线表格不可提取** | AMBA 表格的水平线为 height=0.0 的零高度矢量线，`find_tables` 的任何策略（lines_strict/lines/text）均无法识别 | 这是 PyMuPDF C 库层面的限制；`_classify_table_style` 能正确分类但无法提取；如需支持需自行实现文本对齐分析算法 |
+| **TABLE_CAPTION_RE 误匹配正文引用句** | `"Table X.X describes..."` 等正文引用句被正则匹配为 caption，导致所在页面触发 find_tables 但无对应表格 | AMBA 文档中发生 191 次误匹配；GapsFirstScanner 的预计算机制使误触发成本从"多次 clip 调用"降至"一次全页扫描"，影响已大幅降低 |
+| **跨页续表碎片化** | `find_tables()` 按页独立处理，无法识别 `"Continued from previous page"` 的跨页上下文 | AMBA 中 93 页跨页续表；GapsFirstScanner 的 zone 模型使续页 caption 能正确定位表格 zone，但 `find_tables` 仍只能提取当前页的部分行 |
 | **冲突日志无关系级记录** | `add_relation` 冲突只记录 property_key，不记录完整关系上下文 | 冲突日志包含 from/to/type 信息，可定位 |
 | **反馈不反向更新 block metadata** | 全局图更新后，block metadata 中的 extracted_entities 仍是处理时快照 | `get_content_with_entities` 查全局图获取最新状态 |
 

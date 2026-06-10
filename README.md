@@ -858,7 +858,7 @@ Prompt 中显式规定格式，确保 LLM 输出统一：
 5. **FAISS 与 SQLite 非原子**：已缓解——FAISS 操作加 `fcntl` 进程锁，修改前 `_reload()` 磁盘最新状态。极端情况仍可通过 `reprocess` 重建
 6. **图片压缩**：`IMAGE_MAX_SIZE`（默认 1024）将图片最长边缩放到 1024px，经 API 实测可将单张图片 token 消耗降低约 80%（如 9342×5442 原图 4176 tokens → 1024 缩放后 825 tokens）。三层分类策略（blackwhite→PNG 1-bit、grayscale→JPEG L、color→JPEG RGB）基于色度距离自动选择最小体积格式，显著减小 JSONL 文件大小和网络传输开销，但不影响 API token 计费（Kimi Vision 按分辨率动态计费，与格式/质量无关）
 7. **NetworkX 内存上限**：全局图为内存存储，数百个文档 × 万页级时可能达到 GB 级。当前单机目标规模可接受，预留 Neo4j 迁移接口
-8. **输入文档约束**：Markdown 图片引用 `![name](images/path.jpg)` 中的 `name` 将作为 `image_id`，建议填写有意义的名称
+8. **输入文档约束**：Markdown 图片引用 `![name](images/path.png)` 中的 `name` 将作为 `image_id`，建议填写有意义的名称
 9. **PDF 解析依赖 BigModel 专用 API**：文档提取主路径使用 BigModel 专有 Expert API（`/files/parser/create`），非 OpenAI-compatible，无法直接切换至其他厂商。若 BigModel 不可用，可依赖本地 `PDFParser`（PyMuPDF）作为 fallback，输出格式与 BigModel 完全一致，但解析质量可能略有差异
 10. **本地 PDF Parser 表格检测限制**：`find_tables(strategy="lines_strict")` 对无竖线/弱线条表格（如 AMBA 规范中大量使用的空白对齐表格）检测率极低（AMBA 仅 ~9%）。这是保守的正确性优先策略——`lines_strict` 误检率极低，可保护位域图不被表格化，但代价是大量无边框表格漏检。PyMuPDF4LLM fallback 对此类表格同样无效（12 页触发 / 0 产出）
 11. **正文引用句误触发表格检测**：`TABLE_CAPTION_RE` 会匹配 `"Table X.X describes..."` 等正文引用句，导致所在页面触发 `find_tables()` 但无实际表格。AMBA 文档中发生 191 次此类误匹配，是性能空跑的主要来源之一

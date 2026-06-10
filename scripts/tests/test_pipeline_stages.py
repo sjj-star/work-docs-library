@@ -735,7 +735,7 @@ def test_merge_image_descriptions_inline_replace(patched_config, monkeypatch):
     _mock_external_clients(monkeypatch)
     pipe = DocGraphPipeline()
 
-    content = "Some text.\n\n![img_001](images/page1.jpg)\n\nMore text."
+    content = "Some text.\n\n![img_001](images/page1.png)\n\nMore text."
     descs = [
         {
             "image_id": "img_001",
@@ -744,7 +744,7 @@ def test_merge_image_descriptions_inline_replace(patched_config, monkeypatch):
         }
     ]
     result = pipe._merge_image_descriptions(content, "Ch1", descs)
-    assert "![img_001](images/page1.jpg)" not in result
+    assert "![img_001](images/page1.png)" not in result
     assert "[img_001] A diagram" in result
     assert "More text." in result
 

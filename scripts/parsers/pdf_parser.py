@@ -14,6 +14,8 @@ import pymupdf4llm
 from core.config import Config
 from PIL import Image
 
+from parsers.gaps_first_scanner import GapsFirstScanner, GapsPageResult
+
 logger = logging.getLogger(__name__)
 
 
@@ -212,10 +214,11 @@ class PDFParser:
         # First pass: identify captions
         caption_indices = []
         for i, (txt, rect, _) in enumerate(text_blocks):
-            if re.match(self.FIGURE_CAPTION_RE, txt):
+            # 使用严格 caption 识别，排除正文引用句（如 "Figure B2.1 shows..."）
+            if self._is_strict_figure_caption(txt):
                 categories[i] = "figure_caption"
                 caption_indices.append(i)
-            elif re.match(self.TABLE_CAPTION_RE, txt):
+            elif self._is_strict_table_caption(txt):
                 categories[i] = "table_caption"
                 caption_indices.append(i)
 
@@ -292,413 +295,6 @@ class PDFParser:
             for i, (txt, rect, avg_size) in enumerate(text_blocks)
         ]
 
-    def _find_figure_regions(
-        self,
-        page,
-        page_rect,
-        header_margin: float = 0.0,
-        footer_margin: float = 0.0,
-    ):
-        """Use Figure captions to locate corresponding diagram areas.
-
-        Returns a list of fitz.Rect clips ready for rendering.
-
-        This implementation uses a *page-level horizontal zoning* strategy:
-        headers, footers, figure captions and table captions act as hard
-        separators. The page is sliced into gaps between separators, and each
-        gap's drawings are assigned to the nearest figure caption. This avoids
-        the fragility of per-caption upward/downward body-text probing.
-        """
-        # 使用动态边距（来自 _analyze_document_layout 的检测结果）
-        # 若未传入则回退到硬编码常量
-        effective_header = header_margin if header_margin > 0 else self.HEADER_MARGIN_PT
-        effective_footer = footer_margin if footer_margin > 0 else self.FOOTER_MARGIN_PT
-        text_dict = cast(dict[str, Any], page.get_text("dict"))
-        text_blocks = []
-        for block in text_dict.get("blocks", []):
-            if "lines" not in block:
-                continue
-            txt = "".join(s["text"] for line in block["lines"] for s in line["spans"]).strip()
-            if not txt:
-                continue
-            sizes = []
-            for line in block["lines"]:
-                for span in line["spans"]:
-                    sizes.extend([span["size"]] * len(span["text"]))
-            avg_size = sum(sizes) / len(sizes) if sizes else 12.0
-            text_blocks.append((txt, fitz.Rect(block["bbox"]), avg_size))
-
-        text_blocks.sort(key=lambda x: x[1].y0)
-        classified_blocks = self._classify_text_blocks_for_figures(text_blocks, page_rect)
-
-        figure_captions = [
-            (txt, rect) for txt, rect, _, cat in classified_blocks if cat == "figure_caption"
-        ]
-        if not figure_captions:
-            return []
-
-        def _is_header_footer_rect(r: fitz.Rect, is_drawing: bool = False) -> bool:
-            h_margin = page_rect.y0 + (effective_header + 20 if is_drawing else effective_header)
-            f_margin = page_rect.y1 - (effective_footer + 20 if is_drawing else effective_footer)
-            return r.y1 < h_margin or r.y0 > f_margin
-
-        # 1. Build hard separators (header strip, footer strip, captions, table bodies)
-        separators = []
-        separators.append(
-            fitz.Rect(
-                page_rect.x0, page_rect.y0, page_rect.x1, page_rect.y0 + self.HEADER_MARGIN_PT
-            )
-        )
-        separators.append(
-            fitz.Rect(
-                page_rect.x0, page_rect.y1 - self.FOOTER_MARGIN_PT, page_rect.x1, page_rect.y1
-            )
-        )
-        for txt, rect, _, cat in classified_blocks:
-            if cat in ("figure_caption", "table_caption"):
-                separators.append(rect)
-
-        # Detect actual table regions and treat them as separators so that
-        # figure extraction does not swallow table bodies.
-        # Only keep tables that have a matching table caption directly above them
-        # (leveraging the prior that tables are always captioned immediately above).
-        # Lazy: skip the expensive find_tables() call entirely if the page has no
-        # table caption — this avoids severe timeouts on large vector-heavy docs.
-        table_caption_rects = [r for _, r, _, cat in classified_blocks if cat == "table_caption"]
-        if table_caption_rects:
-            try:
-                for tab in page.find_tables():
-                    bbox = fitz.Rect(tab.bbox)
-                    if not (
-                        bbox.height > self.TABLE_MIN_HEIGHT_PT
-                        and bbox.width > page_rect.width * self.TABLE_MIN_WIDTH_RATIO
-                    ):
-                        continue
-                    # Require a table caption sitting just above the table
-                    has_caption_above = any(
-                        cap.y1 <= bbox.y0 + 5 and cap.y1 >= bbox.y0 - 100
-                        for cap in table_caption_rects
-                    )
-                    if has_caption_above:
-                        separators.append(bbox)
-            except Exception:
-                pass
-
-        separators.sort(key=lambda r: r.y0)
-        merged = []
-        for s in separators:
-            if not merged:
-                merged.append(fitz.Rect(s))
-            else:
-                last = merged[-1]
-                if s.y0 <= last.y1 + self.CAPTION_OVERLAP_TOLERANCE:
-                    last.y1 = max(last.y1, s.y1)
-                else:
-                    merged.append(fitz.Rect(s))
-        separators = merged
-
-        # 2. Build gaps between separators
-        gaps = []
-        for i in range(len(separators) - 1):
-            y0 = separators[i].y1
-            y1 = separators[i + 1].y0
-            if y1 > y0:
-                gaps.append({"y0": y0, "y1": y1, "drawings": [], "assigned_caption_idx": None})
-
-        # 3. Collect drawings and assign to gaps by centroid
-        raw_drawings = [d.get("rect") for d in page.get_drawings() if d.get("rect")]
-        drawing_rects = [self._fix_drawing_rect(r) for r in raw_drawings]
-        for dr in drawing_rects:
-            if _is_header_footer_rect(dr, is_drawing=True):
-                continue
-            cy = (dr.y0 + dr.y1) / 2
-            for gap in gaps:
-                if gap["y0"] <= cy < gap["y1"]:
-                    gap["drawings"].append(dr)
-                    break
-
-        # 4. Assign each gap to the directly-adjacent figure caption(s).
-        # A gap is bounded by two separators; if one of those separators IS a
-        # figure caption, the gap naturally belongs to that caption.  This
-        # prevents a figure from swallowing drawings that sit on the far side
-        # of an intervening table caption.
-        cap_rects = {(crect.y0, crect.y1): idx for idx, (_, crect) in enumerate(figure_captions)}
-        for i, gap in enumerate(gaps):
-            up_idx = cap_rects.get((separators[i].y0, separators[i].y1))
-            down_idx = cap_rects.get((separators[i + 1].y0, separators[i + 1].y1))
-
-            if up_idx is not None and down_idx is None:
-                gap["assigned_caption_idx"] = up_idx
-            elif down_idx is not None and up_idx is None:
-                gap["assigned_caption_idx"] = down_idx
-            elif up_idx is not None and down_idx is not None:
-                gap_cy = (gap["y0"] + gap["y1"]) / 2
-                up_cy = (figure_captions[up_idx][1].y0 + figure_captions[up_idx][1].y1) / 2
-                down_cy = (figure_captions[down_idx][1].y0 + figure_captions[down_idx][1].y1) / 2
-                d_up = abs(gap_cy - up_cy)
-                d_down = abs(gap_cy - down_cy)
-                if d_up < d_down:
-                    gap["assigned_caption_idx"] = up_idx
-                elif d_down < d_up:
-                    gap["assigned_caption_idx"] = down_idx
-                else:
-                    # Tie-break by drawings inside the gap
-                    if gap["drawings"]:
-                        d_centroid = sum((dr.y0 + dr.y1) / 2 for dr in gap["drawings"]) / len(
-                            gap["drawings"]
-                        )
-                        gap["assigned_caption_idx"] = up_idx if d_centroid <= gap_cy else down_idx
-                    else:
-                        gap["assigned_caption_idx"] = up_idx
-            else:
-                # Orphan gap – no directly-adjacent figure caption.
-                # As a lightweight fallback, merge to the nearest figure caption
-                # unless any caption (figure or table) blocks the way.
-                all_caption_rects = [
-                    r
-                    for _, r, _, c in classified_blocks
-                    if c in ("figure_caption", "table_caption")
-                ]
-                gap_cy = (gap["y0"] + gap["y1"]) / 2
-                nearest = None
-                best_dist = float("inf")
-                for idx, (_, crect) in enumerate(figure_captions):
-                    c_cy = (crect.y0 + crect.y1) / 2
-                    blocked = False
-                    if c_cy < gap["y0"]:
-                        for r in all_caption_rects:
-                            r_cy = (r.y0 + r.y1) / 2
-                            if c_cy < r_cy < gap["y0"]:
-                                blocked = True
-                                break
-                    elif c_cy > gap["y1"]:
-                        for r in all_caption_rects:
-                            r_cy = (r.y0 + r.y1) / 2
-                            if gap["y1"] < r_cy < c_cy:
-                                blocked = True
-                                break
-                    else:
-                        blocked = True
-                    if blocked:
-                        continue
-                    dist = abs(gap_cy - c_cy)
-                    if dist < best_dist:
-                        best_dist = dist
-                        nearest = idx
-                if nearest is not None:
-                    gap["assigned_caption_idx"] = nearest
-
-        # 5. Filter drawings per figure caption.
-        # When a caption is flanked by another caption on one side, prefer the
-        # side that is NOT blocked. This mirrors the old logic's
-        # upper_hit_caption / lower_hit_caption behaviour.
-        # First, map each caption to its separator index.
-        caption_sep_idx = {}
-        for cap_idx, (_, crect) in enumerate(figure_captions):
-            for i, sep in enumerate(separators):
-                if abs(sep.y0 - crect.y0) < 1 and abs(sep.y1 - crect.y1) < 1:
-                    caption_sep_idx[cap_idx] = i
-                    break
-
-        # 6. Build clips per figure caption
-        clips = []
-        for cap_idx, (caption, caption_rect) in enumerate(figure_captions):
-            assigned_drawings = []
-            for gap in gaps:
-                if gap["assigned_caption_idx"] == cap_idx:
-                    assigned_drawings.extend(gap["drawings"])
-
-            if not assigned_drawings:
-                continue
-
-            # 5b. Filter drawings per figure caption.
-            ds_above = [d for d in assigned_drawings if (d.y0 + d.y1) / 2 < caption_rect.y0]
-            ds_below = [d for d in assigned_drawings if (d.y0 + d.y1) / 2 >= caption_rect.y1]
-
-            # Remove outlier drawings on each side that are separated from the
-            # main cluster by a large gap. This discards header/footer lines and
-            # decorative separators sitting in distant body text while keeping
-            # genuine multi-part figures.
-            def _prune_outlier_drawings(drawings, is_above):
-                if not drawings:
-                    return drawings
-                centers = sorted([((d.y0 + d.y1) / 2, d) for d in drawings], key=lambda x: x[0])
-                if is_above:
-                    # Closest to caption is last (largest y)
-                    centers.reverse()
-                # Find first inter-drawing gap that exceeds the threshold
-                split_idx = len(centers)
-                for i in range(1, len(centers)):
-                    gap = centers[i][0] - centers[i - 1][0]
-                    if gap > self.MAX_DRAWING_CLUSTER_SPREAD:
-                        split_idx = i
-                        break
-                return [d for _, d in centers[:split_idx]]
-
-            ds_above = _prune_outlier_drawings(ds_above, is_above=True)
-            ds_below = _prune_outlier_drawings(ds_below, is_above=False)
-
-            # Body-text barrier: if there is a wide body-text block between the
-            # caption and the closest drawing cluster on a side, discard that side.
-            def _has_body_text_barrier(caption_y, cluster_y, is_above):
-                barrier = False
-                for txt, r, _, c in classified_blocks:
-                    if c != "body_text":
-                        continue
-                    if r.width <= page_rect.width * 0.5:
-                        continue
-                    if is_above:
-                        if cluster_y < r.y0 and r.y1 < caption_y:
-                            barrier = True
-                            break
-                    else:
-                        if caption_y < r.y0 and r.y1 < cluster_y:
-                            barrier = True
-                            break
-                return barrier
-
-            if ds_above:
-                closest_cy = max((d.y0 + d.y1) / 2 for d in ds_above)
-                if _has_body_text_barrier(caption_rect.y0, closest_cy, is_above=True):
-                    ds_above = []
-            if ds_below:
-                closest_cy = min((d.y0 + d.y1) / 2 for d in ds_below)
-                if _has_body_text_barrier(caption_rect.y1, closest_cy, is_above=False):
-                    ds_below = []
-
-            area_above = sum(d.width * d.height for d in ds_above)
-            area_below = sum(d.width * d.height for d in ds_below)
-
-            if ds_above and not ds_below:
-                filtered_drawings = ds_above
-            elif ds_below and not ds_above:
-                filtered_drawings = ds_below
-            elif ds_above and ds_below:
-                if area_above > area_below * self.DIAGRAM_SIDE_AREA_RATIO:
-                    filtered_drawings = ds_above
-                elif area_below > area_above * self.DIAGRAM_SIDE_AREA_RATIO:
-                    filtered_drawings = ds_below
-                else:
-                    filtered_drawings = ds_above + ds_below
-            else:
-                filtered_drawings = []
-
-            if not filtered_drawings:
-                continue
-
-            # 5c. Text-density guard: reject individual gaps that are mostly body text.
-            def _gap_is_text_heavy(gap):
-                gap_drawings = [
-                    d for d in filtered_drawings if gap["y0"] <= (d.y0 + d.y1) / 2 < gap["y1"]
-                ]
-                if not gap_drawings:
-                    return False
-
-                total_area = sum(d.width * d.height for d in gap_drawings)
-                min_x = min(d.x0 for d in gap_drawings)
-                max_x = max(d.x1 for d in gap_drawings)
-                min_y = min(d.y0 for d in gap_drawings)
-                max_y = max(d.y1 for d in gap_drawings)
-                height = max(1.0, max_y - min_y)
-                width = max_x - min_x
-                if total_area < 100 and width / height > 50:
-                    for txt, r, _, c in classified_blocks:
-                        if c == "body_text" and r.y1 >= min_y - 15 and r.y0 <= max_y + 15:
-                            return True
-
-                band_y0 = min_y - 20
-                band_y1 = max_y + 20
-                band_area = max(1.0, (band_y1 - band_y0) * page_rect.width)
-                body_area = sum(
-                    r.width * r.height
-                    for txt, r, _, c in classified_blocks
-                    if c == "body_text" and r.y0 < band_y1 and r.y1 > band_y0
-                )
-                return body_area / band_area > self.GAP_TEXT_DENSITY_THRESHOLD
-
-            kept_drawings = []
-            for gap in gaps:
-                if gap["assigned_caption_idx"] != cap_idx:
-                    continue
-                gap_drawings = [
-                    d for d in filtered_drawings if gap["y0"] <= (d.y0 + d.y1) / 2 < gap["y1"]
-                ]
-                if not gap_drawings:
-                    continue
-                if _gap_is_text_heavy(gap):
-                    continue
-                kept_drawings.extend(gap_drawings)
-            filtered_drawings = kept_drawings
-
-            if not filtered_drawings:
-                continue
-
-            # 6. Build initial bounding box from caption + drawings
-            region_items = [caption_rect] + filtered_drawings
-            min_x = min(r.x0 for r in region_items)
-            max_x = max(r.x1 for r in region_items)
-            min_y = min(r.y0 for r in region_items)
-            max_y = max(r.y1 for r in region_items)
-            raw_clip = fitz.Rect(min_x, min_y, max_x, max_y)
-
-            # 6b. Edge-label expansion: include small text blocks that sit just
-            # outside the raw drawing bounds (callouts, pin labels, etc.).
-            for txt, r, _, c in classified_blocks:
-                if c in ("body_text", "figure_caption", "table_caption"):
-                    continue
-                if self._is_likely_body_text(txt, r, page_rect):
-                    continue
-                # Compute minimum distance from rect r to raw_clip
-                dx = max(raw_clip.x0 - r.x1, 0, r.x0 - raw_clip.x1)
-                dy = max(raw_clip.y0 - r.y1, 0, r.y0 - raw_clip.y1)
-                dist = max(dx, dy)
-                if dist <= self.EDGE_LABEL_MARGIN:
-                    region_items.append(r)
-
-            if len(region_items) > 1:
-                min_x = min(r.x0 for r in region_items)
-                max_x = max(r.x1 for r in region_items)
-                min_y = min(r.y0 for r in region_items)
-                max_y = max(r.y1 for r in region_items)
-
-            clip = fitz.Rect(min_x, min_y, max_x, max_y)
-            clip = (
-                fitz.Rect(
-                    clip.x0 - self.CLIP_PADDING_HORIZONTAL,
-                    clip.y0,
-                    clip.x1 + self.CLIP_PADDING_HORIZONTAL,
-                    clip.y1 + self.CLIP_PADDING_BOTTOM,
-                )
-                & page_rect
-            )
-
-            # Skip clips that are clearly tables by caption text or aspect ratio fallback.
-            has_table_caption = any(
-                re.match(self.TABLE_CAPTION_RE, t)
-                for t, r, _, c in classified_blocks
-                if r.intersects(clip) and c == "table_caption"
-            )
-            if has_table_caption:
-                continue
-
-            aspect = clip.width / clip.height if clip.height > 0 else 999
-            if (
-                clip.width > page_rect.width * self.TABLE_SKIP_WIDTH_RATIO
-                and aspect > self.TABLE_SKIP_ASPECT
-                and clip.height < page_rect.height * self.TABLE_SKIP_HEIGHT_RATIO
-            ):
-                continue
-
-            if (
-                clip.width > page_rect.width * self.FULL_PAGE_SKIP_WIDTH_RATIO
-                and clip.height > page_rect.height * self.FULL_PAGE_SKIP_HEIGHT_RATIO
-            ):
-                continue
-
-            clips.append(clip)
-
-        return clips
-
     def parse(
         self,
         file_path: str | Path,
@@ -707,8 +303,8 @@ class PDFParser:
     ) -> tuple[str, list[Path]]:
         """解析 PDF，返回与 BigModelParserClient.parse_pdf() 一致的 (markdown_text, image_paths)。.
 
-        markdown_text 包含 Markdown 章节标题（# / ##）和图片引用 ![alt](images/xxx.jpg)。
-        图片保存到 output_dir/images/ 目录下，格式为 JPG。
+        markdown_text 包含 Markdown 章节标题（# / ##）和图片引用 ![alt](images/xxx.png)。
+        图片保存到 output_dir/images/ 目录下，格式为 PNG（无损高保真）。
         矢量图区域内的文本标签被包含在渲染的图片中，不在 Markdown 中单独输出。
         """
         file_path = Path(file_path)
@@ -743,18 +339,19 @@ class PDFParser:
         all_image_paths: list[Path] = []
         page_markdowns: list[str] = []
         problem_pages: dict[int, dict[str, bool]] = {}  # 【Milestone 3】问题页面记录
+        scanner = GapsFirstScanner()
 
         for page_num in range(total_pages):
             page = doc.load_page(page_num)
             page_idx = page_num + 1
 
-            # 4a. 识别矢量图区域（使用动态边距）
-            diagram_regions = self._find_figure_regions(
-                page, page.rect, header_margin, footer_margin
+            # 4a. 【Gaps-First】线性区域扫描：表格 + 图片
+            gaps_result = scanner.process_page(
+                page, page.rect, header_margin, footer_margin, img_dir
             )
-            diagram_captions = self._get_diagram_captions(page, page.rect, diagram_regions)
 
-            # 4b. 获取文本块（过滤页眉/页脚 + diagram 区域内）
+            # 4b. 获取文本块（排除 diagram 区域内的文本，避免重复输出）
+            diagram_regions = [fitz.Rect(img["bbox"]) for img in gaps_result.images]
             text_blocks = self._get_page_text_blocks(
                 page, diagram_regions, header_margin, footer_margin
             )
@@ -768,29 +365,12 @@ class PDFParser:
                     text_blocks, heading_threshold, has_bold_fonts
                 )
 
-            # 4b3. 【Milestone 1】表格检测与 Markdown 转换（Layer 1）
-            table_elements = self._detect_and_convert_tables(page, text_blocks, diagram_regions)
-            # 从文本流中剥离表格区域，避免重复输出
-            text_blocks = self._strip_table_text_blocks(text_blocks, table_elements)
+            # 4b3. 从 gaps 构建表格元素
+            table_elements = self._build_table_elements_from_gaps(gaps_result)
 
-            # 记录问题页面：table caption 存在但 Layer 1 未检测到表格
-            if PDFParser._should_trigger_p4l_fallback(text_blocks, table_elements):
-                problem_pages[page_idx] = {"missing_tables": True}
-
-            # 4c. 提取嵌入图片（主路径：保留现有 caption 关联优势）
+            # 4c. 提取图片（diagram + raster）
+            diagram_images = self._build_images_from_gaps(gaps_result)
             raster_images = self._extract_raster_images(doc, page, page_idx, img_dir)
-
-            # 4c2. 【Milestone 2】补充提取：get_image_info() 过滤链
-            # 当 _extract_raster_images() 中 get_image_bbox() 失败时，
-            # get_image_info() 直接提供 bbox，避免断链。
-            fallback_images = self._extract_images_via_image_info(page, page_idx, img_dir)
-            # 合并：fallback 只补充 raster_images 未覆盖的位置
-            raster_images = self._merge_image_lists(raster_images, fallback_images)
-
-            # 4d. 渲染矢量图
-            diagram_images = self._render_diagrams(
-                page, page_idx, diagram_regions, diagram_captions, img_dir
-            )
 
             all_image_paths.extend([img["path"] for img in raster_images])
             all_image_paths.extend([img["path"] for img in diagram_images])
@@ -857,70 +437,6 @@ class PDFParser:
                 return True
         return False
 
-    def _detect_and_convert_tables(
-        self,
-        page: fitz.Page,
-        text_blocks: list[dict[str, Any]],
-        diagram_regions: list[fitz.Rect],
-    ) -> list[dict[str, Any]]:
-        """检测页面表格并转换为 Markdown 表格元素。
-
-        保留现有 caption-gated 策略作为基础，对无 caption 但特征明显的
-        页面补充检测。使用 PyMuPDF 原生 Table.to_markdown() 格式化。
-
-        返回: [{"type": "table", "y0": float, "y1": float, "text": str}, ...]
-        """
-        if not self.TABLE_DETECTION_ENABLED:
-            return []
-
-        # 1. 保留现有策略：table caption 页面强制检测
-        # 使用严格 caption 过滤，排除正文引用句（如 "Table B1.3 shows..."）
-        has_table_caption = any(
-            self._is_strict_table_caption(block.get("text", "")) for block in text_blocks
-        )
-
-        # 2. 新增补充：无 caption 但表格特征明显的页面
-        likely_has_tables = has_table_caption or self._is_page_likely_has_tables(text_blocks)
-
-        if not likely_has_tables:
-            return []
-
-        table_elements: list[dict[str, Any]] = []
-        try:
-            tabs = page.find_tables(strategy="lines_strict")
-            if tabs is None:
-                return table_elements
-            for tab in tabs.tables:
-                # 过滤：至少 2 行 2 列（复用 PyMuPDF4LLM 过滤逻辑）
-                if tab.row_count < self.TABLE_MIN_ROWS or tab.col_count < self.TABLE_MIN_COLS:
-                    continue
-
-                tab_bbox = fitz.Rect(tab.bbox)
-
-                # 位域图保护
-                if self._table_overlaps_diagram(tab_bbox, diagram_regions):
-                    continue
-
-                # 复用 PyMuPDF 原生格式化（与 PyMuPDF4LLM 内部等价）
-                md_table = tab.to_markdown(clean=False)
-                if not md_table.strip():
-                    continue
-
-                table_elements.append(
-                    {
-                        "type": "table",
-                        "y0": tab_bbox.y0,
-                        "y1": tab_bbox.y1,
-                        "text": md_table.strip(),
-                        "bbox": tab_bbox,
-                    }
-                )
-        except Exception as e:
-            page_num = cast(int, page.number) if page is not None else -1
-            logger.warning(f"表格检测异常 page {page_num + 1}: {e}")
-
-        return table_elements
-
     @staticmethod
     def _strip_table_text_blocks(
         text_blocks: list[dict[str, Any]], table_elements: list[dict[str, Any]]
@@ -955,6 +471,69 @@ class PDFParser:
         )
         return has_table_caption and not table_elements
 
+    @staticmethod
+    def _build_table_elements_from_gaps(gaps_result: GapsPageResult) -> list[dict[str, Any]]:
+        """从 GapsPageResult 构建表格元素列表（兼容 _build_page_markdown 格式）."""
+        table_elements: list[dict[str, Any]] = []
+        for table in gaps_result.tables:
+            table_elements.append(
+                {
+                    "type": "table",
+                    "y0": 0,
+                    "y1": 0,
+                    "text": table["markdown"],
+                }
+            )
+        return table_elements
+
+    @staticmethod
+    def _build_images_from_gaps(gaps_result: GapsPageResult) -> list[dict[str, Any]]:
+        """从 GapsPageResult 构建 diagram 图片列表."""
+        diagram_images: list[dict[str, Any]] = []
+        for img in gaps_result.images:
+            bbox = img.get("bbox", [0, 0, 0, 0])
+            y0 = bbox[1] if len(bbox) > 1 else 0
+            y1 = bbox[3] if len(bbox) > 3 else 0
+            img_path = Path(img["path"])
+            alt = img.get("caption", "") or f"page_{img['page_idx']}"
+            diagram_images.append(
+                {
+                    "type": "image",
+                    "y0": y0,
+                    "y1": y1,
+                    "path": img_path,
+                    "rel_path": f"images/{img_path.name}",
+                    "alt": alt,
+                }
+            )
+        return diagram_images
+
+    @staticmethod
+    def _build_table_elements_from_uzn(uzn_result) -> list[dict[str, Any]]:
+        """从 UZN 结果构建表格元素列表（兼容 _build_page_markdown 格式）."""
+        table_elements: list[dict[str, Any]] = []
+        for zone in uzn_result.zones:
+            if not zone.table_markdown:
+                continue
+            # 找到 table cluster 的 bbox 作为定位
+            table_bbox = zone.bbox
+            for cluster in zone.clusters:
+                if cluster.cluster_type == "table":
+                    table_bbox = cluster.bbox
+                    break
+            table_elements.append(
+                {
+                    "type": "table",
+                    "y0": table_bbox.y0,
+                    "y1": table_bbox.y1,
+                    "text": zone.table_markdown,
+                    "bbox": table_bbox,
+                }
+            )
+        return table_elements
+
+
+
     def _call_pymupdf4llm_for_pages(
         self,
         doc: fitz.Document,
@@ -981,9 +560,7 @@ class PDFParser:
                     pages=[p - 1 for p in problem_pages],  # 0-based
                     page_chunks=True,
                     table_strategy="lines",  # 比 lines_strict 更宽松，覆盖边缘场景
-                    write_images=True,
-                    image_path=str(img_dir / "p4l_fallback"),
-                    image_format="png",
+                    write_images=False,  # 不生成图片（图片不被引用，且质量差）
                     margins=0,
                     hdr_info=False,  # 禁用 heading 检测
                 ),
@@ -1529,7 +1106,8 @@ class PDFParser:
             if "lines" not in block:
                 continue
             txt = "".join(s["text"] for line in block["lines"] for s in line["spans"]).strip()
-            if re.match(self.FIGURE_CAPTION_RE, txt):
+            # 使用严格 caption 识别，排除正文引用句
+            if self._is_strict_figure_caption(txt):
                 rect = fitz.Rect(block["bbox"])
                 captions.append((txt, rect))
 
@@ -1553,6 +1131,7 @@ class PDFParser:
         page: fitz.Page,
         page_idx: int,
         img_dir: Path,
+        diagram_regions: list[fitz.Rect] | None = None,
         image_size_limit: float | None = None,
         max_images_per_page: int | None = None,
     ) -> list[dict[str, Any]]:
@@ -1562,11 +1141,13 @@ class PDFParser:
         1. get_image_info() 获取图片元数据（含 bbox，不依赖定位）
         2. 尺寸过滤：width/height >= image_size_limit * page_size
         3. 去重：删除被大图片完全包含的小图片
-        4. 限制：最多 max_images_per_page 张
+        4. diagram 区域过滤：完全位于已识别 diagram 区域内的图片视为填充图案，跳过
+        5. 限制：最多 max_images_per_page 张
 
         优势：get_image_info() 直接返回 bbox，不依赖 get_image_bbox() 定位，
         避免 bbox 定位失败导致的断链问题。
         """
+        diagram_regions = diagram_regions or []
         if image_size_limit is None:
             image_size_limit = Config.PARSER_IMAGE_SIZE_LIMIT
         if max_images_per_page is None:
@@ -1610,6 +1191,16 @@ class PDFParser:
                     del img_info[i]
                     break
 
+        # 过滤：完全位于 diagram 区域内的图片视为填充图案/装饰元素，跳过
+        if diagram_regions:
+            filtered = []
+            for item in img_info:
+                bbox = item["bbox"]
+                inside_diagram = any(bbox in dr for dr in diagram_regions)
+                if not inside_diagram:
+                    filtered.append(item)
+            img_info = filtered
+
         # 限制数量
         img_info = img_info[:max_images_per_page]
 
@@ -1621,7 +1212,7 @@ class PDFParser:
                 if xref is None:
                     # 无 xref 时回退到页面区域渲染
                     pix = page.get_pixmap(clip=bbox, dpi=self.PAGE_RENDER_DPI)
-                    img_path = img_dir / f"page_{page_idx}_img_{img_index:02d}.jpg"
+                    img_path = img_dir / f"page_{page_idx}_img_{img_index:02d}.png"
                     pix.save(img_path)
                     # 渲染后检查是否为低内容图片
                     pil_check = Image.open(img_path)
@@ -1644,10 +1235,10 @@ class PDFParser:
                     if self._is_low_content_image(pil_img):
                         continue
 
-                    img_path = img_dir / f"page_{page_idx}_img_{img_index:02d}.jpg"
-                    if pil_img.mode in ("RGBA", "P"):
-                        pil_img = pil_img.convert("RGB")
-                    pil_img.save(img_path, format="JPEG", quality=Config.PARSER_IMAGE_JPEG_QUALITY)
+                    img_path = img_dir / f"page_{page_idx}_img_{img_index:02d}.png"
+                    if pil_img.mode == "P":
+                        pil_img = pil_img.convert("RGBA")
+                    pil_img.save(img_path, format="PNG")
 
                 rel_path = f"images/{img_path.name}"
                 images.append(
@@ -1671,8 +1262,13 @@ class PDFParser:
         page: fitz.Page,
         page_idx: int,
         img_dir: Path,
+        diagram_regions: list[fitz.Rect] | None = None,
     ) -> list[dict[str, Any]]:
-        """提取页面中的嵌入图片（raster），保存为 JPG。."""
+        """提取页面中的嵌入图片（raster），保存为 JPG。
+
+        跳过完全位于已识别 diagram 区域内的图片（视为填充图案/装饰元素）。
+        """
+        diagram_regions = diagram_regions or []
         images = []
         img_list = page.get_images(full=True)
         for img_index, img_info in enumerate(img_list, start=1):
@@ -1693,10 +1289,14 @@ class PDFParser:
                 except Exception:
                     continue
 
-                img_path = img_dir / f"page_{page_idx}_img_{img_index}.jpg"
-                if pil_img.mode in ("RGBA", "P"):
-                    pil_img = pil_img.convert("RGB")
-                pil_img.save(img_path, format="JPEG", quality=Config.PARSER_IMAGE_JPEG_QUALITY)
+                # 跳过完全位于 diagram 区域内的图片（填充图案/装饰元素）
+                if diagram_regions and any(bbox in dr for dr in diagram_regions):
+                    continue
+
+                img_path = img_dir / f"page_{page_idx}_img_{img_index}.png"
+                if pil_img.mode == "P":
+                    pil_img = pil_img.convert("RGBA")
+                pil_img.save(img_path, format="PNG")
 
                 rel_path = f"images/{img_path.name}"
                 images.append(
@@ -1721,19 +1321,17 @@ class PDFParser:
         diagram_captions: dict[int, str],
         img_dir: Path,
     ) -> list[dict[str, Any]]:
-        """将矢量图区域渲染为图片，保存为 JPG。."""
+        """将矢量图区域渲染为图片，保存为 PNG（无损高保真）."""
         images = []
         for i, clip_rect in enumerate(diagram_regions, start=1):
             try:
-                img_path = img_dir / f"page_{page_idx}_diagram_{i:02d}.jpg"
+                img_path = img_dir / f"page_{page_idx}_diagram_{i:02d}.png"
                 zoom = self.PAGE_RENDER_DPI / 72
                 mat = fitz.Matrix(zoom, zoom)
                 pix = page.get_pixmap(matrix=mat, clip=clip_rect)
 
-                # pixmap 保存为 PNG 后转 JPEG
-                png_buf = io.BytesIO(pix.tobytes("png"))
-                pil_img = Image.open(png_buf).convert("RGB")
-                pil_img.save(img_path, format="JPEG", quality=Config.PARSER_IMAGE_JPEG_QUALITY)
+                # 直接保存为 PNG（无损，保留原始质量）
+                pix.save(img_path)
 
                 rel_path = f"images/{img_path.name}"
                 alt = diagram_captions.get(i - 1, f"Page {page_idx} Diagram {i}")

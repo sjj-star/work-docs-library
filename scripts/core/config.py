@@ -331,10 +331,6 @@ class Config:
                 "WORKDOCS_PARSER_IMAGE_MERGE_Y_THRESHOLD", "parser.image_merge_y_threshold", "20.0"
             )
         )
-        cls.PARSER_IMAGE_JPEG_QUALITY = int(
-            _resolve_config("WORKDOCS_PARSER_IMAGE_JPEG_QUALITY", "parser.image_jpeg_quality", "90")
-        )
-
         # Plugin 默认值
         cls.PLUGIN_SEARCH_TOP_K = int(
             _resolve_config("WORKDOCS_PLUGIN_SEARCH_TOP_K", "plugin.search_top_k", "5")

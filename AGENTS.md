@@ -7,37 +7,167 @@
 
 ---
 
-## 项目目标（一句话定义）
+## 项目概述
 
-从 IC 前端设计技术文档（PDF）中自动提取结构化实体与关系，构建**跨文档互通**的知识图谱，同时具有文档内容块的向量检索能力增强知识库。
+本项目是一个面向 **IC 前端设计技术文档（PDF）** 的自动化知识提取 Pipeline，以 **Kimi Code CLI Plugin** 形式运行。核心能力包括：
+
+- **智能文档解析**：PDF 通过 BigModel Expert API 解析为 Markdown + 图片；失败时自动 fallback 到本地 PDFParser（PyMuPDF + TOC 驱动）
+- **知识图谱构建**：自动提取结构化实体（Feature、Module、Register、Signal、Instruction、Interrupt、PipelineStage、Peripheral 等）和关系（IMPLEMENTS、CONTAINS、HAS_REGISTER、INSTRUCTION_READS_REGISTER、MODULE_IMPLEMENTS_INSTRUCTION、INTERRUPT_TRIGGERS 等），构建跨文档互通的知识图谱
+- **向量语义检索**：基于 FAISS 的语义向量索引，支持相似度搜索
+- **Batch API 架构**：LLM 实体提取通过 Batch API 提交（成本为同步 API 的 50%），Embedding 通过同步单文本 API 完成
+- **章节级增量更新**：按章节 `content_hash` 指纹比较，未变章节复用缓存，仅对变更/新增章节进行 LLM 提取
+- **Multimodal 图片理解**：LLM 直接分析文档中的图片，生成文字描述用于向量化
 
 **目标规模**：数百个文档，每个文档几十到万页级。全局图谱通过 NetworkX 内存存储管理，知识图谱检索与文档内容向量检索互通关联。
 
 ---
 
-## 技术参考索引
+## 技术栈与运行时架构
 
-以下主题在 `DESIGN.md` 和 `README.md` 中有详细论述，本处仅提供索引，**禁止在此重复展开**：
+### 核心依赖
+| 类别 | 技术/库 | 版本要求 |
+|------|--------|---------|
+| 语言 | Python | >= 3.11 |
+| 虚拟环境 | uv / venv | — |
+| PDF 解析 | PyMuPDF, PyMuPDF4LLM, pdfplumber, PyPDF2 | >=1.23, >=1.27, >=0.10, >=3.0 |
+| 向量检索 | FAISS (CPU), NumPy | >=1.7.4, >=1.24 |
+| 图谱存储 | NetworkX | >=3.0 |
+| 元数据存储 | SQLite (标准库 sqlite3) | — |
+| 文档解析 | python-docx, openpyxl | >=1.1, >=3.1 |
+| 图片处理 | Pillow | >=10.0 |
+| HTTP 客户端 | requests | >=2.31 |
+| 环境变量 | python-dotenv | >=1.0 |
+| 测试 | pytest | >=9.0 |
 
-| 主题 | 权威文档 | 说明 |
-|------|---------|------|
-| 核心架构决策（Batch API、NetworkX、零数据丢失等 11 项） | `DESIGN.md` 第 1–10 章 | 每项决策的选择原因、实现细节与权衡 |
-| Pipeline 六阶段拆分与中间产物持久化 | `DESIGN.md` 第 19 章 | 产物清单、状态管理、开发约束 |
-| 防御性编程与状态安全原则（7 条） | `DESIGN.md` 第 20 章 | 2026-04 审计 21 项缺陷的教训总结 |
-| Block/Sub-block 概念与生成链路 | `DESIGN.md` 第 16 章 | 概念定义、继承表、切分策略、设计意图 |
-| Prompt 设计演进与策略约束 | `DESIGN.md` 第 22 章 | 三步提取流程、代码排除规则、属性格式规范、变更历史 |
-| 配置系统与完整配置项速查 | `README.md`「配置说明」 | 四层优先级、全部活跃配置项（~45 项） |
-| 环境隔离与测试基础设施 | `README.md`「开发与测试」 | conftest.py 三重隔离机制 |
-| 官方 API 开发文档链接 | `README.md`「参考资源」 | Kimi / BigModel API 文档 |
+### 四存储系统架构
+| 存储 | 职责 | 持久化文件 | 原子性保证 |
+|------|------|-----------|-----------|
+| **SQLite** | 文档元数据、content_blocks、heading_maps | `knowledge_base/workdocs.db` | 单连接事务 |
+| **FAISS** | 向量索引（语义搜索） | `knowledge_base/faiss.index` + `id_map.json` | `fcntl` 进程锁 + 临时文件 rename |
+| **NetworkX** | 全局知识图谱（实体+关系） | `knowledge_base/graphs/{doc_id}.json` + `global.json` | 内存操作 + 文件原子写入 |
+| **Bridge** | block ↔ 实体 双向索引 | 纯内存（重启从 SQLite 重建） | 内存级 |
+
+### Pipeline 六阶段
+1. **解析**（PDF → Markdown + images）
+2. **构建 LLM Batch JSONL**（Markdown → 树形章节 → content_blocks + heading_maps → batch requests）
+3. **提交 LLM Batch API**（增量过滤 → 并行提交 → 保存原始结果）
+4. **解析入库**（结果文件 → entities/relations → GraphStore + SQLite，不含向量化）
+5. **构建 Embedding JSONL**（从 SQLite 查询待向量化的 blocks）
+6. **同步 Embedding 向量化**（逐条调用 Embedding API → SQLite + FAISS）
+
+详见 `README.md`「架构概览」和 `DESIGN.md` 第 19 章。
+
+---
+
+## 目录结构与代码组织
+
+```
+work-docs-library/
+├── plugin.json                   # Kimi Code CLI Plugin 配置（暴露 22 个工具）
+├── config.json                   # 用户持久化配置模板（四层优先级）
+├── pyproject.toml                # Python 项目配置、依赖、ruff/pyright/pytest 设置
+├── scripts/
+│   ├── plugin_router.py          # Plugin 统一路由（stdin/stdout JSON）
+│   ├── requirements.txt          # 向后兼容的备用依赖清单（主要依赖在 pyproject.toml）
+│   ├── .env / .env.example       # 环境变量（凭证等，gitignored）
+│   ├── prompts/                  # LLM 提示词文件（运行时读取，无需重启）
+│   │   ├── entity_extraction_system.txt
+│   │   └── entity_extraction_user.txt
+│   ├── core/                     # 业务逻辑层
+│   │   ├── config.py             # 统一配置中心（.env / 环境变量 / config.json / 默认值）
+│   │   ├── doc_graph_pipeline.py # ⭐ DocGraphPipeline 主管道（六阶段）
+│   │   ├── knowledge_base_service.py  # 统一服务层封装（DB + VectorIndex + GraphStore + Bridge）
+│   │   ├── batch_clients.py      # BaseBatchClient + BatchClient（通用 OpenAI-compatible Batch API）
+│   │   ├── llm_chat_client.py    # LLM 同步对话客户端（Chat 模式回退）
+│   │   ├── embedding_client.py   # Embedding 同步单文本客户端
+│   │   ├── bigmodel_parser_client.py  # BigModel Expert 文件解析（专用非兼容 API）
+│   │   ├── graph_store.py        # NetworkX 图谱存储（CRUD、冲突检测、属性索引、路径搜索）
+│   │   ├── db.py                 # SQLite 数据库操作
+│   │   ├── vector_index.py       # FAISS 向量索引管理
+│   │   ├── models.py             # 数据模型（Chunk、Document）
+│   │   └── enums.py              # StrEnum 定义（ChunkStatus、DocumentStatus、ChunkType）
+│   ├── parsers/                  # IO / 解析层
+│   │   ├── pdf_parser.py         # PDF 本地解析器（PyMuPDF + TOC 驱动章节识别 + 表格/图片检测）
+│   │   ├── office_parser.py      # DOCX / XLSX 解析器（代码存在，尚未接入 pipeline）
+│   │   └── image_utils.py        # 图片压缩与三分类（彩色/灰度/黑白）
+│   ├── tests/                    # pytest 测试集（382 passed, 2 skipped）
+│   │   ├── conftest.py           # 三重环境隔离（清除 WORKDOCS_ 环境变量、阻止 load_dotenv、临时目录重定向）
+│   │   ├── fixtures/             # 测试 fixture（PDF 页样本、解析输出样本）
+│   │   └── test_*.py             # 各模块测试文件
+│   └── benchmark/                # 性能基准与诊断脚本（非 pytest 常规用例）
+│       ├── test_mp_find_tables_feasibility.py   # 多进程可行性验证
+│       ├── test_mp_find_tables_perf_detail.py   # 详细性能分析
+│       ├── analyze_doc.py        # 单文档解析诊断
+│       ├── compare_regression.py # 回归对比
+│       └── ...
+├── knowledge_base/               # 运行时自动生成数据（❌ 禁止手动修改）
+│   ├── workdocs.db               # SQLite
+│   ├── faiss.index / id_map.json # FAISS 向量索引
+│   ├── parsed/<doc_id>/          # Stage1 解析输出
+│   ├── batch/                    # Stage2/3/5/6 中间产物
+│   └── graphs/                   # Stage4 子图快照 + global.json
+└── .venv/                        # Python 虚拟环境
+```
+
+---
+
+## 构建与测试命令
+
+### 环境安装
+```bash
+# 方式一：uv（推荐）
+cd /path/to/work-docs-library
+uv sync
+
+# 方式二：pip
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -e .
+```
+
+### 代码质量检查（提交前必须执行）
+```bash
+# 代码格式化与 lint
+cd /path/to/work-docs-library
+./.venv/bin/ruff check scripts/
+./.venv/bin/ruff format scripts/
+
+# 类型检查
+./.venv/bin/pyright scripts/
+```
+
+### 测试执行
+```bash
+# 完整测试集（当前状态：382 passed, 2 skipped, 0 failed）
+cd /path/to/work-docs-library
+PYTHONPATH=scripts ./.venv/bin/python -m pytest scripts/tests/ -v
+
+# 仅运行核心基础设施测试（<5s）
+PYTHONPATH=scripts ./.venv/bin/python -m pytest \
+  scripts/tests/test_graph_store.py \
+  scripts/tests/test_vector_index.py \
+  scripts/tests/test_db.py \
+  scripts/tests/test_knowledge_base_service.py \
+  scripts/tests/test_knowledge_base_service_queries.py -v
+
+# 仅运行 Pipeline 集成测试（<5s）
+PYTHONPATH=scripts ./.venv/bin/python -m pytest \
+  scripts/tests/test_pipeline_stages.py \
+  scripts/tests/test_plugin_router.py \
+  scripts/tests/test_pdf_parser.py -v
+```
 
 ---
 
 ## 代码规范
 
 ### 强制工具链
-- **ruff**：代码格式化与 lint（`venv/bin/ruff check scripts/` / `venv/bin/ruff format scripts/`）
-- **pyright**：类型检查（`venv/bin/pyright scripts/`）
-- **pytest**：测试执行（`PYTHONPATH=scripts venv/bin/python -m pytest scripts/tests/ -v`）
+- **ruff**：代码格式化与 lint（配置见 `pyproject.toml [tool.ruff]`）
+  - target-version: py311, line-length: 100
+  - select: E, W, F, I, N, D, UP
+  - per-file-ignores: `scripts/tests/*` 忽略模块级 docstring 要求
+- **pyright**：类型检查（`scripts/` 为 include，`scripts/tests/fixtures` 和 `__pycache__` 为 exclude）
+- **pytest**：测试执行（`pythonpath = ["scripts"]`）
 
 ### 日志规范
 - 统一使用 `logging`，格式：`"%(asctime)s | %(levelname)-8s | %(name)s | %(message)s"`
@@ -60,16 +190,128 @@
 - 修改提示词后无需重启，下次调用自动生效
 
 ### API 规范
-- **通用 API**（LLM Batch、Embedding、同步对话）：统一使用兼容 OpenAI 协议的 HTTP API，通过配置参数（`base_url`、`batch_endpoint`、`download_url_template` 等）适配不同服务商，实现厂商无感接入
-- **专用 API**（PDF 解析）：`BigModelParserClient` 使用 BigModel 专有的 Expert 文件解析接口（`/files/parser/create`、`/files/parser/result`），非 OpenAI-compatible，无法直接切换至其他厂商。失败时自动 fallback 到本地 `PDFParser`
-- 构造项目内部API时要尽可能使用函数式编程
+- **通用 API**（LLM Batch、Embedding、同步对话）：统一使用兼容 OpenAI 协议的 HTTP API，通过配置参数适配不同服务商
+- **专用 API**（PDF 解析）：`BigModelParserClient` 使用 BigModel 专有的 Expert 文件解析接口，非 OpenAI-compatible，失败时自动 fallback 到本地 `PDFParser`
+- 构造项目内部 API 时要尽可能使用函数式编程
 
 ### 机制与策略分离原则
-
 > 不要擅自设计任何硬编码的策略，应当优先设计一个框架和机制，后面根据实际需求使用机制来实现策略。
 
 - **零数据丢失是底线**：任何原始解析的文本都不得删除或丢弃
-- 具体 Prompt 策略约束（实体类型、关系类型、属性格式、排除规则等）→ 见 `DESIGN.md` 第 22 章
+- 具体 Prompt 策略约束 → 见 `DESIGN.md` 第 22 章
+
+---
+
+## 测试策略
+
+### 核心原则
+- **Mock 优先**：所有涉及外部 API 的测试使用 Fake 客户端，**禁止调用真实 API**
+- **环境隔离**：`scripts/tests/conftest.py` 在模块级别完成三重隔离：
+  1. 清除所有 `WORKDOCS_` 前缀和含 `.` 的环境变量
+  2. 阻止 `load_dotenv` 重新加载 `.env` 文件
+  3. 重定向 Config 默认路径到临时目录（DB、FAISS、Graph 均隔离）
+- **回归即修复**：任何导致测试失败的变更必须当场修复
+- **382 个测试用例必须全部通过**（2 个 skipped 为正常：真实文档参数集为空）
+
+### 测试文件清单
+| 测试文件 | 说明 |
+|----------|------|
+| `test_plugin_router.py` | Plugin 工具路由、参数解析 |
+| `test_pdf_parser.py` | PDF 解析核心测试（66 用例，含 13 个真实页面 fixture） |
+| `test_office_parser.py` | DOCX / XLSX 解析测试 |
+| `test_db.py` | SQLite 操作、事务管理 |
+| `test_vector_index.py` | FAISS 索引增删查、持久化 |
+| `test_llm_client.py` | LLM 客户端 Mock |
+| `test_config_json.py` | 配置优先级、凭证注入 |
+| `test_models.py` | 数据模型测试（含 StrEnum） |
+| `test_chapter_parser.py` | ChapterParser 树形章节解析测试 |
+| `test_image_utils.py` | 图片压缩工具测试 |
+| `test_graph_store.py` | NetworkX 图谱存储 CRUD、冲突检测、属性索引、子图、路径搜索、持久化 |
+| `test_batch_clients.py` | Batch API 客户端 Mock 测试 |
+| `test_knowledge_base_service.py` | KnowledgeBaseService 统一服务层测试 |
+| `test_knowledge_base_service_queries.py` | 语义-图谱联合查询、block+实体联合返回测试 |
+| `test_bigmodel_parser_client.py` | BigModel 解析客户端全路径覆盖测试 |
+| `test_content_blocks.py` | 内容块切分、heading_maps 构建 |
+| `test_batch_builder.py` | BatchBuilder 切分保护与空 content 过滤测试 |
+| `test_parsed_docs_jsonl.py` | 真实文档端到端 JSONL 生成测试 |
+| `test_pipeline_stages.py` | 六阶段 pipeline 拆分测试 |
+| `test_audit_issues.py` | 6 项生产 bug 定向回归测试 |
+| `test_mp_find_tables_feasibility.py` | 多进程 find_tables 可行性验证（执行极慢，>3min） |
+| `test_mp_find_tables_perf_detail.py` | 多进程 find_tables 详细性能分析 |
+| `analyze_amba_empty_runs.py` | AMBA 文档 find_tables 空跑根因分析 |
+
+### Mock 方法
+使用 `monkeypatch.setattr` 替换客户端类方法：
+```python
+monkeypatch.setattr(
+    "core.batch_clients.BatchClient.submit_parallel_batches",
+    lambda self, reqs: [{"entities": [], "relationships": [], "image_descriptions": {}}]
+)
+```
+
+---
+
+## 安全注意事项
+
+### 1. API 密钥管理
+- API Key 存储于 `scripts/.env`（gitignored），**禁止**硬编码到源码或提交到版本控制
+- `config.json` 中的 `api_key` 字段为空字符串模板，实际值由环境变量或 Kimi CLI 运行时注入
+- `plugin.json` 的 `inject` 字段声明了凭证注入映射：`llm.api_key` ← `api_key`
+
+### 2. 数据库安全
+- 所有 SQL 必须使用参数化查询（`?` 占位符），禁止字符串拼接 SQL
+- SQLite 数据库文件 `knowledge_base/workdocs.db` 为单用户本地场景设计，不建议多进程并发写入
+
+### 3. 存储系统一致性
+- FAISS 索引操作使用 `fcntl.flock` 进程级排他锁，修改前调用 `_reload()` 加载磁盘最新状态
+- 多存储系统（SQLite + FAISS + NetworkX + Bridge）之间**无分布式事务**，极端崩溃场景可通过 `reprocess` 或 `rebuild_global_graph` 重建
+- `knowledge_base/` 目录为运行时生成数据，**禁止**手动修改其中的 `.db`、`.index`、`.json` 文件
+
+### 4. 外部 API 调用安全
+- 测试环境**绝对禁止**调用真实 API（BigModel Expert、Kimi Batch、Embedding 等）
+- `conftest.py` 已清除所有 `WORKDOCS_` 环境变量并阻止 `.env` 加载，防止测试意外使用生产凭证
+- Batch API 超大 JSONL 自动按 100MB 拆分，防止单文件过大导致网络/内存问题
+
+### 5. 文件系统安全
+- 所有图谱/索引持久化使用「临时文件 + `os.replace`」原子写入，避免崩溃导致文件损坏
+- `Config.setup_logging()` 将日志输出到 stderr，确保 stdout 保持纯 JSON（Plugin 通信协议要求）
+
+---
+
+## 文件修改权限规则
+
+| 文件/目录 | 权限 | 说明 |
+|-----------|------|------|
+| `scripts/core/*.py` | ⚠️ 需批准 | 核心模块，修改前必须说明影响范围 |
+| `scripts/prompts/*.txt` | ✅ 可改 | 提示词文件，运行时读取 |
+| `scripts/tests/*.py` | ✅ 可改 | 测试文件 |
+| `scripts/parsers/*.py` | ⚠️ 需批准 | 解析器影响数据输入质量 |
+| `plugin.json` | ⚠️ 需批准 | 插件定义，用户明确要求时可修改 |
+| `config.json` | ✅ 可改 | 用户持久化配置模板 |
+| `README.md` / `AGENTS.md` / `DESIGN.md` | ✅ 可改 | 文档必须随代码同步更新 |
+| `knowledge_base/` | ❌ 禁止 | 运行时生成数据 |
+| `scripts/benchmark/` | ✅ 可改 | 性能基准与诊断脚本 |
+
+---
+
+## Agent 自主开发原则
+
+### 可以自主决定的事项
+- 代码重构（变量重命名、函数拆分、模块移动）
+- 新增单元测试或调整测试结构
+- 更新日志格式、错误提示信息
+- 优化算法实现（不改变输入输出语义）
+- 更新本文档（AGENTS.md）和 README.md、DESIGN.md（按「文档同步规范」执行）
+- 不过度考虑项目开发的版本兼容性
+
+### 必须询问用户的事项
+- 修改核心数据模型（`Chunk`、`Document`、`GraphEntity`、`GraphRelation` 的字段）
+- 修改数据库 Schema（新增/删除/修改表或字段）
+- 新增外部依赖（`pyproject.toml` / `requirements.txt` 变更）
+- 修改 Pipeline 核心流程（解析 → 章节树 → batch 构建 → 实体提取 → 图谱 → 向量化）
+- 删除已有功能或文件
+- 涉及真实 API 调用的操作（测试除外）
+- 修改 `plugin.json` 插件定义（除非用户明确要求）
 
 ---
 
@@ -107,85 +349,20 @@
 
 ---
 
-## Agent 自主开发原则
+## 技术参考索引
 
-### 可以自主决定的事项
-- 代码重构（变量重命名、函数拆分、模块移动）
-- 新增单元测试或调整测试结构
-- 更新日志格式、错误提示信息
-- 优化算法实现（不改变输入输出语义）
-- 更新本文档（AGENTS.md）和 README.md、DESIGN.md（按「文档同步规范」执行）
-- 不过度考虑项目开发的版本兼容性
+以下主题在 `DESIGN.md` 和 `README.md` 中有详细论述，本处仅提供索引，**禁止在此重复展开**：
 
-### 必须询问用户的事项
-- 修改核心数据模型（`Chunk`、`Document`、`GraphEntity`、`GraphRelation` 的字段）
-- 修改数据库 Schema（新增/删除/修改表或字段）
-- 新增外部依赖（`requirements.txt` 变更）
-- 修改 Pipeline 核心流程（解析 → 章节树 → batch 构建 → 实体提取 → 图谱 → 向量化）
-- 删除已有功能或文件
-- 涉及真实 API 调用的操作（测试除外）
-- 修改 `plugin.json` 插件定义（除非用户明确要求）
-
----
-
-## 文件修改权限规则
-
-| 文件/目录 | 权限 | 说明 |
-|-----------|------|------|
-| `scripts/core/*.py` | ⚠️ 需批准 | 核心模块，修改前必须说明影响范围 |
-| `scripts/prompts/*.txt` | ✅ 可改 | 提示词文件，运行时读取 |
-| `scripts/tests/*.py` | ✅ 可改 | 测试文件 |
-| `scripts/parsers/*.py` | ⚠️ 需批准 | 解析器影响数据输入质量 |
-| `plugin.json` | ⚠️ 需批准 | 插件定义，用户明确要求时可修改（已完成 v1.1.0 重构：30→22 工具） |
-| `config.json` | ✅ 可改 | 用户持久化配置模板 |
-| `README.md` / `AGENTS.md` / `DESIGN.md` | ✅ 可改 | 文档必须随代码同步更新（按「文档同步规范」执行） |
-| `knowledge_base/` | ❌ 禁止 | 运行时生成数据 |
-
----
-
-## 测试策略
-
-### 核心原则
-- **Mock 优先**：所有涉及外部 API 的测试使用 Fake 客户端，**禁止调用真实 API**
-- **环境隔离**：`scripts/tests/conftest.py` 在模块级别完成三重隔离（清除环境变量、阻止 `load_dotenv` 重新加载 `.env`、重定向 Config 默认路径到临时目录），确保测试不依赖外部 `.env` 或生产数据。详见 `README.md`「开发与测试」
-- **回归即修复**：任何导致测试失败的变更必须当场修复
-- **389 个测试用例必须全部通过**（2 个 skipped 为正常：真实文档参数集为空）
-
-### 测试文件清单
-| 测试文件 | 说明 |
-|----------|------|
-| `test_plugin_router.py` | Plugin 工具路由、参数解析 |
-| `test_pdf_parser.py` | PDF 解析核心测试 |
-| `test_office_parser.py` | DOCX / XLSX 解析测试 |
-| `test_db.py` | SQLite 操作、事务管理 |
-| `test_vector_index.py` | FAISS 索引增删查、持久化 |
-| `test_llm_client.py` | LLM 客户端 Mock |
-| `test_config_json.py` | 配置优先级、凭证注入 |
-| `test_models.py` | 数据模型测试（含 StrEnum） |
-| `test_chapter_parser.py` | ChapterParser 树形章节解析测试（含 Markdown heading / 代码块保护 / TOC 行识别） |
-| `test_image_utils.py` | 图片压缩工具测试 |
-| `test_graph_store.py` | NetworkX 图谱存储 CRUD、冲突检测、属性索引、子图、路径搜索、持久化、`doc_properties` 测试 |
-| `test_batch_clients.py` | Batch API 客户端（Kimi + BigModel）Mock 测试 |
-| `test_knowledge_base_service.py` | KnowledgeBaseService 统一服务层测试 |
-| `test_knowledge_base_service_queries.py` | 语义-图谱联合查询、block+实体联合返回测试 |
-| `test_bigmodel_parser_client.py` | BigModel 解析客户端全路径覆盖测试 |
-| `test_entity_extractor.py` | EntityExtractor multimodal batch 请求构建测试 |
-| `test_batch_builder.py` | BatchBuilder 切分保护与空 content 过滤测试 |
-| `test_parsed_docs_jsonl.py` | 真实文档端到端 JSONL 生成测试 |
-| `test_pipeline_stages.py` | 六阶段 pipeline 拆分测试 |
-| `test_mp_find_tables_feasibility.py` | 多进程 find_tables 可行性验证（pickle/一致性/稳定性/性能/内存） |
-| `test_mp_find_tables_perf_detail.py` | 多进程 find_tables 详细性能分析（per-page breakdown/加速比/效率） |
-| `analyze_amba_empty_runs.py` | AMBA 文档 find_tables 空跑根因分析（Type A/B/C 分类） |
-
-### Mock 方法
-使用 `monkeypatch.setattr` 替换客户端类方法：
-```python
-# 示例：mock BatchClient
-monkeypatch.setattr(
-    "core.batch_clients.BatchClient.submit_parallel_batches",
-    lambda self, reqs: [{"entities": [], "relationships": [], "image_descriptions": {}}]
-)
-```
+| 主题 | 权威文档 | 说明 |
+|------|---------|------|
+| 核心架构决策（Batch API、NetworkX、零数据丢失等 11 项） | `DESIGN.md` 第 1–10 章 | 每项决策的选择原因、实现细节与权衡 |
+| Pipeline 六阶段拆分与中间产物持久化 | `DESIGN.md` 第 19 章 | 产物清单、状态管理、开发约束 |
+| 防御性编程与状态安全原则（7 条） | `DESIGN.md` 第 20 章 | 2026-04 审计 21 项缺陷的教训总结 |
+| Block/Sub-block 概念与生成链路 | `DESIGN.md` 第 16 章 | 概念定义、继承表、切分策略、设计意图 |
+| Prompt 设计演进与策略约束 | `DESIGN.md` 第 22 章 | 三步提取流程、代码排除规则、属性格式规范、变更历史 |
+| 配置系统与完整配置项速查 | `README.md`「配置说明」 | 四层优先级、全部活跃配置项（~45 项） |
+| 环境隔离与测试基础设施 | `README.md`「开发与测试」 | conftest.py 三重隔离机制 |
+| 官方 API 开发文档链接 | `README.md`「参考资源」 | Kimi / BigModel API 文档 |
 
 ---
 
@@ -221,18 +398,27 @@ monkeypatch.setattr(
 - ✅ **跨粒度桥接索引**
 - ✅ **Pipeline 六阶段拆分**
 - ✅ **Embedding 同步单文本 API**
-- ✅ **环境隔离三重机制**：彻底根治 `.env` 污染测试环境的问题（`fc7fb38` 未根治，通过 conftest.py 清除+阻止 load_dotenv+临时目录重定向彻底解决）
-- ✅ **存储粒度与查询粒度解耦（方案C）**：引入 `content_blocks` 表作为存储粒度（按 `##` section 聚合后切分），`heading_maps` 表作为查询粒度（`##`/`###` 共享同一 block 集合），batch 数量减少 40-50%，API 成本降低
-- ✅ **FAISS ID 偏移**：`_BLOCK_FAISS_OFFSET = 10_000_000` 避免 block db_id 与旧 chunks ID 在 FAISS 中冲突
-- ✅ **389 个测试全部通过**
-- ✅ **PDF Parser 表格检测增强（Milestone 1）**：保留 caption-gated 策略基础上叠加预筛选补充检测，`page.find_tables(strategy="lines_strict") + Table.to_markdown()` 格式化，位域图重叠保护。TI 提取 68 表格，AMBA 提取 22 表格
-- ✅ **PDF Parser 图片检测增强（Milestone 2）**：`page.get_image_info()` 过滤链替代 `get_images() + get_image_bbox()`，双路径提取 + 存在性校验，修复 bbox 定位失败导致的断链
-- ✅ **PDF Parser PyMuPDF4LLM fallback（Milestone 3）**：对 Layer 1/2 失败的边缘页面局部调用 PyMuPDF4LLM Legacy Mode，`table_strategy="lines"` 补充检测无边框表格，`hdr_info=False` + 结构化数据隔离规避标题扁平化/页眉噪声缺陷。实际触发 12 页，产出 0 补充表格，耗时占比 <2%
-- ✅ **新增依赖**：`pymupdf4llm>=1.27.0,<2.0.0`（PyMuPDF4LLM fallback 必需）
-- ✅ **PDF Parser 配置化（Milestone 4）**：全部 14 个 Magic Number 提取到 `Config` + `config.json`，支持环境变量/配置文件/默认值三层覆盖，零硬编码
-- ✅ **性能基准测试**：TI (219页) 改进前 10.3s/0表格 → 版本A 46.2s/68表格；AMBA (585页) 改进前 8.7s/0表格 → 版本A 93.3s/22表格
-- ✅ **多进程并行化可行性分析**：4-worker 加速比 TI 2.07x / AMBA 1.61x，但 Amdahl 定律限制整体收益仅 ~1.3x，**否决实施**（投入产出比过低）
-- ✅ **AMBA 空跑根因分析**：251 页触发 find_tables → 234 页 Type A（lines_strict 完全未检测到表格）。根因：AMBA 大量使用无竖线表格（空白对齐+水平线），lines_strict 策略检测率仅 9%（16/194）
+- ✅ **环境隔离三重机制**：彻底根治 `.env` 污染测试环境的问题
+- ✅ **存储粒度与查询粒度解耦（方案C）**：引入 `content_blocks` 表作为存储粒度，`heading_maps` 表作为查询粒度，batch 数量减少 40-50%
+- ✅ **FAISS ID 偏移**：`_BLOCK_FAISS_OFFSET = 10_000_000` 避免 block db_id 与旧 chunks ID 冲突
+- ✅ **382 个测试全部通过**
+- ✅ **PDF Parser 表格检测增强（Milestone 1-4）**：`find_tables(strategy="lines_strict")`、caption-gated 预筛选、位域图重叠保护、PyMuPDF4LLM fallback、全部 14 个 Magic Number 配置化
+- ✅ **PDF Parser 图片检测增强（Milestone 2）**：`page.get_image_info()` 过滤链、双路径提取
+- ✅ **性能基准测试**：TI (219页) 10.3s/0表格 → 46.2s/68表格；AMBA (585页) 8.7s/0表格 → 93.3s/22表格
+- ✅ **多进程并行化可行性分析**：4-worker 加速比 TI 2.07x / AMBA 1.61x，但 Amdahl 定律限制整体收益仅 ~1.3x，**否决实施**
+- ✅ **AMBA 空跑根因分析**：251 页触发 find_tables → 234 页 Type A 空跑，根因为 lines_strict 对无竖线表格检测率仅 9%
+- ✅ **GapsFirstScanner 重构**：Caption-driven linear extractor 替代 UZN 方案，~600 行替代 2037 行，性能提升 5-10x
+- ✅ **Hard Separator + Zone 模型**：header/footer/heading/caption/body_text 构成 y 轴硬分割，提取只在 zone 内部搜索
+- ✅ **Cluster-based 图片渲染**：每个 drawing cluster 独立渲染为图片，修复过度合并问题
+- ✅ **Orphan Zone 检测**：无 Caption 表格通过 `_classify_table_style` 启发式检测，命中率 90.5%
+- ✅ **自适应表格策略**：`_classify_table_style` 识别 grid/horizontal 风格，`find_tables` 按页选择 lines_strict/lines 策略
+- ✅ **预计算优化**：每页一次 `find_tables` 全页扫描，结果复用于所有 caption/orphan zone，避免 142 次重复调用
+- ✅ **AMBA 零高度线调研**：AMBA 表格水平线为 height=0.0 的零高度矢量线，find_tables 任何策略均无法识别，确认为 PyMuPDF C 库层面限制
+- ✅ **`tab.cells` 空伪表格防御**：`find_tables()` 返回 cells=[] 的伪表格导致 `tab.bbox` 触发 `ValueError`，添加防御性跳过
+- ✅ **`_fix_drawing_rect` 前零高度线统计**：在 rect 扩展前统计原始 drawing 的 `height==0.0`，避免检测永远失效
+- ✅ **`_classify_table_style` v2**：去掉 `len<10` 门槛，增加 drawing 风格分类（h/v/other）、文本密度过滤（<0.02 text/pt）、零高度线过滤（>50% 时跳过）
+- ✅ **空跑率优化**：TI 15.9%→1.4%，AMBA 92.9%→0.0%，SPRUI07 10.4%→8.8%，DC_UG 31.0%→28.6%
+- ✅ **解析器输出格式改为 PNG**：矢量图/光栅图/表格区域统一输出 PNG（无损高保真），移除 `PARSER_IMAGE_JPEG_QUALITY` 配置；LLM API 发送时的压缩由 `_compress_image_to_base64` 独立处理（三层分类策略不变）
 
 ### 下一阶段（精确到下一步）
 1. **可视化**：图谱可视化导出（Graphviz / D3.js）
@@ -241,14 +427,23 @@ monkeypatch.setattr(
 
 ### PDF Parser 表格检测已知问题与下一步方向
 
-**已完成的分析**（详见 `DESIGN.md` 新增章节）：
-- `lines_strict` 策略对 AMBA 无竖线表格检测率仅 9%（16/194 正式标题页面）
-- 正文引用句（"Table X.X describes..."）被 `TABLE_CAPTION_RE` 误匹配，导致 191 次无效触发
-- 跨页续表（93 页 "Continued from previous page"）造成碎片化检测
-- P4L fallback 实际价值极低（12 页触发，0 补充表格产出）
+**已完成的分析**（详见 `DESIGN.md` 第 18 章）：
+- `_classify_table_style` 对 AMBA 表格 100% 正确分类为 `horizontal`，但 `find_tables` 任何策略均返回 0 表格
+- 根因：AMBA 表格水平线为 height=0.0 的零高度矢量线，PyMuPDF 内部算法无法识别
+- `text` 策略产生大量整页级误报（64×12 伪表格），不可用
+
+**当前状态**（2026-06-10）：
+- Grid 表格（TI/SPRUI07）：`lines_strict` 有效，自适应策略已优化
+- Horizontal 表格（AMBA）：**不可提取**，PyMuPDF C 库层面限制
+- 误触发成本：预计算机制使 TABLE_CAPTION_RE 误匹配的影响从 "142 次 clip 调用" 降至 "一次全页扫描"
+- 空跑率：TI 1.4% / AMBA 0.0% / SPRUI07 8.8% / DC_UG 28.6%（v2 算法，详见 DESIGN.md 18.8.4）
+
+**已修复问题**：
+- `tab.cells` 空伪表格：防御性跳过，避免 `ValueError: min() iterable argument is empty`
+- `_fix_drawing_rect` 副作用：在 rect 扩展前统计原始零高度线，避免检测永远失效
 
 **下一步方向**（按优先级）：
-1. **收紧 TABLE_CAPTION_RE**：排除包含 describes/shows/lists/gives/provides 等动词的引用句（预估可跳过 ~24 页，节省 ~0.8s）
-2. **跳过跨页续表**：检测 "Continued from previous page" 直接跳过 find_tables（预估可跳过 ~33 页，节省 ~1.0s）
-3. **评估 `lines` 策略回退**：`lines_strict` 检测率 9% vs `lines` 预估 >50%，但需验证位域图误检风险是否可接受
+1. **收紧 TABLE_CAPTION_RE**：排除包含 describes/shows/lists/gives/provides 等动词的引用句（进一步减少不必要的全页扫描）
+2. **跳过跨页续表**：检测 "Continued from previous page" 直接跳过 find_tables（预估可跳过 ~33 页）
+3. **自研 horizontal 表格提取**：不依赖 `find_tables`，基于文本块对齐分析实现 AMBA 风格表格识别（投入大，优先级低）
 4. **to_markdown 性能**：TI 中 to_markdown 耗时比 find_tables 还高 31%，但为 PyMuPDF C 实现，外部优化空间极小

@@ -8,6 +8,7 @@ from core.config import Config
 from core.doc_graph_pipeline import (
     BatchBuilder,
     ChapterParser,
+    DocGraphPipeline,
     EntityExtractor,
     _build_content_blocks_and_maps,
 )
@@ -109,8 +110,6 @@ class TestParsedDocsToJsonl:
 
 
 # -- 从 test_jsonl_consistency.py 合并的内容一致性测试 --
-
-from core.doc_graph_pipeline import DocGraphPipeline
 
 
 def _extract_original_content(full_content: str) -> str:
