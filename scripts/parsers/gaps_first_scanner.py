@@ -899,18 +899,47 @@ class GapsFirstScanner:
                         clusters, key=lambda c: min(r.y0 for r in c)
                     )
 
-                # Start with closest cluster, merge adjacent clusters if gap < 80pt
+                # NEW: If closest cluster is tiny, prefer the largest cluster
+                # as anchor to avoid extracting isolated edge elements (e.g.
+                # a single vertical line on the far right) while missing the
+                # main diagram body.
+                closest = sorted_clusters[0]
+                # Use rect count (not area) to identify the main diagram body.
+                # Area can be misleading when a cluster contains many large solid
+                # shapes (e.g. Crossbar with big filled rectangles) while the
+                # actual main diagram (e.g. Mesh with many small lines/nodes)
+                # has more rects but less total area.
+                largest = max(clusters, key=lambda c: len(c))
+                if (
+                    len(closest) <= 2
+                    and len(largest) > len(closest) * 3
+                ):
+                    sorted_clusters = [largest] + [
+                        c for c in sorted_clusters if c is not largest
+                    ]
+
+                # Merge clusters whose bounding boxes are close in both axes.
+                # This fixes cases where diagram callouts or parallel tables
+                # are split into separate clusters due to small horizontal gaps.
                 target_cluster: list[fitz.Rect] = list(sorted_clusters[0])
-                prev_y0 = min(r.y0 for r in sorted_clusters[0])
-                prev_y1 = max(r.y1 for r in sorted_clusters[0])
+                merged = fitz.Rect(
+                    min(r.x0 for r in sorted_clusters[0]),
+                    min(r.y0 for r in sorted_clusters[0]),
+                    max(r.x1 for r in sorted_clusters[0]),
+                    max(r.y1 for r in sorted_clusters[0]),
+                )
                 for next_cl in sorted_clusters[1:]:
-                    next_y0 = min(r.y0 for r in next_cl)
-                    next_y1 = max(r.y1 for r in next_cl)
-                    gap = min(abs(next_y0 - prev_y1), abs(next_y1 - prev_y0))
-                    if gap < 30:
+                    next_bounds = fitz.Rect(
+                        min(r.x0 for r in next_cl),
+                        min(r.y0 for r in next_cl),
+                        max(r.x1 for r in next_cl),
+                        max(r.y1 for r in next_cl),
+                    )
+                    gap_x = max(merged.x0 - next_bounds.x1, next_bounds.x0 - merged.x1, 0)
+                    gap_y = max(merged.y0 - next_bounds.y1, next_bounds.y0 - merged.y1, 0)
+                    if gap_x <= 30 and gap_y <= 30:
                         target_cluster.extend(next_cl)
-                        prev_y0 = min(prev_y0, next_y0)
-                        prev_y1 = max(prev_y1, next_y1)
+                        merged |= next_bounds
                     else:
                         break
 

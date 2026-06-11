@@ -284,7 +284,7 @@ class Config:
             _resolve_config("WORKDOCS_PARSER_MIN_IMAGE_HEIGHT", "parser.min_image_height", "100")
         )
         cls.PARSER_PAGE_RENDER_DPI = int(
-            _resolve_config("WORKDOCS_PARSER_PAGE_RENDER_DPI", "parser.page_render_dpi", "100")
+            _resolve_config("WORKDOCS_PARSER_PAGE_RENDER_DPI", "parser.page_render_dpi", "200")
         )
         cls.PARSER_TABLE_DETECTION_ENABLED = (
             _resolve_config(
