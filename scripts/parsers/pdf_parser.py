@@ -346,8 +346,10 @@ class PDFParser:
             page_idx = page_num + 1
 
             # 4a. 【Gaps-First】线性区域扫描：表格 + 图片
+            page_toc_entries = toc_by_page.get(page_idx, [])
             gaps_result = scanner.process_page(
-                page, page.rect, header_margin, footer_margin, img_dir
+                page, page.rect, header_margin, footer_margin, img_dir,
+                toc_entries=page_toc_entries,
             )
 
             # 4b. 获取文本块（排除 diagram 区域内的文本，避免重复输出）

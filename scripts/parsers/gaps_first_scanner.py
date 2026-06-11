@@ -150,11 +150,21 @@ class GapsFirstScanner:
         return most_common_count / total > 0.95
 
     def _classify_text_blocks(
-        self, text_blocks: list[tuple[str, fitz.Rect, float]], page_rect: fitz.Rect
+        self,
+        text_blocks: list[tuple[str, fitz.Rect, float]],
+        page_rect: fitz.Rect,
+        toc_entries: list[tuple[int, str]] | None = None,
     ) -> list[tuple[str, fitz.Rect, float, str]]:
         """Classify text blocks: caption, heading, callout, body_text, other."""
         n = len(text_blocks)
         categories: list[str | None] = [None] * n
+
+        # Pre-build TOC title set for fast lookup
+        toc_titles: set[str] = set()
+        if toc_entries:
+            for _level, title in toc_entries:
+                toc_titles.add(title)
+                toc_titles.add(title.replace("\n", " ").strip())
 
         # First pass: captions (strict — exclude body-text reference sentences)
         caption_indices: list[int] = []
@@ -175,10 +185,27 @@ class GapsFirstScanner:
         )
         heading_threshold = max(estimated_body_size + 2, self.HEADING_MIN_FONT)
 
-        # Second pass: heading
+        # Second pass: heading (TOC-first, then heuristic fallback)
         for i, (txt, rect, avg_size) in enumerate(text_blocks):
             if categories[i] is not None:
                 continue
+
+            # TOC-based heading recognition (highest priority)
+            if toc_entries:
+                txt_normalized = txt.replace("\n", " ").strip()
+                if txt_normalized in toc_titles:
+                    categories[i] = "heading"
+                    continue
+                # Prefix match: e.g. "7.10.2" -> "7.10.2 ADC Power-Up..."
+                if re.match(r"^\d+(?:\.\d+)*$", txt_normalized):
+                    for _level, toc_title in toc_entries:
+                        if toc_title.startswith(txt_normalized + " "):
+                            categories[i] = "heading"
+                            break
+                    if categories[i] == "heading":
+                        continue
+
+            # Heuristic fallback
             if (
                 avg_size >= heading_threshold
                 and rect.width > page_rect.width * self.HEADING_WIDTH_RATIO
@@ -717,6 +744,7 @@ class GapsFirstScanner:
         header_margin: float,
         footer_margin: float,
         img_dir: str | Path,
+        toc_entries: list[tuple[int, str]] | None = None,
     ) -> GapsPageResult:
         """Process a single page. Returns GapsPageResult with images and tables."""
         page_idx = (page.number + 1) if page.number is not None else 0
@@ -739,7 +767,7 @@ class GapsFirstScanner:
             avg_size = sum(sizes) / len(sizes) if sizes else 12.0
             text_blocks.append((txt, fitz.Rect(block["bbox"]), avg_size))
         text_blocks.sort(key=lambda x: x[1].y0)
-        classified = self._classify_text_blocks(text_blocks, page_rect)
+        classified = self._classify_text_blocks(text_blocks, page_rect, toc_entries)
 
         # 2. Collect captions
         figure_captions = [
@@ -779,6 +807,53 @@ class GapsFirstScanner:
                 if zone.y0 <= cy < zone.y1:
                     zone.drawings.append(dr)
                     break
+
+        # 4a1. Merge zones when a drawing straddles a separator between them
+        # (diagram labels/headings can split a diagram into separate zones)
+        merge_with_next = [False] * (len(zones) - 1)
+        for i in range(len(zones) - 1):
+            zone_a = zones[i]
+            zone_b = zones[i + 1]
+            for dr in drawing_rects:
+                if _is_header_footer_rect(dr, is_drawing=True):
+                    continue
+                cy = (dr.y0 + dr.y1) / 2
+                if zone_a.y1 <= cy < zone_b.y0:
+                    overlap_a = min(dr.y1, zone_a.y1) - max(dr.y0, zone_a.y0)
+                    overlap_b = min(dr.y1, zone_b.y1) - max(dr.y0, zone_b.y0)
+                    if overlap_a > 1 and overlap_b > 1:
+                        merge_with_next[i] = True
+                        break
+
+        if any(merge_with_next):
+            merged_zones: list[_Zone] = []
+            i = 0
+            while i < len(zones):
+                y0 = zones[i].y0
+                y1 = zones[i].y1
+                while i < len(zones) - 1 and merge_with_next[i]:
+                    y1 = zones[i + 1].y1
+                    i += 1
+                merged_zones.append(_Zone(y0, y1, []))
+                i += 1
+            # Reassign all drawings to merged zones
+            for dr in drawing_rects:
+                if _is_header_footer_rect(dr, is_drawing=True):
+                    continue
+                cy = (dr.y0 + dr.y1) / 2
+                for z in merged_zones:
+                    if z.y0 <= cy < z.y1:
+                        z.drawings.append(dr)
+                        break
+            # Reassign h_zero_height counts to merged zones
+            for r in raw_drawings:
+                if r.height == 0.0 and r.width > r.height * 3:
+                    cy = (r.y0 + r.y1) / 2
+                    for z in merged_zones:
+                        if z.y0 <= cy < z.y1:
+                            z.h_zero_height += 1
+                            break
+            zones = merged_zones
 
         # 4b. Count text blocks per zone (for horizontal-only table detection)
         for _txt, rect, _avg_size, cat in classified:
@@ -842,6 +917,7 @@ class GapsFirstScanner:
 
                 # Score each candidate zone to determine direction
                 best_score = 0.0
+                best_raw_score = 0.0
                 best_zone: _Zone | None = None
                 for direction, zone in candidates:
                     clusters = self._cluster_drawings(zone.drawings)
@@ -873,17 +949,49 @@ class GapsFirstScanner:
                     if effective_score > best_score + 0.5 or best_zone is None:
                         best_score = effective_score
                         best_zone = zone
+                        best_raw_score = score
                     elif (
                         best_zone is not None
                         and abs(effective_score - best_score) < 0.5
-                        and len(zone.drawings) > len(best_zone.drawings)
+                        and score > best_raw_score
                     ):
-                        # Tie-breaker: prefer zone with more drawings
+                        # Tie-breaker: prefer zone with higher drawing density
                         best_zone = zone
                         best_score = effective_score
+                        best_raw_score = score
 
-                if best_zone is None or best_score < self.FIGURE_MIN_SCORE:
+                if best_zone is None:
                     continue
+                if best_score < self.FIGURE_MIN_SCORE:
+                    # Relax threshold for high-density small diagrams
+                    clusters = self._cluster_drawings(best_zone.drawings)
+                    if not clusters:
+                        continue
+                    all_rects = [r for cluster in clusters for r in cluster]
+                    clip = self._build_clip(
+                        all_rects, best_zone.y0, best_zone.y1, classified, page_rect
+                    )
+                    if clip.get_area() > 0:
+                        merged = []
+                        for r in sorted(all_rects, key=lambda x: x.y0):
+                            if merged and r.y0 <= merged[-1].y1 and r.x0 <= merged[-1].x1:
+                                merged[-1] = fitz.Rect(
+                                    min(merged[-1].x0, r.x0), min(merged[-1].y0, r.y0),
+                                    max(merged[-1].x1, r.x1), max(merged[-1].y1, r.y1),
+                                )
+                            else:
+                                merged.append(fitz.Rect(r))
+                        drawing_area = sum(r.get_area() for r in merged)
+                        drawing_ratio = drawing_area / clip.get_area()
+                        is_table_like = any(
+                            self._is_table_like_cluster(c) for c in clusters
+                        )
+                        if drawing_ratio > 0.5 and not is_table_like:
+                            best_score = self.FIGURE_MIN_SCORE
+                        else:
+                            continue
+                    else:
+                        continue
 
                 clusters = self._cluster_drawings(best_zone.drawings)
                 if not clusters:
@@ -899,28 +1007,17 @@ class GapsFirstScanner:
                         clusters, key=lambda c: min(r.y0 for r in c)
                     )
 
-                # NEW: If closest cluster is tiny, prefer the largest cluster
-                # as anchor to avoid extracting isolated edge elements (e.g.
-                # a single vertical line on the far right) while missing the
-                # main diagram body.
-                closest = sorted_clusters[0]
-                # Use rect count (not area) to identify the main diagram body.
-                # Area can be misleading when a cluster contains many large solid
-                # shapes (e.g. Crossbar with big filled rectangles) while the
-                # actual main diagram (e.g. Mesh with many small lines/nodes)
-                # has more rects but less total area.
+                # Always prefer the largest cluster as anchor to avoid tiny
+                # edge elements (e.g. a single arrow line) swallowing the main
+                # diagram body.
                 largest = max(clusters, key=lambda c: len(c))
-                if (
-                    len(closest) <= 2
-                    and len(largest) > len(closest) * 3
-                ):
-                    sorted_clusters = [largest] + [
-                        c for c in sorted_clusters if c is not largest
-                    ]
+                sorted_clusters = [largest] + [
+                    c for c in sorted_clusters if c is not largest
+                ]
 
                 # Merge clusters whose bounding boxes are close in both axes.
-                # This fixes cases where diagram callouts or parallel tables
-                # are split into separate clusters due to small horizontal gaps.
+                # Thresholds increased to handle side-by-side diagrams (page 276/390)
+                # and caption-to-body gaps (page 789).
                 target_cluster: list[fitz.Rect] = list(sorted_clusters[0])
                 merged = fitz.Rect(
                     min(r.x0 for r in sorted_clusters[0]),
@@ -937,7 +1034,7 @@ class GapsFirstScanner:
                     )
                     gap_x = max(merged.x0 - next_bounds.x1, next_bounds.x0 - merged.x1, 0)
                     gap_y = max(merged.y0 - next_bounds.y1, next_bounds.y0 - merged.y1, 0)
-                    if gap_x <= 30 and gap_y <= 30:
+                    if gap_x <= 120 and gap_y <= 50:
                         target_cluster.extend(next_cl)
                         merged |= next_bounds
                     else:

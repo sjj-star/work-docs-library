@@ -768,7 +768,7 @@ graph_query(entity_type="Product", name="TMS320F28379D")
 | header/footer | 配置边距 | 固定区域，不可被其他 separator 覆盖 |
 | figure_caption | 正则匹配 `^Figure\s+[A-Z]?\d+...` | 相邻 separator 重叠时，高优先级覆盖低优先级 |
 | table_caption | 正则匹配 `^(Table|表)\s*[A-Z]?\d+...` | 同上 |
-| heading | 字号 > 阈值 或 粗体 | 同上 |
+| heading | **TOC 优先匹配**，其次字号 > 阈值 或 粗体 | 同上 |
 | body_text | 高>20pt 且 宽>60%页面宽度 | 低优先级，可被 caption/heading 覆盖 |
 
 相邻硬分割之间的空隙就是一个 `_Zone`，包含：
@@ -790,6 +790,12 @@ graph_query(entity_type="Product", name="TMS320F28379D")
 - 过宽：会误将短段落识别为硬分割，增加 zone 数量
 - 过窄：遗漏真正的正文块，zone 过大导致搜索范围增加
 - 当前阈值基于 TI/AMBA/SPRUI07 的实证调优
+
+### 18.2a Zone 合并：跨分隔符的 Drawing
+
+**问题**：图表内部的标注文本（如 "SYSCLK"、"Master Clock"）可能被误判为 heading，产生硬分隔符，将同一幅图切分为上下两个 zone。Drawing 的中心点落入 zone 之间的 gap，导致提取丢失。
+
+**修复**：构建 zone 后，检测是否有 drawing 的 rect 同时跨越相邻两个 zone（中心点在 gap 中，且与两侧 zone 均有 >1pt 重叠）。若存在，合并这两个 zone 并重新分配所有 drawing。
 
 ### 18.3 Figure Caption 驱动提取
 
