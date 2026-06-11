@@ -331,6 +331,17 @@ class Config:
                 "WORKDOCS_PARSER_IMAGE_MERGE_Y_THRESHOLD", "parser.image_merge_y_threshold", "20.0"
             )
         )
+        # GapsFirstScanner 参数（Caption-driven 提取器）
+        cls.PARSER_FIGURE_MIN_SCORE = float(
+            _resolve_config(
+                "WORKDOCS_PARSER_FIGURE_MIN_SCORE", "parser.figure_min_score", "2.0"
+            )
+        )
+        cls.PARSER_EDGE_LABEL_MAX_LEN = int(
+            _resolve_config(
+                "WORKDOCS_PARSER_EDGE_LABEL_MAX_LEN", "parser.edge_label_max_len", "30"
+            )
+        )
         # Plugin 默认值
         cls.PLUGIN_SEARCH_TOP_K = int(
             _resolve_config("WORKDOCS_PLUGIN_SEARCH_TOP_K", "plugin.search_top_k", "5")

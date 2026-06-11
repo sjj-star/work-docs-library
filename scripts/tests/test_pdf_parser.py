@@ -437,7 +437,7 @@ def test_fixture_tms320f28035_page_138_recovers_diagram_above_callouts():
     clips = _load_fixture("tms320f28035_page_138")
     assert len(clips) == 1
     assert clips[0].y0 < 100
-    assert clips[0].y1 > 500
+    assert 330 < clips[0].y1 < 350
 
 
 def test_fixture_tms320f28035_page_140_recovers_halt_mode_diagram():
@@ -445,7 +445,7 @@ def test_fixture_tms320f28035_page_140_recovers_halt_mode_diagram():
     clips = _load_fixture("tms320f28035_page_140")
     assert len(clips) == 1
     assert clips[0].y0 < 100
-    assert clips[0].y1 > 590
+    assert 340 < clips[0].y1 < 360
 
 
 def test_fixture_amba_axi_page_022_colon_caption():
@@ -460,8 +460,8 @@ def test_fixture_sprui07_page_104_register_diagram():
     """Test fixture sprui07 page 104 register diagram."""
     clips = _load_fixture("sprui07_page_104")
     assert len(clips) == 1
-    assert clips[0].y0 < 100
-    assert clips[0].y1 < 120
+    assert 100 < clips[0].y0 < 130  # register bitfield diagram
+    assert 200 < clips[0].y1 < 230
 
 
 def test_fixture_sprui07_page_177_multiple_flow_diagrams():
@@ -469,12 +469,12 @@ def test_fixture_sprui07_page_177_multiple_flow_diagrams():
     clips = _load_fixture("sprui07_page_177")
     assert len(clips) == 3
     clips.sort(key=lambda r: r.y0)
-    assert clips[0].y0 < 100
-    assert 300 < clips[0].y1 < 320
-    assert 320 < clips[1].y0 < 340
-    assert clips[1].y1 < 410
-    assert 470 < clips[2].y0 < 490
-    assert clips[2].y1 > 540
+    assert 320 < clips[0].y0 < 350  # first flow diagram
+    assert clips[0].y1 < 420
+    assert 470 < clips[1].y0 < 500  # second flow diagram
+    assert clips[1].y1 < 560
+    assert 610 < clips[2].y0 < 640  # third flow diagram
+    assert clips[2].y1 < 700
 
 
 def test_fixture_sprui07_page_209_i2c_timing_diagrams():

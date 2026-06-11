@@ -51,7 +51,9 @@
     "tab_merge_threshold_pt": "",
     "image_size_limit": "",
     "max_images_per_page": "",
-    "image_merge_y_threshold": ""
+    "image_merge_y_threshold": "",
+    "figure_min_score": "",
+    "edge_label_max_len": ""
   },
   "batch": {
     "poll_interval": "",

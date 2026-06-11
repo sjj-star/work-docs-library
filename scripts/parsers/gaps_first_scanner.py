@@ -60,6 +60,7 @@ class GapsFirstScanner:
     CLIP_PADDING_HORIZONTAL = 15.0
     CLIP_PADDING_BOTTOM = 15.0
     EDGE_LABEL_MARGIN = 12.0
+    EDGE_LABEL_MARGIN_CALLOUT = 25.0
     BODY_TEXT_MAX_HEIGHT_RATIO = 0.35
     BODY_TEXT_MAX_WIDTH_RATIO = 0.85
     BODY_TEXT_MAX_HEIGHT = 80.0
@@ -74,6 +75,8 @@ class GapsFirstScanner:
     PAGE_RENDER_DPI = Config.PARSER_PAGE_RENDER_DPI
     MIN_IMAGE_WIDTH = Config.PARSER_MIN_IMAGE_WIDTH
     MIN_IMAGE_HEIGHT = Config.PARSER_MIN_IMAGE_HEIGHT
+    FIGURE_MIN_SCORE = Config.PARSER_FIGURE_MIN_SCORE
+    EDGE_LABEL_MAX_LEN = Config.PARSER_EDGE_LABEL_MAX_LEN
     CLUSTER_PROXIMITY = 10.0
     FULL_PAGE_SKIP_WIDTH_RATIO = 0.92
     FULL_PAGE_SKIP_HEIGHT_RATIO = 0.82
@@ -96,6 +99,28 @@ class GapsFirstScanner:
             and rect.height > cls.BODY_TEXT_MIN_RECT_HEIGHT
             and len(txt) > cls.BODY_TEXT_MIN_LENGTH
         )
+
+    @classmethod
+    def _is_strict_figure_caption(cls, text: str) -> bool:
+        """Exclude body-text reference sentences (e.g. 'Figure B2.2 shows...')."""
+        if not re.match(cls.FIGURE_CAPTION_RE, text):
+            return False
+        ref_pattern = (
+            r"^Figure\s*[A-Z]?\d+(?:[-\.]\d+)?\s+"
+            r"(?:shows|describes|lists|illustrates|presents|gives|provides|details|summarizes)\b"
+        )
+        return not re.match(ref_pattern, text, re.IGNORECASE)
+
+    @classmethod
+    def _is_strict_table_caption(cls, text: str) -> bool:
+        """Exclude body-text reference sentences (e.g. 'Table B1.3 shows...')."""
+        if not re.match(cls.TABLE_CAPTION_RE, text):
+            return False
+        ref_pattern = (
+            r"^(Table|表)\s*[A-Z]?\d+(?:[-\.]\d+)?\s+"
+            r"(?:shows|describes|lists|illustrates|presents|gives|provides|details|summarizes)\b"
+        )
+        return not re.match(ref_pattern, text, re.IGNORECASE)
 
     @classmethod
     def _fix_drawing_rect(cls, rect: fitz.Rect) -> fitz.Rect:
@@ -131,13 +156,13 @@ class GapsFirstScanner:
         n = len(text_blocks)
         categories: list[str | None] = [None] * n
 
-        # First pass: captions
+        # First pass: captions (strict — exclude body-text reference sentences)
         caption_indices: list[int] = []
         for i, (txt, rect, _) in enumerate(text_blocks):
-            if re.match(self.FIGURE_CAPTION_RE, txt):
+            if self._is_strict_figure_caption(txt):
                 categories[i] = "figure_caption"
                 caption_indices.append(i)
-            elif re.match(self.TABLE_CAPTION_RE, txt):
+            elif self._is_strict_table_caption(txt):
                 categories[i] = "table_caption"
                 caption_indices.append(i)
 
@@ -329,13 +354,33 @@ class GapsFirstScanner:
         max_y = min(max(r.y1 for r in cluster_rects), zone_y1)
         min_x = min(r.x0 for r in cluster_rects)
         max_x = max(r.x1 for r in cluster_rects)
-        # Edge-label expansion
+        # Edge-label expansion: expand clip to capture diagram labels
+        # (e.g. legend on the side or short labels at edges).
+        # Skip bullet lists — they are body text, not diagram labels.
         for txt, r, _avg_size, cat in classified:
-            if cat in ("body_text", "figure_caption", "table_caption", "heading"):
+            if cat in ("figure_caption", "table_caption", "heading"):
+                continue
+            # Allow short body_text near edges (diagram labels like "Example 1")
+            if cat == "body_text":
+                if len(txt) > self.EDGE_LABEL_MAX_LEN:
+                    continue
+                # Must be within horizontal range of the cluster
+                if r.x1 < min_x - 50 or r.x0 > max_x + 50:
+                    continue
+            if "•" in txt:
                 continue
             dx = max(min_x - r.x1, 0, r.x0 - max_x)
             dy = max(min_y - r.y1, 0, r.y0 - max_y)
-            if max(dx, dy) <= self.EDGE_LABEL_MARGIN:
+            if cat == "callout":
+                # Long callouts are likely body text, not diagram labels
+                margin = (
+                    self.EDGE_LABEL_MARGIN_CALLOUT
+                    if len(txt) <= self.EDGE_LABEL_MAX_LEN
+                    else self.EDGE_LABEL_MARGIN
+                )
+            else:
+                margin = self.EDGE_LABEL_MARGIN
+            if max(dx, dy) <= margin:
                 min_x = min(min_x, r.x0)
                 max_x = max(max_x, r.x1)
                 min_y = min(min_y, r.y0)
@@ -347,6 +392,192 @@ class GapsFirstScanner:
             min(max_x + self.CLIP_PADDING_HORIZONTAL, page_rect.x1),
             min(max_y + self.CLIP_PADDING_BOTTOM, zone_y1, page_rect.y1),
         )
+
+    # ------------------------------------------------------------------
+    # Claimed region management (top-down sequential processing)
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _is_in_claimed(rect: fitz.Rect, claimed: list[tuple[float, float]]) -> bool:
+        """Check if rect is almost fully contained in any claimed region."""
+        if not claimed:
+            return False
+        rect_h = rect.y1 - rect.y0
+        for c_y0, c_y1 in claimed:
+            overlap = max(0, min(rect.y1, c_y1) - max(rect.y0, c_y0))
+            if overlap > rect_h * 0.95:
+                return True
+        return False
+
+    @staticmethod
+    def _zone_is_claimed(zone: _Zone, claimed: list[tuple[float, float]]) -> bool:
+        """Check if zone overlaps claimed regions by >50% of its height."""
+        if not claimed:
+            return False
+        zone_h = zone.y1 - zone.y0
+        for c_y0, c_y1 in claimed:
+            overlap = max(0, min(zone.y1, c_y1) - max(zone.y0, c_y0))
+            if overlap > zone_h * 0.5:
+                return True
+        return False
+
+    @staticmethod
+    def _add_claimed(y0: float, y1: float, claimed: list[tuple[float, float]]) -> None:
+        """Add a claimed y-range and merge overlapping/adjacent regions."""
+        claimed.append((y0, y1))
+        claimed.sort(key=lambda x: x[0])
+        merged: list[tuple[float, float]] = []
+        for c0, c1 in claimed:
+            if not merged:
+                merged.append((c0, c1))
+            else:
+                last0, last1 = merged[-1]
+                if c0 <= last1 + 5.0:  # merge if adjacent within 5pt
+                    merged[-1] = (last0, max(last1, c1))
+                else:
+                    merged.append((c0, c1))
+        claimed[:] = merged
+
+    @staticmethod
+    def _exclude_claimed(
+        y0: float, y1: float, claimed: list[tuple[float, float]]
+    ) -> list[tuple[float, float]]:
+        """Return sub-ranges of [y0, y1] that are not in claimed."""
+        ranges: list[tuple[float, float]] = [(y0, y1)]
+        for c0, c1 in claimed:
+            new_ranges: list[tuple[float, float]] = []
+            for r0, r1 in ranges:
+                if r1 <= c0 or r0 >= c1:
+                    new_ranges.append((r0, r1))
+                else:
+                    if r0 < c0:
+                        new_ranges.append((r0, c0))
+                    if r1 > c1:
+                        new_ranges.append((c1, r1))
+            ranges = new_ranges
+            if not ranges:
+                break
+        return ranges
+
+    # ------------------------------------------------------------------
+    # Bidirectional figure search with drawing-density scoring
+    # ------------------------------------------------------------------
+
+    def _score_cluster(
+        self,
+        cluster_rects: list[fitz.Rect],
+        clip: fitz.Rect,
+        page: fitz.Page,
+        classified: list[tuple[str, fitz.Rect, float, str]] | None = None,
+    ) -> float:
+        """Score a drawing cluster as a figure region.
+
+        Higher score = more likely to be a real figure/diagram.
+        Based on: drawing area ratio, body_text sparsity, image presence.
+        Only 'body_text' counts against the score; callouts/diagram labels are ignored.
+        """
+        if not cluster_rects or clip.height < 10:
+            return 0.0
+
+        clip_area = max(clip.get_area(), 1.0)
+
+        # 1. Drawing density: area covered by drawing rects vs clip area
+        drawing_area = 0.0
+        merged = []
+        for r in sorted(cluster_rects, key=lambda x: x.y0):
+            if merged and r.y0 <= merged[-1].y1 and r.x0 <= merged[-1].x1:
+                merged[-1] = fitz.Rect(
+                    min(merged[-1].x0, r.x0),
+                    min(merged[-1].y0, r.y0),
+                    max(merged[-1].x1, r.x1),
+                    max(merged[-1].y1, r.y1),
+                )
+            else:
+                merged.append(fitz.Rect(r))
+        for r in merged:
+            drawing_area += r.get_area()
+        drawing_ratio = min(drawing_area / clip_area, 1.0)
+
+        # 2. Text sparsity: count only body_text (not callouts/diagram labels)
+        if classified is not None:
+            text_area = sum(
+                (r.x1 - r.x0) * (r.y1 - r.y0)
+                for _txt, r, _avg_size, cat in classified
+                if cat == "body_text" and r.intersects(clip)
+            )
+        else:
+            raw_blocks = page.get_text("blocks", clip=clip)
+            text_blocks = cast(
+                list[tuple[float, float, float, float, str, int, int]], raw_blocks
+            )
+            text_area = sum(
+                (b[2] - b[0]) * (b[3] - b[1]) for b in text_blocks
+            )
+        text_ratio = min(text_area / clip_area, 1.0)
+
+        # 3. Image presence bonus
+        img_bonus = 0.0
+        try:
+            for img in page.get_images(full=True):
+                xref = img[0]
+                pix = fitz.Pixmap(page.parent, xref)
+                if pix.n > 4:
+                    pix = fitz.Pixmap(fitz.csRGB, pix)
+                ibbox = fitz.Rect(pix.irect)
+                if clip.intersects(ibbox):
+                    img_bonus += 2.0
+                pix = None
+        except Exception:
+            pass
+
+        # 4. Penalty: too much body_text (likely body text region)
+        text_penalty = 0.0
+        if text_ratio > 0.7:
+            text_penalty = 3.0
+        elif text_ratio > 0.4:
+            text_penalty = 1.0
+
+        # 5. Height factor: very short clips are likely decorative lines
+        height_factor = 1.0
+        if clip.height < 30:
+            height_factor = 0.2
+        elif clip.height < 60:
+            height_factor = 0.6
+        elif clip.height > 150:
+            height_factor = 1.2
+
+        # 6. Table-like penalty: mostly horizontal lines = not a real figure
+        table_penalty = 0.0
+        if self._is_table_like_cluster(cluster_rects):
+            table_penalty = 5.0
+
+        # 7. Simple shape penalty: just a large rectangle (likely empty border)
+        shape_penalty = 0.0
+        if len(cluster_rects) <= 2:
+            for r in cluster_rects:
+                if r.width > r.height * 5 and r.height > 5:
+                    shape_penalty = 3.0
+                    break
+
+        base_score = drawing_ratio * 8.0 + (1.0 - text_ratio) * 4.0
+        score = (
+            base_score + img_bonus - text_penalty - table_penalty - shape_penalty
+        ) * height_factor
+        return max(score, 0.0)
+
+    def _is_table_like_cluster(self, cluster_rects: list[fitz.Rect]) -> bool:
+        """Check if a cluster is mostly horizontal table lines.
+
+        Returns True if the cluster appears to be table lines rather than
+        a real figure/diagram.
+        """
+        if not cluster_rects:
+            return False
+        h_lines = 0
+        for r in cluster_rects:
+            if r.height < 2.0 and r.width > r.height * 10:
+                h_lines += 1
+        return len(cluster_rects) > 2 and h_lines / len(cluster_rects) > 0.8
 
     def _render_image(self, page: fitz.Page, clip_rect: fitz.Rect, img_path: Path) -> bool:
         """Render a page region to a PNG image (lossless, high fidelity)."""
@@ -368,12 +599,13 @@ class GapsFirstScanner:
         self, page: fitz.Page, zone: _Zone, page_rect: fitz.Rect,
         precomputed_tables: list[Any] | object = _UNSCANNED,
         strategy: str = "lines_strict",
-    ) -> list[str]:
+    ) -> list[tuple[str, fitz.Rect]]:
         """Find tables inside a zone.
 
+        Returns list of (markdown, bbox) tuples.
         Uses precomputed_tables if provided to avoid repeated PyMuPDF calls.
         """
-        tables_md: list[str] = []
+        tables_md: list[tuple[str, fitz.Rect]] = []
         if not self.TABLE_DETECTION_ENABLED:
             return tables_md
         try:
@@ -391,8 +623,12 @@ class GapsFirstScanner:
                 if not tab.cells:
                     continue
                 tab_bbox = fitz.Rect(tab.bbox)
-                # Skip tables not overlapping this zone
-                if not tab_bbox.intersects(clip_rect):
+                # Skip tables not mostly inside this zone
+                intersection = tab_bbox & clip_rect
+                if (
+                    not intersection
+                    or intersection.get_area() / tab_bbox.get_area() < 0.5
+                ):
                     continue
                 if tab.row_count < self.TABLE_MIN_ROWS or tab.col_count < self.TABLE_MIN_COLS:
                     continue
@@ -402,7 +638,7 @@ class GapsFirstScanner:
                     continue
                 md_table = tab.to_markdown(clean=False)
                 if md_table.strip():
-                    tables_md.append(md_table.strip())
+                    tables_md.append((md_table.strip(), tab_bbox))
         except Exception as e:
             pnum = page.number + 1 if page.number is not None else 0
             logger.warning(f"Table detection failed on page {pnum}: {e}")
@@ -554,114 +790,260 @@ class GapsFirstScanner:
                     zone.text_block_count += 1
                     break
 
-        # 5. Extract figures by figure_caption
+        # 5. Sequential top-down processing of all captions
+        footer_y = page_rect.y1 - (
+            footer_margin if footer_margin > 0 else self.FOOTER_MARGIN_PT
+        )
+
+        all_captions: list[tuple[float, str, str, fitz.Rect]] = []
+        for txt, rect in figure_captions:
+            all_captions.append((rect.y0, "figure", txt, rect))
+        for txt, rect in table_captions:
+            all_captions.append((rect.y0, "table", txt, rect))
+        all_captions.sort(key=lambda x: x[0])
+
+        claimed_y_ranges: list[tuple[float, float]] = []
         img_counter = 0
-        for caption_text, caption_rect in figure_captions:
-            # Find zone above and below caption
-            zone_above = None
-            zone_below = None
-            for zone in zones:
-                if zone.y1 <= caption_rect.y0 + self.CAPTION_OVERLAP_TOLERANCE:
-                    zone_above = zone
-                elif zone.y0 >= caption_rect.y1 - self.CAPTION_OVERLAP_TOLERANCE:
-                    if zone_below is None or zone.y0 < zone_below.y0:
-                        zone_below = zone
 
-            # Choose zone with drawings, prefer closer one
-            candidates = []
-            if zone_above and zone_above.drawings and not zone_above.consumed:
-                candidates.append((zone_above, caption_rect.y0 - zone_above.y1))
-            if zone_below and zone_below.drawings and not zone_below.consumed:
-                candidates.append((zone_below, zone_below.y0 - caption_rect.y1))
-
-            if not candidates:
+        for _, cap_type, caption_text, caption_rect in all_captions:
+            if self._is_in_claimed(caption_rect, claimed_y_ranges):
                 continue
 
-            target_zone, _dist = min(candidates, key=lambda x: x[1])
-            clusters = self._cluster_drawings(target_zone.drawings)
-            all_rects = [r for cluster in clusters for r in cluster]
-            if not all_rects:
-                continue
+            if cap_type == "figure":
+                # Find zone above and below caption (zone-based, compatible with old logic)
+                zone_above = None
+                zone_below = None
+                for zone in zones:
+                    if zone.y1 <= caption_rect.y0 + self.CAPTION_OVERLAP_TOLERANCE:
+                        zone_above = zone
+                    elif zone.y0 >= caption_rect.y1 - self.CAPTION_OVERLAP_TOLERANCE:
+                        if zone_below is None or zone.y0 < zone_below.y0:
+                            zone_below = zone
 
-            img_counter += 1
-            clip = self._build_clip(
-                all_rects, target_zone.y0, target_zone.y1, classified, page_rect
-            )
-            if (
-                clip.width > page_rect.width * self.FULL_PAGE_SKIP_WIDTH_RATIO
-                and clip.height > page_rect.height * self.FULL_PAGE_SKIP_HEIGHT_RATIO
-            ):
-                continue
-            img_path = img_dir / f"page_{page_idx}_diagram_{img_counter:02d}.png"
-            if self._render_image(page, clip, img_path):
-                result.images.append(
-                    {
-                        "path": str(img_path),
-                        "page_idx": page_idx,
-                        "caption": caption_text,
-                        "bbox": [clip.x0, clip.y0, clip.x1, clip.y1],
-                    }
+                # Build candidates, excluding consumed and claimed zones
+                candidates: list[tuple[str, _Zone]] = []
+                if (
+                    zone_above
+                    and zone_above.drawings
+                    and not zone_above.consumed
+                    and not self._zone_is_claimed(zone_above, claimed_y_ranges)
+                ):
+                    candidates.append(("up", zone_above))
+                if (
+                    zone_below
+                    and zone_below.drawings
+                    and not zone_below.consumed
+                    and not self._zone_is_claimed(zone_below, claimed_y_ranges)
+                ):
+                    candidates.append(("down", zone_below))
+
+                if not candidates:
+                    continue
+
+                # Score each candidate zone to determine direction
+                best_score = 0.0
+                best_zone: _Zone | None = None
+                for direction, zone in candidates:
+                    clusters = self._cluster_drawings(zone.drawings)
+                    all_rects = [r for cluster in clusters for r in cluster]
+                    clip = self._build_clip(
+                        all_rects, zone.y0, zone.y1, classified, page_rect
+                    )
+                    score = self._score_cluster(all_rects, clip, page, classified)
+                    # Prefer closer zone when scores are close (< 0.5 apart)
+                    dist = (
+                        caption_rect.y0 - zone.y1
+                        if direction == "up"
+                        else zone.y0 - caption_rect.y1
+                    )
+                    effective_score = score - dist * 0.02
+                    # Penalize zone that contains another figure caption
+                    for _other_txt, other_rect in figure_captions:
+                        if other_rect == caption_rect:
+                            continue
+                        # Check if caption is inside or touching the clip vertically
+                        if (
+                            clip.y0 <= other_rect.y0 < clip.y1 + 5
+                            and other_rect.x1 > clip.x0
+                            and other_rect.x0 < clip.x1
+                        ):
+                            effective_score -= 5.0
+                            break
+                    # Only switch if significantly better (>0.5 margin)
+                    if effective_score > best_score + 0.5 or best_zone is None:
+                        best_score = effective_score
+                        best_zone = zone
+                    elif (
+                        best_zone is not None
+                        and abs(effective_score - best_score) < 0.5
+                        and len(zone.drawings) > len(best_zone.drawings)
+                    ):
+                        # Tie-breaker: prefer zone with more drawings
+                        best_zone = zone
+                        best_score = effective_score
+
+                if best_zone is None or best_score < self.FIGURE_MIN_SCORE:
+                    continue
+
+                clusters = self._cluster_drawings(best_zone.drawings)
+                if not clusters:
+                    continue
+
+                # Sort clusters by distance to caption
+                if best_zone.y1 <= caption_rect.y0 + self.CAPTION_OVERLAP_TOLERANCE:
+                    sorted_clusters = sorted(
+                        clusters, key=lambda c: max(r.y1 for r in c), reverse=True
+                    )
+                else:
+                    sorted_clusters = sorted(
+                        clusters, key=lambda c: min(r.y0 for r in c)
+                    )
+
+                # Start with closest cluster, merge adjacent clusters if gap < 80pt
+                target_cluster: list[fitz.Rect] = list(sorted_clusters[0])
+                prev_y0 = min(r.y0 for r in sorted_clusters[0])
+                prev_y1 = max(r.y1 for r in sorted_clusters[0])
+                for next_cl in sorted_clusters[1:]:
+                    next_y0 = min(r.y0 for r in next_cl)
+                    next_y1 = max(r.y1 for r in next_cl)
+                    gap = min(abs(next_y0 - prev_y1), abs(next_y1 - prev_y0))
+                    if gap < 30:
+                        target_cluster.extend(next_cl)
+                        prev_y0 = min(prev_y0, next_y0)
+                        prev_y1 = max(prev_y1, next_y1)
+                    else:
+                        break
+
+                all_rects = target_cluster
+                if not all_rects:
+                    continue
+
+                clip = self._build_clip(
+                    all_rects, best_zone.y0, best_zone.y1, classified, page_rect
                 )
-                target_zone.consumed = True
+                if (
+                    clip.width > page_rect.width * self.FULL_PAGE_SKIP_WIDTH_RATIO
+                    and clip.height > page_rect.height * self.FULL_PAGE_SKIP_HEIGHT_RATIO
+                ):
+                    continue
 
-        # 6. Determine if this page needs table detection and which strategy
-        needs_table_detection = bool(table_captions)
+                img_counter += 1
+                img_path = img_dir / f"page_{page_idx}_diagram_{img_counter:02d}.png"
+                if self._render_image(page, clip, img_path):
+                    result.images.append(
+                        {
+                            "path": str(img_path),
+                            "page_idx": page_idx,
+                            "caption": caption_text,
+                            "bbox": [clip.x0, clip.y0, clip.x1, clip.y1],
+                        }
+                    )
+                    self._add_claimed(clip.y0, clip.y1, claimed_y_ranges)
+                    best_zone.consumed = True
+
+            else:  # table
+                table_y0 = caption_rect.y1
+                table_y1 = min(footer_y, caption_rect.y1 + 300)
+                search_ranges = self._exclude_claimed(
+                    table_y0, table_y1, claimed_y_ranges
+                )
+
+                # Determine table strategy for this page (if not already)
+                table_strategy = "lines_strict"
+                for zone in zones:
+                    if zone.consumed or not zone.drawings:
+                        continue
+                    style = self._classify_table_style(zone)
+                    if style == "horizontal":
+                        table_strategy = "lines"
+                        break
+
+                # Pre-compute tables once if needed
+                all_page_tables: list[Any] = []
+                if self.TABLE_DETECTION_ENABLED and search_ranges:
+                    try:
+                        tabs = page.find_tables(strategy=table_strategy)
+                        if tabs is not None:
+                            all_page_tables = tabs.tables
+                    except Exception:
+                        pass
+
+                found_any = False
+                for s_y0, s_y1 in search_ranges:
+                    zone = _Zone(y0=s_y0, y1=s_y1)
+                    tables_md = self._find_tables_in_zone(
+                        page, zone, page_rect, all_page_tables, table_strategy
+                    )
+                    if tables_md:
+                        # Only keep the first table (closest to caption)
+                        md, tab_bbox = tables_md[0]
+                        result.tables.append(
+                            {
+                                "page_idx": page_idx,
+                                "markdown": md,
+                                "caption": caption_text,
+                                "bbox": [tab_bbox.x0, tab_bbox.y0, tab_bbox.x1, tab_bbox.y1],
+                            }
+                        )
+                        found_any = True
+                        self._add_claimed(tab_bbox.y0, tab_bbox.y1, claimed_y_ranges)
+                        break
+
+                # Mark caption itself as claimed if table found
+                if found_any:
+                    self._add_claimed(caption_rect.y0, caption_rect.y1, claimed_y_ranges)
+                    # Also mark overlapping zones as consumed to avoid orphan re-processing
+                    for z in zones:
+                        if z.consumed:
+                            continue
+                        # noinspection PyUnboundLocalVariable
+                        overlap = max(
+                            0, min(z.y1, tab_bbox.y1) - max(z.y0, tab_bbox.y0)
+                        )
+                        if overlap > (z.y1 - z.y0) * 0.5:
+                            z.consumed = True
+
+        # 6. Handle orphan zones: no caption, but has drawings.
+        #    These could be uncaptioned tables. If not tables, ignore.
+        #    Skip zones overlapping claimed regions.
         table_strategy = "lines_strict"
         for zone in zones:
             if zone.consumed or not zone.drawings:
                 continue
-            style = self._classify_table_style(zone)
-            if style:
-                needs_table_detection = True
-                if style == "horizontal":
-                    table_strategy = "lines"
-
-        # 7. Pre-compute all tables on the page once (expensive PyMuPDF call)
-        all_page_tables: list[Any] = []
-        if self.TABLE_DETECTION_ENABLED and needs_table_detection:
-            try:
-                tabs = page.find_tables(strategy=table_strategy)
-                if tabs is not None:
-                    all_page_tables = tabs.tables
-            except Exception:
-                pass
-
-        # 8. Extract tables by table_caption
-        for caption_text, caption_rect in table_captions:
-            # Table is below caption
-            target_zone = None
-            for zone in zones:
-                if (
-                    zone.y0 >= caption_rect.y1 - self.CAPTION_OVERLAP_TOLERANCE
-                    and zone.y0 < caption_rect.y1 + 200
-                    and not zone.consumed
-                ):
-                    target_zone = zone
-                    break
-
-            if target_zone is None:
-                continue
-
-            tables_md = self._find_tables_in_zone(
-                page, target_zone, page_rect, all_page_tables, table_strategy
+            # Skip if zone is mostly claimed
+            search_ranges = self._exclude_claimed(
+                zone.y0, zone.y1, claimed_y_ranges
             )
-            for md in tables_md:
-                result.tables.append({"page_idx": page_idx, "markdown": md})
-            if tables_md:
-                target_zone.consumed = True
-
-        # 9. Handle orphan zones: no caption, but has drawings.
-        #    These could be uncaptioned tables. If not tables, ignore.
-        for zone in zones:
-            if zone.consumed or not zone.drawings:
+            if not search_ranges:
                 continue
             if self._classify_table_style(zone):
+                all_page_tables = []
+                if self.TABLE_DETECTION_ENABLED:
+                    try:
+                        tabs = page.find_tables(strategy=table_strategy)
+                        if tabs is not None:
+                            all_page_tables = tabs.tables
+                    except Exception:
+                        pass
                 tables_md = self._find_tables_in_zone(
                     page, zone, page_rect, all_page_tables, table_strategy
                 )
-                for md in tables_md:
-                    result.tables.append({"page_idx": page_idx, "markdown": md})
-                if tables_md:
-                    zone.consumed = True
+                for md, tab_bbox in tables_md:
+                    # Skip if this table was already extracted by a caption
+                    if self._is_in_claimed(tab_bbox, claimed_y_ranges):
+                        continue
+                    result.tables.append(
+                        {
+                            "page_idx": page_idx,
+                            "markdown": md,
+                            "bbox": [tab_bbox.x0, tab_bbox.y0, tab_bbox.x1, tab_bbox.y1],
+                        }
+                    )
+                    self._add_claimed(tab_bbox.y0, tab_bbox.y1, claimed_y_ranges)
+                if tables_md and not all(
+                    self._is_in_claimed(tab_bbox, claimed_y_ranges)
+                    for _md, tab_bbox in tables_md
+                ):
+                    self._add_claimed(zone.y0, zone.y1, claimed_y_ranges)
 
         return result
