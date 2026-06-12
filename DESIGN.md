@@ -713,7 +713,7 @@ graph_query(entity_type="Product", name="TMS320F28379D")
 | **文件写入必须原子化** | `_save_global_graph` 直接覆写 | 临时文件 + `os.replace`；失败时从 `.bak` 恢复 |
 | **跨阶段产物必须校验一致性** | Stage3/Stage4 增量分析结果不一致 | 持久化 `_incremental.json` + hash 校验 |
 | **配置路径加载/保存必须一致** | `_save_global_graph` 硬编码 `"graphs"` | 统一使用 `Config.GRAPH_OUTPUT_DIR` |
-| **警惕外部库的导入级副作用** | `pymupdf4llm` 导入时激活 ONNX layout，静默改变 `find_tables()` 结果 | 导入后立即设置 `pymupdf._get_layout = None` |
+| **警惕外部库的导入级副作用** | `pymupdf4llm` 导入时激活 ONNX layout，静默改变 `find_tables()` 结果 | 移除 `pymupdf4llm` 依赖及未触发的 fallback 代码 |
 
 **新增开发原则**：详见 `AGENTS.md`「防御性编程与状态安全原则」，包含副作用隔离、索引一致性、失败回滚、输入验证、跨阶段校验、配置统一、资源生命周期管理 7 条原则。
 
@@ -1011,7 +1011,7 @@ if v_lines <= 1 and h_lines >= 6 and text >= 5: return "horizontal"
 | success text | 23.2 | N/A | 10.8 | 12.6 |
 | empty text | 7.0 | 14.6 | 11.5 | 7.5 |
 
-#### 18.8.6 `pymupdf4llm` layout 激活导致 `find_tables` 结果错乱
+#### 18.8.6 `pymupdf4llm` 导入副作用与依赖移除
 
 **实验日期**：2026-06-12
 
@@ -1068,36 +1068,34 @@ if v_lines <= 1 and h_lines >= 6 and text >= 5: return "horizontal"
 4. `page.get_layout()` 调用 `pymupdf._get_layout(self)`，触发 ONNX 模型推理。
 5. Layout 信息被写入 `page.layout_information`，并**改变 `find_tables()` 的表格 bbox 计算**，导致 register bitfield diagram 与真实表格被错误合并。
 
-**关键结论**：
-- 这不是 PyMuPDF 的"内部状态错误"，而是 `pymupdf4llm` 的**导入级副作用**。
-- 只要进程内导入过 `pymupdf4llm`（包括通过 `import parsers.pdf_parser` 间接导入），`find_tables()` 的行为就会改变。
-- `_extract_horizontal_decorations()` 本身并不直接导致问题，但它出现在 `PDFParser.parse()` 的执行路径中，而导入 `PDFParser` 已经激活了 Layout 引擎。
+**关键发现：fallback 是死代码**
 
-**规避/修复方案**：
+在排查过程中进一步发现：`PDFParser.parse()` 中虽然定义了 `problem_pages` 字典和 `_call_pymupdf4llm_for_pages()` 等 fallback 方法，但 `_should_trigger_p4l_fallback()` **从未被调用**，`problem_pages` 也**从未被填充**。因此整个 PyMuPDF4LLM fallback 路径（Milestone 3）是**死代码**，不会在实际解析中产生任何输出。
 
-在 `scripts/parsers/pdf_parser.py` 导入 `pymupdf4llm` 后立即禁用 layout 引擎：
+**最终修复方案**：
 
-```python
-import fitz  # pymupdf
-import pymupdf
-import pymupdf4llm
+既然 `pymupdf4llm` 的 layout 引擎会污染 `find_tables()`，且该依赖的 fallback 路径从未实际触发，**直接移除 `pymupdf4llm` 依赖**是最彻底的解决方案：
 
-# pymupdf4llm activates an ONNX layout analyzer at import time which
-# interferes with page.find_tables() by changing table detection results.
-# We disable it globally since our parser does not use the layout engine.
-pymupdf._get_layout = None
-```
-
-本项目本地 PDF 解析器不使用 `pymupdf4llm` 的 layout 能力；fallback 路径 `_fallback_with_pymupdf4llm()` 在调用 `pymupdf4llm.to_markdown()` 前已显式执行 `pymupdf4llm.use_layout(False)`，因此全局禁用无影响。
+- 从 `pyproject.toml` 删除 `"pymupdf4llm>=1.27.0,<2.0.0"`
+- 从 `scripts/parsers/pdf_parser.py` 删除：
+  - `import pymupdf4llm` 和 `import pymupdf`
+  - `_should_trigger_p4l_fallback()`
+  - `_call_pymupdf4llm_for_pages()`
+  - `_extract_tables_from_p4l_text()`
+  - `_fuse_p4l_tables_into_pages()`
+  - `_merge_image_lists()`
+  - `parse()` 中的 `problem_pages` 相关逻辑
+- 删除 `scripts/benchmark/run_pymupdf4llm.py`
+- 清理 benchmark 脚本中所有 `pymupdf4llm` 对比项
 
 **验证结果**：
-- 修复后 SPRUI07 page 80 正确提取 3 张图、3 张表。
-- 全部 382 个测试用例通过。
+- SPRUI07 page 80 正确提取 3 张图、3 张表。
+- 全量测试通过。
 
 **教训**：
 - 外部库的导入级副作用（import-time side effect）可能 silently 改变同一进程中其他依赖库的行为。
 - 当依赖库的行为与文档/直觉不符时，应优先检查**导入顺序和导入副作用**，而非假设底层库有状态错误。
-- 对 PyMuPDF 生态，`pymupdf4llm` 与原生 `fitz`/`pymupdf` 并非完全无耦合：layout 激活会通过 `pymupdf._get_layout` 全局影响 `find_tables()`。
+- 引入依赖前应确认其实际使用路径；长期不触发且存在副作用的 fallback 代码应当及时清理，避免成为"隐患代码"。
 
 ### 18.9 历史演进与性能数据
 

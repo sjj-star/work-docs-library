@@ -94,15 +94,6 @@ class AuditingPDFParser(PDFParser):
         })
         return result
 
-    def _should_trigger_p4l_fallback(self, text_blocks, table_elements):
-        result = super()._should_trigger_p4l_fallback(text_blocks, table_elements)
-        self._audit("p4l_fallback_check", {"triggered": result})
-        return result
-
-    def _call_pymupdf4llm_for_pages(self, doc, problem_pages, img_dir):
-        self._audit("p4l_fallback_execute", {"pages": problem_pages})
-        return super()._call_pymupdf4llm_for_pages(doc, problem_pages, img_dir)
-
     def get_audit_summary(self) -> dict:
         """汇总审计日志为每页统计。"""
         pages: dict[int, dict] = {}
@@ -119,8 +110,6 @@ class AuditingPDFParser(PDFParser):
                     "render_diagrams_count": 0,
                     "detect_tables_ms": 0,
                     "detect_tables_count": 0,
-                    "p4l_fallback_triggered": False,
-                    "p4l_fallback_executed": False,
                 }
             ev = entry["event"]
             d = entry["data"]
@@ -136,12 +125,6 @@ class AuditingPDFParser(PDFParser):
             elif ev == "detect_and_convert_tables":
                 pages[p]["detect_tables_ms"] = d["elapsed_ms"]
                 pages[p]["detect_tables_count"] = d["tables_found"]
-            elif ev == "p4l_fallback_check":
-                pages[p]["p4l_fallback_triggered"] = d["triggered"]
-            elif ev == "p4l_fallback_execute":
-                for pp in d.get("pages", []):
-                    if pp in pages:
-                        pages[pp]["p4l_fallback_executed"] = True
 
         return {
             "total_events": len(self._audit_log),
@@ -188,17 +171,15 @@ def _snapshot_representative_pages(pdf_path: Path, out_dir: Path, pages: list[di
     # 1. diagram 渲染最多的页面
     # 2. raster 图片最多的页面
     # 3. table 检测最多的页面
-    # 4. P4L fallback 触发的页面
-    # 5. 随机抽样（每100页抽1页）
+    # 4. 随机抽样（每100页抽1页）
     selected: set[int] = set()
 
     by_diagram = sorted(pages, key=lambda x: x["render_diagrams_count"], reverse=True)[:3]
     by_raster = sorted(pages, key=lambda x: x["extract_raster_images_count"], reverse=True)[:3]
     by_table = sorted(pages, key=lambda x: x["detect_tables_count"], reverse=True)[:3]
-    by_p4l = [p for p in pages if p["p4l_fallback_triggered"]][:3]
     by_random = [pages[i] for i in range(0, len(pages), max(1, len(pages) // 5))][:3]
 
-    for p in by_diagram + by_raster + by_table + by_p4l + by_random:
+    for p in by_diagram + by_raster + by_table + by_random:
         selected.add(p["page"])
 
     for pnum in sorted(selected):

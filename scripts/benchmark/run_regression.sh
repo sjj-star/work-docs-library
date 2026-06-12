@@ -25,7 +25,7 @@ PDFS[sprui07]="/mnt/c/Users/SJJ22/Downloads/Doc/TI/TMS320F2833x/sprui07.pdf"
 
 echo "========================================"
 echo "Benchmark 回归验证开始"
-echo "改进项: Layer1 表格 + Layer2 图片 + Layer3 P4L fallback"
+echo "改进项: Layer1 表格 + Layer2 图片"
 echo "========================================"
 
 # 1. 备份旧 baseline

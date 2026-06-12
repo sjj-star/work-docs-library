@@ -79,18 +79,6 @@ def diagnose_page(pdf_path: str, page_1idx: int, output_path: str | None = None)
         if r:
             raw_drawings.append(list(r))
 
-    # 5. p4l fallback trigger
-    text_blocks_for_parser = []
-    for block in text_dict.get("blocks", []):
-        if "lines" not in block:
-            continue
-        txt = "".join(s["text"] for line in block["lines"] for s in line["spans"]).strip()
-        text_blocks_for_parser.append({"text": txt, **block})
-
-    # Strip table text blocks (simplified)
-    te_detected = parser._detect_and_convert_tables(page, text_blocks_for_parser, diagram_regions)
-    p4l_trigger = PDFParser._should_trigger_p4l_fallback(text_blocks_for_parser, te_detected)
-
     result = {
         "pdf_path": str(pdf_path),
         "page_1idx": page_1idx,
@@ -99,12 +87,6 @@ def diagnose_page(pdf_path: str, page_1idx: int, output_path: str | None = None)
         "diagram_regions": [list(r) for r in diagram_regions],
         "diagram_captions": {str(k): v for k, v in diagram_captions.items()},
         "find_tables_raw": table_elements,
-        "detected_tables_after_filter": [
-            {"bbox": [te["bbox"].x0, te["bbox"].y0, te["bbox"].x1, te["bbox"].y1],
-             "text_preview": te["text"][:200]}
-            for te in te_detected
-        ],
-        "p4l_fallback_triggered": p4l_trigger,
         "raw_drawings_count": len(raw_drawings),
         "raw_drawings_sample": raw_drawings[:50],
     }

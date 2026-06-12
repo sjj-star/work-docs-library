@@ -10,19 +10,12 @@ from pathlib import Path
 from typing import Any, cast
 
 import fitz  # pymupdf
-import pymupdf
-import pymupdf4llm
 from core.config import Config
 from PIL import Image
 
 from parsers.gaps_first_scanner import GapsFirstScanner, GapsPageResult
 
 logger = logging.getLogger(__name__)
-
-# pymupdf4llm activates an ONNX layout analyzer at import time which
-# interferes with page.find_tables() by changing table detection results.
-# We disable it globally since our parser does not use the layout engine.
-pymupdf._get_layout = None
 
 
 class PDFParser:
@@ -344,7 +337,6 @@ class PDFParser:
         # 4. 逐页处理
         all_image_paths: list[Path] = []
         page_markdowns: list[str] = []
-        problem_pages: dict[int, dict[str, bool]] = {}  # 【Milestone 3】问题页面记录
         scanner = GapsFirstScanner()
 
         for page_num in range(total_pages):
@@ -388,14 +380,6 @@ class PDFParser:
                 text_blocks, raster_images, diagram_images, table_elements
             )
             page_markdowns.append(page_md)
-
-        # 4f. 【Milestone 3】PyMuPDF4LLM fallback：对问题页面补充检测
-        if problem_pages:
-            logger.info(f"PyMuPDF4LLM fallback 触发 | 问题页面: {list(problem_pages.keys())}")
-            p4l_results = self._call_pymupdf4llm_for_pages(doc, list(problem_pages.keys()), img_dir)
-            page_markdowns = self._fuse_p4l_tables_into_pages(
-                page_markdowns, p4l_results, problem_pages
-            )
 
         doc.close()
 
@@ -466,20 +450,6 @@ class PDFParser:
         return kept_blocks
 
     @staticmethod
-    def _should_trigger_p4l_fallback(
-        text_blocks: list[dict[str, Any]],
-        table_elements: list[dict[str, Any]],
-    ) -> bool:
-        """判断当前页面是否需要触发 PyMuPDF4LLM fallback。
-
-        触发条件：页面存在 table caption，但 Layer 1 自研检测未输出任何表格。
-        """
-        has_table_caption = any(
-            PDFParser._is_strict_table_caption(block.get("text", "")) for block in text_blocks
-        )
-        return has_table_caption and not table_elements
-
-    @staticmethod
     def _build_table_elements_from_gaps(gaps_result: GapsPageResult) -> list[dict[str, Any]]:
         """从 GapsPageResult 构建表格元素列表（兼容 _build_page_markdown 格式）."""
         table_elements: list[dict[str, Any]] = []
@@ -539,131 +509,6 @@ class PDFParser:
                 }
             )
         return table_elements
-
-
-
-    def _call_pymupdf4llm_for_pages(
-        self,
-        doc: fitz.Document,
-        problem_pages: list[int],
-        img_dir: Path,
-    ) -> dict[int, dict[str, Any]]:
-        """对问题页面批量调用 PyMuPDF4LLM Legacy Mode，获取补充表格数据。
-
-        使用 use_layout(False) 启用 Legacy Mode，确保 table_strategy 等参数生效。
-        hdr_info=False 禁用 heading 检测，规避标题扁平化缺陷。
-        margins=0 规避 #251 bbox 包含 bug。
-
-        返回: {page_idx (1-based): {"text": str, "tables": [...], "images": [...]}}
-        """
-        if not problem_pages:
-            return {}
-
-        try:
-            pymupdf4llm.use_layout(False)
-            results = cast(
-                list[dict[str, Any]],
-                pymupdf4llm.to_markdown(
-                    doc,
-                    pages=[p - 1 for p in problem_pages],  # 0-based
-                    page_chunks=True,
-                    table_strategy="lines",  # 比 lines_strict 更宽松，覆盖边缘场景
-                    write_images=False,  # 不生成图片（图片不被引用，且质量差）
-                    margins=0,
-                    hdr_info=False,  # 禁用 heading 检测
-                ),
-            )
-            return {p: r for p, r in zip(problem_pages, results)}
-        except Exception as e:
-            logger.warning(f"PyMuPDF4LLM fallback 调用失败: {e}")
-            return {}
-
-    @staticmethod
-    def _extract_tables_from_p4l_text(text: str) -> list[str]:
-        """从 PyMuPDF4LLM 页面 text 中提取 Markdown 表格块。
-
-        匹配标准 Markdown 表格格式：
-        | Header1 | Header2 |
-        |---------|---------|
-        | Cell1   | Cell2   |
-        """
-        if not text:
-            return []
-
-        # 匹配完整的 Markdown 表格块
-        pattern = re.compile(
-            r"(?:^|\n)(\|[^\n]+\|\n\|[-:\s|]+\|\n(?:\|[^\n]+\|\n?)*)",
-            re.MULTILINE,
-        )
-        tables = []
-        for match in pattern.finditer(text):
-            table_md = match.group(1).strip()
-            if table_md:
-                tables.append(table_md)
-        return tables
-
-    @staticmethod
-    def _fuse_p4l_tables_into_pages(
-        page_markdowns: list[str],
-        p4l_results: dict[int, dict[str, Any]],
-        problem_pages: dict[int, dict[str, bool]],
-    ) -> list[str]:
-        """将 PyMuPDF4LLM 提取的表格融合到对应页面的 Markdown 中。
-
-        融合策略：
-        1. 从 p4l_results[page_idx]["text"] 中提取 Markdown 表格
-        2. 将表格追加到对应页面 Markdown 的末尾（避免破坏现有结构）
-        3. 若页面已有 Markdown 表格（Layer 1 已检测到），则不重复添加
-        """
-        result = list(page_markdowns)
-        for page_idx, flags in problem_pages.items():
-            if "missing_tables" not in flags:
-                continue
-
-            p4l_page = p4l_results.get(page_idx)
-            if not p4l_page:
-                continue
-
-            text = p4l_page.get("text", "")
-            p4l_tables = PDFParser._extract_tables_from_p4l_text(text)
-            if not p4l_tables:
-                continue
-
-            page_md = result[page_idx - 1]
-
-            # 若页面已有 Markdown 表格结构，跳过融合（Layer 1 已覆盖）
-            has_existing_table = re.search(r"\|[^\n]+\|\n\|[-:\s|]+\|", page_md) is not None
-            if has_existing_table:
-                continue
-
-            # 追加表格到页面末尾
-            fused = page_md.rstrip() + "\n\n" + "\n\n".join(p4l_tables) + "\n"
-            result[page_idx - 1] = fused
-
-        return result
-
-    @staticmethod
-    def _merge_image_lists(
-        primary: list[dict[str, Any]],
-        fallback: list[dict[str, Any]],
-        y_threshold: float | None = None,
-    ) -> list[dict[str, Any]]:
-        """合并主路径和 fallback 图片列表，fallback 只补充未覆盖的位置。
-
-        去重策略：若 fallback 图片的 y 中心与 primary 中任一图片的 y 中心
-        差距 < y_threshold，视为同一图片，跳过。
-        """
-        if y_threshold is None:
-            y_threshold = Config.PARSER_IMAGE_MERGE_Y_THRESHOLD
-        result = list(primary)
-        for fb_img in fallback:
-            fb_y = (fb_img["y0"] + fb_img["y1"]) / 2
-            duplicate = any(
-                abs(fb_y - ((p_img["y0"] + p_img["y1"]) / 2)) < y_threshold for p_img in primary
-            )
-            if not duplicate:
-                result.append(fb_img)
-        return result
 
     @staticmethod
     def _validate_image_links(

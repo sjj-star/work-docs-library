@@ -51,7 +51,6 @@ def analyze_doc(doc_name: str, base_dir: Path) -> dict:
     """分析单个文档的三路输出."""
     gt = load_ground_truth(doc_name, base_dir)
     baseline = load_parser_output(doc_name, "baseline", base_dir)
-    pymupdf4llm = load_parser_output(doc_name, "pymupdf4llm", base_dir)
     mineru = load_parser_output(doc_name, "mineru", base_dir)
 
     report = {
@@ -65,7 +64,6 @@ def analyze_doc(doc_name: str, base_dir: Path) -> dict:
         },
         "parsers": {
             "baseline": baseline,
-            "pymupdf4llm": pymupdf4llm,
             "mineru": mineru,
         },
     }

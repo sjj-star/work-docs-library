@@ -126,7 +126,7 @@ def main() -> None:
 
     print("=" * 70)
     print("PDF Parser Benchmark 回归验证报告")
-    print("改进项: Layer1 表格检测 + Layer2 图片提取 + Layer3 P4L fallback")
+    print("改进项: Layer1 表格检测 + Layer2 图片提取")
     print("=" * 70)
 
     all_reports = []

@@ -20,7 +20,7 @@ def collect_doc_results(doc_name: str, base_dir: Path) -> dict:
     doc_dir = base_dir / doc_name
     result = {"doc_name": doc_name, "parsers": {}}
 
-    for parser in ["baseline", "pymupdf4llm", "mineru"]:
+    for parser in ["baseline", "mineru"]:
         parser_dir = doc_dir / parser
         md_path = parser_dir / "result.md"
         perf_path = doc_dir / f"{parser}_result.json"

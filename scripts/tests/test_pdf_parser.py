@@ -1148,26 +1148,6 @@ def test_strip_table_text_blocks():
 # ---------------------------------------------------------------------------
 
 
-def test_merge_image_lists_dedup():
-    """_merge_image_lists 应对重复位置去重。"""
-    parser = PDFParser()
-
-    primary = [
-        {"type": "image", "y0": 100, "y1": 150, "path": Path("/a.png")},
-    ]
-    fallback = [
-        {"type": "image", "y0": 105, "y1": 155, "path": Path("/b.png")},  # 接近，去重
-        {"type": "image", "y0": 300, "y1": 350, "path": Path("/c.png")},  # 远，保留
-    ]
-
-    merged = parser._merge_image_lists(primary, fallback, y_threshold=20.0)
-    paths = [m["path"] for m in merged]
-
-    assert Path("/a.png") in paths
-    assert Path("/b.png") not in paths  # 被去重
-    assert Path("/c.png") in paths
-
-
 def test_validate_image_links_removes_broken(tmp_path):
     """_validate_image_links 应移除指向不存在文件的引用。"""
     parser = PDFParser()
@@ -1243,7 +1223,7 @@ def test_extract_images_via_image_info(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# PyMuPDF4LLM fallback 测试（Milestone 3）
+# Caption 严格性测试
 # ---------------------------------------------------------------------------
 
 
@@ -1291,83 +1271,3 @@ def test_is_strict_figure_caption():
     # 非 caption
     assert parser._is_strict_figure_caption("Normal paragraph.") is False
 
-
-def test_should_trigger_p4l_fallback():
-    """_should_trigger_p4l_fallback 应在严格 caption 存在但无表格时触发。"""
-    parser = PDFParser()
-
-    # 有正式 caption 但无表格 → 触发
-    blocks_with_caption = [{"text": "Table 1-1. Example"}]
-    assert parser._should_trigger_p4l_fallback(blocks_with_caption, []) is True
-
-    # 有正式 caption 且有表格 → 不触发
-    assert parser._should_trigger_p4l_fallback(blocks_with_caption, [{"type": "table"}]) is False
-
-    # 无 caption → 不触发
-    blocks_plain = [{"text": "Normal paragraph."}]
-    assert parser._should_trigger_p4l_fallback(blocks_plain, []) is False
-
-    # 只有引用句 caption → 不触发（关键：严格过滤生效）
-    blocks_reference = [{"text": "Table B1.3 shows the representations."}]
-    assert parser._should_trigger_p4l_fallback(blocks_reference, []) is False
-
-
-def test_extract_tables_from_p4l_text():
-    """_extract_tables_from_p4l_text 应从 Markdown 文本中提取表格块。"""
-    parser = PDFParser()
-
-    text = (
-        "Some paragraph\n\n"
-        "|Header1|Header2|\n"
-        "|-------|-------|\n"
-        "|Cell1|Cell2|\n\n"
-        "Another paragraph\n\n"
-        "|A|B|\n"
-        "|-|-|\n"
-        "|1|2|\n"
-    )
-    tables = parser._extract_tables_from_p4l_text(text)
-
-    assert len(tables) == 2
-    assert "|Header1|Header2|" in tables[0]
-    assert "|A|B|" in tables[1]
-
-
-def test_extract_tables_from_p4l_text_empty():
-    """_extract_tables_from_p4l_text 对空文本应返回空列表。"""
-    parser = PDFParser()
-    assert parser._extract_tables_from_p4l_text("") == []
-    assert parser._extract_tables_from_p4l_text("No table here.") == []
-
-
-def test_fuse_p4l_tables_into_pages():
-    """_fuse_p4l_tables_into_pages 应将 PyMuPDF4LLM 表格追加到对应页面。"""
-    parser = PDFParser()
-
-    page_markdowns = ["Page 1 text.", "Page 2 text."]
-    p4l_results = {
-        1: {"text": "|A|B|\n|-|-|\n|1|2|\n"},
-    }
-    problem_pages = {1: {"missing_tables": True}}
-
-    result = parser._fuse_p4l_tables_into_pages(page_markdowns, p4l_results, problem_pages)
-
-    assert "|A|B|" in result[0]
-    assert "Page 1 text." in result[0]
-    assert result[1] == "Page 2 text."
-
-
-def test_fuse_p4l_skips_if_already_has_table():
-    """_fuse_p4l_tables_into_pages 若页面已有表格则不重复添加。"""
-    parser = PDFParser()
-
-    page_markdowns = ["Page 1.\n\n|X|Y|\n|---|---|\n|1|2|\n"]
-    p4l_results = {
-        1: {"text": "|A|B|\n|-|-|\n|3|4|\n"},
-    }
-    problem_pages = {1: {"missing_tables": True}}
-
-    result = parser._fuse_p4l_tables_into_pages(page_markdowns, p4l_results, problem_pages)
-
-    # 不应添加第二个表格
-    assert result[0].count("|---|") == 1
