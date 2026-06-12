@@ -3,6 +3,7 @@
 用法：
     python visualize_diagnose.py <diagnose_json> <output_image>
 """
+
 import json
 import sys
 from pathlib import Path
@@ -14,12 +15,12 @@ from PIL import Image, ImageDraw
 
 
 def visualize_diagnose(json_path: str, output_path: str, dpi: int = 150):
-    with open(json_path, "r", encoding="utf-8") as f:
+    """读取诊断 JSON 并在对应 PDF 页面上绘制标注图."""
+    with open(json_path, encoding="utf-8") as f:
         data = json.load(f)
 
     pdf_path = data["pdf_path"]
     page_1idx = data["page_1idx"]
-    page_rect = data["page_rect"]
 
     doc = fitz.open(pdf_path)
     page = doc.load_page(page_1idx - 1)
@@ -101,18 +102,17 @@ def visualize_diagnose(json_path: str, output_path: str, dpi: int = 150):
 
 def _draw_dashed_rect(draw, x0, y0, x1, y1, fill, width=2, dash=8):
     """Pillow 绘制虚线矩形。"""
+
     def _dash_line(start, end, horizontal=True):
         x1c, y1c = start
         x2c, y2c = end
         if horizontal:
-            total = x2c - x1c
             cur = x1c
             while cur < x2c:
                 seg_end = min(cur + dash, x2c)
                 draw.line([(cur, y1c), (seg_end, y1c)], fill=fill, width=width)
                 cur += dash * 2
         else:
-            total = y2c - y1c
             cur = y1c
             while cur < y2c:
                 seg_end = min(cur + dash, y2c)

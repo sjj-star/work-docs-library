@@ -12,7 +12,6 @@ import json
 import sys
 import time
 from pathlib import Path
-from typing import Any
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
@@ -24,27 +23,33 @@ class AuditingPDFParser(PDFParser):
     """继承 PDFParser，在关键方法中注入审计统计。"""
 
     def __init__(self):
+        """初始化审计日志与页码跟踪状态."""
         super().__init__()
         self._audit_log: list[dict] = []
         self._current_page: int = -1
 
     def _audit(self, event: str, data: dict | None = None):
-        self._audit_log.append({
-            "page": self._current_page,
-            "event": event,
-            "data": data or {},
-            "ts": time.perf_counter(),
-        })
+        self._audit_log.append(
+            {
+                "page": self._current_page,
+                "event": event,
+                "data": data or {},
+                "ts": time.perf_counter(),
+            }
+        )
 
     def parse(self, pdf_path, output_dir):
+        """包装 PDFParser.parse 并记录各阶段耗时."""
         self._audit_log = []
         # Hook doc.load_page 以追踪当前页码
         original_load_page = fitz.Document.load_page
+
         def hooked_load_page(doc, page_id):
             # page_id 可以是页码(int)或页名(str)；仅记录整数页码
             if isinstance(page_id, int):
                 self._current_page = page_id
             return original_load_page(doc, page_id)
+
         fitz.Document.load_page = hooked_load_page
         try:
             result = super().parse(pdf_path, output_dir)
@@ -56,42 +61,56 @@ class AuditingPDFParser(PDFParser):
         t0 = time.perf_counter()
         result = super()._find_figure_regions(page, page_rect, header_margin, footer_margin)
         elapsed = time.perf_counter() - t0
-        self._audit("find_figure_regions", {
-            "elapsed_ms": round(elapsed * 1000, 2),
-            "regions_found": len(result),
-        })
+        self._audit(
+            "find_figure_regions",
+            {
+                "elapsed_ms": round(elapsed * 1000, 2),
+                "regions_found": len(result),
+            },
+        )
         return result
 
     def _extract_raster_images(self, doc, page, page_idx, img_dir, diagram_regions=None):
         t0 = time.perf_counter()
         result = super()._extract_raster_images(doc, page, page_idx, img_dir, diagram_regions)
         elapsed = time.perf_counter() - t0
-        self._audit("extract_raster_images", {
-            "elapsed_ms": round(elapsed * 1000, 2),
-            "images_found": len(result),
-            "image_names": [img["path"] for img in result],
-        })
+        self._audit(
+            "extract_raster_images",
+            {
+                "elapsed_ms": round(elapsed * 1000, 2),
+                "images_found": len(result),
+                "image_names": [img["path"] for img in result],
+            },
+        )
         return result
 
     def _render_diagrams(self, page, page_idx, diagram_regions, diagram_captions, img_dir):
         t0 = time.perf_counter()
-        result = super()._render_diagrams(page, page_idx, diagram_regions, diagram_captions, img_dir)
+        result = super()._render_diagrams(
+            page, page_idx, diagram_regions, diagram_captions, img_dir
+        )
         elapsed = time.perf_counter() - t0
-        self._audit("render_diagrams", {
-            "elapsed_ms": round(elapsed * 1000, 2),
-            "images_rendered": len(result),
-            "image_names": [img["path"] for img in result],
-        })
+        self._audit(
+            "render_diagrams",
+            {
+                "elapsed_ms": round(elapsed * 1000, 2),
+                "images_rendered": len(result),
+                "image_names": [img["path"] for img in result],
+            },
+        )
         return result
 
     def _detect_and_convert_tables(self, page, text_blocks, diagram_regions):
         t0 = time.perf_counter()
         result = super()._detect_and_convert_tables(page, text_blocks, diagram_regions)
         elapsed = time.perf_counter() - t0
-        self._audit("detect_and_convert_tables", {
-            "elapsed_ms": round(elapsed * 1000, 2),
-            "tables_found": len(result),
-        })
+        self._audit(
+            "detect_and_convert_tables",
+            {
+                "elapsed_ms": round(elapsed * 1000, 2),
+                "tables_found": len(result),
+            },
+        )
         return result
 
     def get_audit_summary(self) -> dict:
@@ -133,6 +152,7 @@ class AuditingPDFParser(PDFParser):
 
 
 def run_audit(pdf_path: str, out_dir: str) -> dict:
+    """对指定 PDF 运行 AuditingPDFParser 并输出审计报告."""
     pdf_path_obj = Path(pdf_path)
     out_dir_obj = Path(out_dir)
     out_dir_obj.mkdir(parents=True, exist_ok=True)
@@ -155,9 +175,11 @@ def run_audit(pdf_path: str, out_dir: str) -> dict:
     # 选择有代表性的页面截图
     _snapshot_representative_pages(pdf_path_obj, out_dir_obj, summary["pages"])
 
-    print(f"[AUDIT] {pdf_path_obj.name}: {elapsed:.1f}s, "
-          f"{summary['total_images_extracted']} images, "
-          f"report -> {report_path}")
+    print(
+        f"[AUDIT] {pdf_path_obj.name}: {elapsed:.1f}s, "
+        f"{summary['total_images_extracted']} images, "
+        f"report -> {report_path}"
+    )
     return summary
 
 

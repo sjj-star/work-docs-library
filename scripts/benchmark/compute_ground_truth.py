@@ -77,6 +77,7 @@ def compute_ground_truth(doc_name: str, pdf_path: str, out_dir: Path) -> Path:
 
 
 def main() -> None:
+    """为所有配置文档计算并保存 ground truth 统计."""
     out_dir = Path("/tmp/workdocs_benchmark/ground_truth")
     out_dir.mkdir(parents=True, exist_ok=True)
 

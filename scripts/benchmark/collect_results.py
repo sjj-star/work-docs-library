@@ -55,6 +55,7 @@ def collect_doc_results(doc_name: str, base_dir: Path) -> dict:
 
 
 def main():
+    """收集所有文档、所有解析器的评估结果并汇总输出."""
     base_dir = Path("/tmp/workdocs_benchmark/outputs")
     all_results = {}
 

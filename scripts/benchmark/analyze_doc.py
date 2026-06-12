@@ -15,6 +15,7 @@ logging.basicConfig(
 
 
 def load_ground_truth(doc_name: str, base_dir: Path) -> dict:
+    """加载指定文档的人工标注 Ground Truth."""
     gt_path = base_dir / "ground_truth" / f"{doc_name}_gt.json"
     if gt_path.exists():
         return json.loads(gt_path.read_text(encoding="utf-8"))
@@ -22,6 +23,7 @@ def load_ground_truth(doc_name: str, base_dir: Path) -> dict:
 
 
 def load_parser_output(doc_name: str, parser: str, base_dir: Path) -> dict:
+    """加载指定解析器对指定文档的输出结果."""
     parser_dir = base_dir / doc_name / parser
     md_path = parser_dir / "result.md"
     result = {"status": "not_found", "text": "", "metrics": {}}
@@ -79,6 +81,7 @@ def analyze_doc(doc_name: str, base_dir: Path) -> dict:
 
 
 def main():
+    """命令行入口：读取 Ground Truth 与解析器输出并打印摘要."""
     if len(sys.argv) < 2:
         print("Usage: python analyze_doc.py <doc_name>")
         sys.exit(1)
@@ -98,9 +101,11 @@ def main():
     for name, data in report["parsers"].items():
         if data["status"] == "success":
             m = data["metrics"]
-            print(f"  {name}: {m['chars']} chars ({m['char_extraction_rate']:.1f}%), "
-                  f"{m['headings']} headings, {m['table_rows']} table rows, "
-                  f"{m['image_refs']} images")
+            print(
+                f"  {name}: {m['chars']} chars ({m['char_extraction_rate']:.1f}%), "
+                f"{m['headings']} headings, {m['table_rows']} table rows, "
+                f"{m['image_refs']} images"
+            )
         else:
             print(f"  {name}: {data['status']}")
 
