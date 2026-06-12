@@ -1,7 +1,7 @@
 """AMBA 风格无边框表格提取器.
 
 仅依赖横线（通常是零高度水平线）和文字 x 坐标对齐来重建表格，
-用于处理 find_tables() 无法检测的 "lines_strict/lines/text" 都失效的无竖线表格。
+用于处理 find_tables() 无法检测的 "lines_strict/text" 都失效的无竖线表格。
 """
 
 from __future__ import annotations

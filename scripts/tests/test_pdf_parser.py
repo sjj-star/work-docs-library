@@ -1411,7 +1411,7 @@ def _make_pdf_with_horizontal_lines_table(path, caption, rows, col_lefts, row_he
     doc.close()
 
 
-def test_parse_extracts_horizontal_borderless_table(tmp_path):
+def test_parse_extracts_horizontal_table(tmp_path):
     pdf_path = tmp_path / "borderless_table.pdf"
     rows = [
         ["Layer", "Granularity", "Function"],

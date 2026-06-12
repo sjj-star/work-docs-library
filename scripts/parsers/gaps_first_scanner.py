@@ -677,9 +677,10 @@ class GapsFirstScanner:
 
         - 'grid': multiple horizontal AND vertical lines, few non-line shapes,
                    reasonable text density
-        - 'horizontal': no vertical lines, many horizontal lines + lots of text,
-                        few non-line shapes, NOT zero-height lines
-                        (find_tables cannot detect zero-height lines)
+        - 'horizontal': no/few vertical lines, multiple horizontal lines,
+                        few non-line shapes. Covers borderless tables where
+                        PyMuPDF's find_tables() fails (zero-height lines, no
+                        vertical borders).
         """
         if not zone.drawings:
             return None
@@ -730,7 +731,7 @@ class GapsFirstScanner:
                 return None
             return "grid"
 
-        # Style B/C: Horizontal-only tables
+        # Style B: Horizontal-only / borderless tables
         # threshold 3 覆盖只有表头 + 一行数据 + Continued... 的底部表格（如 AMBA B2.6 page 59）
         if v_lines <= 1 and h_lines >= 4 and zone.text_block_count >= 3:
             zero_ratio = zone.h_zero_height / h_lines if h_lines else 0.0
@@ -743,8 +744,10 @@ class GapsFirstScanner:
                         f"density={text_density:.3f}"
                     )
                     return None
-                return "horizontal_borderless"
+                return "horizontal"
             if h_lines >= 6:
+                # 非零高度横线较多的表格同样走 borderless 提取器，避免
+                # find_tables(strategy="lines") 在 AMBA CHI 等文档中零产出
                 return "horizontal"
 
         return None
@@ -1090,27 +1093,21 @@ class GapsFirstScanner:
 
                 # Determine table style / strategy for this page
                 page_table_style = None
-                table_strategy = "lines_strict"
                 for zone in zones:
                     if zone.consumed or not zone.drawings:
                         continue
                     style = self._classify_table_style(zone)
                     if style == "grid":
                         page_table_style = "grid"
-                        table_strategy = "lines_strict"
                         break
                     if style == "horizontal":
                         page_table_style = "horizontal"
-                        table_strategy = "lines"
-                        break
-                    if style == "horizontal_borderless":
-                        page_table_style = "horizontal_borderless"
                         break
 
                 found_any = False
                 tab_bbox: fitz.Rect | None = None
 
-                if page_table_style == "horizontal_borderless" and search_ranges:
+                if page_table_style == "horizontal" and search_ranges:
                     extractor = BorderlessTableExtractor()
                     for s_y0, s_y1 in search_ranges:
                         tab_results = extractor.extract(
@@ -1134,9 +1131,10 @@ class GapsFirstScanner:
                             found_any = True
                             self._add_claimed(tab_bbox.y0, tab_bbox.y1, claimed_y_ranges)
                             break
-                else:
+                elif page_table_style == "grid":
                     # Pre-compute tables once if needed
                     all_page_tables: list[Any] = []
+                    table_strategy = "lines_strict"
                     if self.TABLE_DETECTION_ENABLED and search_ranges:
                         try:
                             tabs = page.find_tables(strategy=table_strategy)
@@ -1185,7 +1183,6 @@ class GapsFirstScanner:
         # 6. Handle orphan zones: no caption, but has drawings.
         #    These could be uncaptioned tables. If not tables, ignore.
         #    Skip zones overlapping claimed regions.
-        table_strategy = "lines_strict"
         for zone in zones:
             if zone.consumed or not zone.drawings:
                 continue
@@ -1193,8 +1190,10 @@ class GapsFirstScanner:
             search_ranges = self._exclude_claimed(zone.y0, zone.y1, claimed_y_ranges)
             if not search_ranges:
                 continue
-            if self._classify_table_style(zone):
-                all_page_tables = []
+            orphan_style = self._classify_table_style(zone)
+            if orphan_style == "grid":
+                all_page_tables: list[Any] = []
+                table_strategy = "lines_strict"
                 if self.TABLE_DETECTION_ENABLED:
                     try:
                         tabs = page.find_tables(strategy=table_strategy)
@@ -1221,5 +1220,25 @@ class GapsFirstScanner:
                     self._is_in_claimed(tab_bbox, claimed_y_ranges) for _md, tab_bbox in tables_md
                 ):
                     self._add_claimed(zone.y0, zone.y1, claimed_y_ranges)
+            elif orphan_style == "horizontal":
+                extractor = BorderlessTableExtractor()
+                for s_y0, s_y1 in search_ranges:
+                    tab_results = extractor.extract(
+                        page, fitz.Rect(page_rect.x0, s_y0, page_rect.x1, s_y1)
+                    )
+                    for md, tab_bbox in tab_results:
+                        if self._is_in_claimed(tab_bbox, claimed_y_ranges):
+                            continue
+                        result.tables.append(
+                            {
+                                "page_idx": page_idx,
+                                "markdown": md,
+                                "bbox": [tab_bbox.x0, tab_bbox.y0, tab_bbox.x1, tab_bbox.y1],
+                            }
+                        )
+                        self._add_claimed(tab_bbox.y0, tab_bbox.y1, claimed_y_ranges)
+                    if tab_results:
+                        self._add_claimed(zone.y0, zone.y1, claimed_y_ranges)
+                        break
 
         return result
