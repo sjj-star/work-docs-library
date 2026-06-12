@@ -1439,3 +1439,34 @@ def test_parse_extracts_horizontal_borderless_table(tmp_path):
     # 单元格文本不应在 Markdown 表格外重复
     non_table_text = "\n".join(line for line in md.splitlines() if not line.startswith("|"))
     assert "Protocol" not in non_table_text
+
+
+def test_parse_sprui07_page_080_extracts_tables_and_diagrams(tmp_path):
+    """sprui07 第 80 页：多表格 + 多位域图混合页面回归测试."""
+    pdf_path = Path("scripts/tests/fixtures/pdf_pages/sprui07_page_080.pdf")
+    if not pdf_path.exists():
+        pytest.skip("fixture not found: sprui07_page_080.pdf")
+
+    parser = PDFParser()
+    md, img_paths = parser.parse(str(pdf_path), output_dir=str(tmp_path / "out"))
+
+    # 三个表格 caption 均保留
+    assert (
+        "Table 1-28. Watchdog Counter Register (WDCNTR) Field Descriptions" in md
+    )
+    assert (
+        "Table 1-29. Watchdog Reset Key Register (WDKEY) Field Descriptions" in md
+    )
+    assert (
+        "Table 1-30. Watchdog Control Register (WDCR) Field Descriptions" in md
+    )
+
+    # 三个位域图 caption 均保留，并渲染为图片
+    assert "Figure 1-28. Watchdog Counter Register (WDCNTR)" in md
+    assert "Figure 1-29. Watchdog Reset Key Register (WDKEY)" in md
+    assert "Figure 1-30. Watchdog Control Register (WDCR)" in md
+    assert len(img_paths) >= 3
+
+    # 至少提取出 3 个 Markdown 表格（表头 + 分隔 + 若干行）
+    table_lines = [line for line in md.splitlines() if line.startswith("|")]
+    assert len(table_lines) >= 6
