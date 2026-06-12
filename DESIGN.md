@@ -713,6 +713,7 @@ graph_query(entity_type="Product", name="TMS320F28379D")
 | **文件写入必须原子化** | `_save_global_graph` 直接覆写 | 临时文件 + `os.replace`；失败时从 `.bak` 恢复 |
 | **跨阶段产物必须校验一致性** | Stage3/Stage4 增量分析结果不一致 | 持久化 `_incremental.json` + hash 校验 |
 | **配置路径加载/保存必须一致** | `_save_global_graph` 硬编码 `"graphs"` | 统一使用 `Config.GRAPH_OUTPUT_DIR` |
+| **警惕外部库的导入级副作用** | `pymupdf4llm` 导入时激活 ONNX layout，静默改变 `find_tables()` 结果 | 导入后立即设置 `pymupdf._get_layout = None` |
 
 **新增开发原则**：详见 `AGENTS.md`「防御性编程与状态安全原则」，包含副作用隔离、索引一致性、失败回滚、输入验证、跨阶段校验、配置统一、资源生命周期管理 7 条原则。
 
@@ -1009,6 +1010,94 @@ if v_lines <= 1 and h_lines >= 6 and text >= 5: return "horizontal"
 | empty density | 5.14/100pt | 3.12/100pt | 5.71/100pt | 1.99/100pt |
 | success text | 23.2 | N/A | 10.8 | 12.6 |
 | empty text | 7.0 | 14.6 | 11.5 | 7.5 |
+
+#### 18.8.6 `pymupdf4llm` layout 激活导致 `find_tables` 结果错乱
+
+**实验日期**：2026-06-12
+
+**问题现象**：SPRUI07 page 80（PDF 页码 79，0-based）在本地 PDF fallback 解析中，**Figure 1-29 错误认领了 Table 1-28 的 zone，Figure 1-30 完全丢失**，最终只提取出 2 张图（期望 3 张）。现象仅在 `PDFParser` 被导入后出现；单独运行 `GapsFirstScanner.process_page()` 时结果正确。
+
+**初步假设**：测试者曾怀疑 PyMuPDF 存在"内部状态错误"，因为调用 `_extract_horizontal_decorations()` 后再处理 page 80 会触发问题。
+
+**实验方法**：
+
+1. **最小复现**：构造独立脚本，分别测试以下场景对 page 80 的影响：
+   - 不导入 `pdf_parser`，直接调用 `GapsFirstScanner.process_page()`
+   - 导入 `parsers.pdf_parser` 后再调用 `process_page()`
+   - 仅导入 `pymupdf4llm` 后再调用 `process_page()`
+   - 分别单独调用 `page.get_drawings()` / `page.get_text("dict")` / `_extract_horizontal_decorations()` 后再处理
+
+2. **对照实验**：对比 Layout 激活前后 `page.find_tables(strategy="lines_strict")` 的返回结果。
+
+3. **根因定位**：检查 `pymupdf4llm` 导入时的副作用，确认其是否修改 `pymupdf` 模块状态。
+
+**实验结果**：
+
+| 前置操作 | page 80 图片数 | 是否正确 |
+|---------|--------------|---------|
+| 无前置 | 3 | ✅ |
+| `import pymupdf4llm` | 2 | ❌ |
+| `import parsers.pdf_parser` | 2 | ❌ |
+| `_extract_horizontal_decorations(page)` | 2 | ❌ |
+| `page.get_text("dict")` | 2 | ❌ |
+
+关键发现：
+- `page.get_drawings()` 和 `page.get_text("dict")` 在 Layout 激活前后返回**完全相同**的数据。
+- 差异完全集中在 `page.find_tables()` 的返回结果：
+
+| Layout 状态 | `find_tables` 返回的关键 bbox | 含义 |
+|------------|---------------------------|------|
+| 未激活 | `(54.1, 170.1, 557.8, 236.8)` | Table 1-28，边界清晰 |
+| 未激活 | `(54.1, 350.8, 557.8, 439.1)` | Table 1-29，边界清晰 |
+| 激活后 | `(65.3, 172.9, 544.4, 303.6)` | **Table 1-28 与 Figure 1-29 位域图被合并为一个大表格** |
+| 激活后 | `(57.0, 89.7, 544.4, 135.5)` | Figure 1-28 位域图被识别为表格 |
+
+**缺陷现场（调用链）**：
+
+1. `pymupdf4llm/__init__.py` 导入时无条件执行：
+   ```python
+   try:
+       import pymupdf.layout
+   except ImportError:
+       use_layout(False)
+   else:
+       use_layout(True)
+   ```
+2. `use_layout(True)` 调用 `pymupdf.layout.activate()`，将 `pymupdf._get_layout` 设置为一个 ONNX 文档布局分析器。
+3. `fitz.Page.find_tables()` 内部会调用 `page.get_layout()`。
+4. `page.get_layout()` 调用 `pymupdf._get_layout(self)`，触发 ONNX 模型推理。
+5. Layout 信息被写入 `page.layout_information`，并**改变 `find_tables()` 的表格 bbox 计算**，导致 register bitfield diagram 与真实表格被错误合并。
+
+**关键结论**：
+- 这不是 PyMuPDF 的"内部状态错误"，而是 `pymupdf4llm` 的**导入级副作用**。
+- 只要进程内导入过 `pymupdf4llm`（包括通过 `import parsers.pdf_parser` 间接导入），`find_tables()` 的行为就会改变。
+- `_extract_horizontal_decorations()` 本身并不直接导致问题，但它出现在 `PDFParser.parse()` 的执行路径中，而导入 `PDFParser` 已经激活了 Layout 引擎。
+
+**规避/修复方案**：
+
+在 `scripts/parsers/pdf_parser.py` 导入 `pymupdf4llm` 后立即禁用 layout 引擎：
+
+```python
+import fitz  # pymupdf
+import pymupdf
+import pymupdf4llm
+
+# pymupdf4llm activates an ONNX layout analyzer at import time which
+# interferes with page.find_tables() by changing table detection results.
+# We disable it globally since our parser does not use the layout engine.
+pymupdf._get_layout = None
+```
+
+本项目本地 PDF 解析器不使用 `pymupdf4llm` 的 layout 能力；fallback 路径 `_fallback_with_pymupdf4llm()` 在调用 `pymupdf4llm.to_markdown()` 前已显式执行 `pymupdf4llm.use_layout(False)`，因此全局禁用无影响。
+
+**验证结果**：
+- 修复后 SPRUI07 page 80 正确提取 3 张图、3 张表。
+- 全部 382 个测试用例通过。
+
+**教训**：
+- 外部库的导入级副作用（import-time side effect）可能 silently 改变同一进程中其他依赖库的行为。
+- 当依赖库的行为与文档/直觉不符时，应优先检查**导入顺序和导入副作用**，而非假设底层库有状态错误。
+- 对 PyMuPDF 生态，`pymupdf4llm` 与原生 `fitz`/`pymupdf` 并非完全无耦合：layout 激活会通过 `pymupdf._get_layout` 全局影响 `find_tables()`。
 
 ### 18.9 历史演进与性能数据
 

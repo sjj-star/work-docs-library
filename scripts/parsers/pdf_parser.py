@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any, cast
 
 import fitz  # pymupdf
+import pymupdf
 import pymupdf4llm
 from core.config import Config
 from PIL import Image
@@ -17,6 +18,11 @@ from PIL import Image
 from parsers.gaps_first_scanner import GapsFirstScanner, GapsPageResult
 
 logger = logging.getLogger(__name__)
+
+# pymupdf4llm activates an ONNX layout analyzer at import time which
+# interferes with page.find_tables() by changing table detection results.
+# We disable it globally since our parser does not use the layout engine.
+pymupdf._get_layout = None
 
 
 class PDFParser:
