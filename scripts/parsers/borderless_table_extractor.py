@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from typing import cast
 
@@ -20,6 +21,14 @@ class _Column:
     x1: float
 
 
+@dataclass
+class _Line:
+    y: float
+    x0: float
+    x1: float
+    full_width: bool = False
+
+
 class BorderlessTableExtractor:
     """从仅有水平线的区域中提取 Markdown 表格."""
 
@@ -28,6 +37,13 @@ class BorderlessTableExtractor:
     LINE_MAX_HEIGHT_PT = 2.0
     LINE_WIDTH_HEIGHT_RATIO = 3.0
     LINE_DEDUP_TOLERANCE_PT = 2.0
+
+    # 全宽线判定：x0 与表格左边界接近
+    FULL_WIDTH_X0_TOLERANCE_PT = 8.0
+
+    # 同一页内多个表格的 x 聚类阈值
+    # 需覆盖“全宽线 + 右侧短 ITEM 线”的组合（如 AMBA B1.2：308pt 与 405pt）
+    TABLE_X_CLUSTER_GAP_PT = 150.0
 
     # 表格规模下限
     MIN_ROWS = 2
@@ -48,38 +64,60 @@ class BorderlessTableExtractor:
             列表，每个元素为 (markdown_table, bbox)。目前一页内通常返回 0 或 1 个结果。
         """
         page_rect = page.rect
-        line_ys = self._collect_horizontal_line_ys(page, search_rect, page_rect)
-        if len(line_ys) < self.MIN_ROWS + 1:
+        all_lines = self._collect_horizontal_lines(page, search_rect, page_rect)
+        if len(all_lines) < self.MIN_ROWS + 1:
             return []
 
-        # 先用线范围获取文字，再裁剪掉页脚/装饰线产生的空尾行
-        draft_bbox = fitz.Rect(search_rect.x0, line_ys[0], search_rect.x1, line_ys[-1])
+        # 按 x0 聚类，取 caption 下方第一个（最上方）线所属的簇作为目标表格
+        all_lines.sort(key=lambda ln: ln.y)
+        clusters = self._cluster_lines_by_x(all_lines)
+        target_lines = self._select_table_cluster(clusters)
+        if len(target_lines) < self.MIN_ROWS + 1:
+            return []
+
+        # 用搜索区域取文字，再裁剪掉页脚/装饰线产生的空尾行
+        draft_bbox = fitz.Rect(
+            min(ln.x0 for ln in target_lines),
+            target_lines[0].y,
+            max(ln.x1 for ln in target_lines),
+            search_rect.y1,
+        )
         words = self._get_words_in_bbox(page, draft_bbox)
+        words = self._filter_excluded_words(page, words, search_rect)
         if not words:
             return []
 
-        line_ys = self._prune_empty_boundary_lines(line_ys, words)
-        if len(line_ys) < self.MIN_ROWS + 1:
+        target_lines = self._prune_empty_boundary_lines(target_lines, words)
+        if len(target_lines) < self.MIN_ROWS + 1:
             return []
 
-        table_bbox = self._build_table_bbox(page, line_ys, search_rect, page_rect)
-        rows = self._build_rows(line_ys)
-        columns = self._detect_columns_from_header(words, rows[0])
+        table_bbox = fitz.Rect(
+            min(ln.x0 for ln in target_lines),
+            target_lines[0].y,
+            max(ln.x1 for ln in target_lines),
+            target_lines[-1].y,
+        )
+
+        # 在目标表格簇内区分全宽分组线与右侧短 ITEM 线
+        for ln in target_lines:
+            ln.full_width = ln.x0 <= table_bbox.x0 + self.FULL_WIDTH_X0_TOLERANCE_PT
+
+        columns = self._detect_columns_from_header(words, target_lines)
         if len(columns) < self.MIN_COLS:
             return []
 
-        md_table = self._build_markdown_table(words, rows, columns)
+        md_table = self._build_markdown_table(words, target_lines, columns, search_rect.y1)
         if not md_table:
             return []
 
         return [(normalize_markdown_table(md_table), table_bbox)]
 
-    def _collect_horizontal_line_ys(
+    def _collect_horizontal_lines(
         self, page: fitz.Page, search_rect: fitz.Rect, page_rect: fitz.Rect
-    ) -> list[float]:
-        """收集搜索范围内的水平线 y 坐标（去重后排序）."""
+    ) -> list[_Line]:
+        """收集搜索范围内的水平线（去重后排序）."""
         min_width = page_rect.width * self.LINE_MIN_WIDTH_RATIO
-        ys: list[float] = []
+        raw: list[fitz.Rect] = []
         for d in page.get_drawings():
             rect = fitz.Rect(d.get("rect", [0, 0, 0, 0]))
             if rect.y1 < search_rect.y0 or rect.y0 > search_rect.y1:
@@ -90,80 +128,117 @@ class BorderlessTableExtractor:
                 continue
             if rect.width < rect.height * self.LINE_WIDTH_HEIGHT_RATIO:
                 continue
-            ys.append((rect.y0 + rect.y1) / 2)
+            raw.append(rect)
 
-        if not ys:
+        if not raw:
             return []
-        ys.sort()
 
-        # 去重：容差内合并
-        deduped: list[float] = []
-        current_sum = ys[0]
-        current_count = 1
-        for y in ys[1:]:
-            if abs(y - current_sum / current_count) <= self.LINE_DEDUP_TOLERANCE_PT:
-                current_sum += y
-                current_count += 1
+        raw.sort(key=lambda r: (r.y0 + r.y1) / 2)
+        groups: list[list[fitz.Rect]] = []
+        for r in raw:
+            cy = (r.y0 + r.y1) / 2
+            if (
+                groups
+                and abs(cy - sum((rr.y0 + rr.y1) / 2 for rr in groups[-1]) / len(groups[-1]))
+                <= self.LINE_DEDUP_TOLERANCE_PT
+            ):
+                groups[-1].append(r)
             else:
-                deduped.append(current_sum / current_count)
-                current_sum = y
-                current_count = 1
-        deduped.append(current_sum / current_count)
-        return deduped
+                groups.append([r])
 
-    def _build_table_bbox(
-        self,
-        page: fitz.Page,
-        line_ys: list[float],
-        search_rect: fitz.Rect,
-        page_rect: fitz.Rect,
-    ) -> fitz.Rect:
-        """根据水平线范围构建表格 bbox."""
-        # 使用 page 中的实际横线长度；若拿不到，则回退到页面主体宽度
-        x0, x1 = page_rect.x1, page_rect.x0
-        for d in page.get_drawings():
-            rect = fitz.Rect(d.get("rect", [0, 0, 0, 0]))
-            cy = (rect.y0 + rect.y1) / 2
-            if any(abs(cy - ly) <= self.LINE_DEDUP_TOLERANCE_PT for ly in line_ys):
-                x0 = min(x0, rect.x0)
-                x1 = max(x1, rect.x1)
-        if x0 >= x1:
-            x0, x1 = search_rect.x0, search_rect.x1
-        return fitz.Rect(x0, line_ys[0], x1, line_ys[-1])
+        lines: list[_Line] = []
+        for g in groups:
+            y = sum((r.y0 + r.y1) / 2 for r in g) / len(g)
+            x0 = min(r.x0 for r in g)
+            x1 = max(r.x1 for r in g)
+            lines.append(_Line(y=y, x0=x0, x1=x1))
+        return lines
+
+    def _cluster_lines_by_x(self, lines: list[_Line]) -> list[list[_Line]]:
+        """按 x0 位置把线分成不同表格簇."""
+        sorted_lines = sorted(lines, key=lambda ln: ln.x0)
+        clusters: list[list[_Line]] = []
+        for ln in sorted_lines:
+            if not clusters:
+                clusters.append([ln])
+                continue
+            last = clusters[-1][-1]
+            if abs(ln.x0 - last.x0) <= self.TABLE_X_CLUSTER_GAP_PT:
+                clusters[-1].append(ln)
+            else:
+                clusters.append([ln])
+        return clusters
+
+    def _select_table_cluster(self, clusters: list[list[_Line]]) -> list[_Line]:
+        """选择最上方线所在的簇作为当前表格."""
+        if not clusters:
+            return []
+        # 所有线按 y 排序后取第一条线，返回它所在的簇
+        candidates = [(ln.y, idx) for idx, cluster in enumerate(clusters) for ln in cluster]
+        candidates.sort()
+        target_idx = candidates[0][1]
+        return sorted(clusters[target_idx], key=lambda ln: ln.y)
 
     def _get_words_in_bbox(self, page: fitz.Page, bbox: fitz.Rect) -> list[tuple]:
         """获取 bbox 内所有 word（PyMuPDF words 格式）."""
         return cast(list[tuple], page.get_text("words", clip=bbox))
 
+    # 需要排除的跨页标记与相邻 caption 正则
+    _CONTINUATION_RE = re.compile(
+        r"continued\s+(?:on\s+next\s+page|from\s+previous\s+page)",
+        re.IGNORECASE,
+    )
+    _CAPTION_RE = re.compile(
+        r"^(Table|表|Figure)\s*[A-Z]?\d+(?:[-\.]\d+)?(?:[:]\s*\S|\s+[A-Z]\S*)",
+        re.IGNORECASE,
+    )
+
+    def _filter_excluded_words(
+        self, page: fitz.Page, words: list[tuple], search_rect: fitz.Rect
+    ) -> list[tuple]:
+        """过滤掉跨页标记与相邻 caption 文字，避免进入单元格."""
+        exclude_bboxes: list[fitz.Rect] = []
+        for block in page.get_text("blocks", clip=search_rect):
+            txt = block[4]
+            if self._CONTINUATION_RE.search(txt) or self._CAPTION_RE.match(txt.strip()):
+                exclude_bboxes.append(fitz.Rect(block[:4]))
+        if not exclude_bboxes:
+            return words
+        return [w for w in words if not any(fitz.Rect(w[:4]).intersects(b) for b in exclude_bboxes)]
+
     @staticmethod
     def _has_words_between(words: list[tuple], y0: float, y1: float) -> bool:
         return any(y0 < (w[1] + w[3]) / 2 < y1 for w in words)
 
-    def _prune_empty_boundary_lines(self, line_ys: list[float], words: list[tuple]) -> list[float]:
+    def _prune_empty_boundary_lines(self, lines: list[_Line], words: list[tuple]) -> list[_Line]:
         """去掉表格上下边界没有文字的空行区间对应的线."""
-        while len(line_ys) > 2 and not self._has_words_between(words, line_ys[0], line_ys[1]):
-            line_ys = line_ys[1:]
-        while len(line_ys) > 2 and not self._has_words_between(words, line_ys[-2], line_ys[-1]):
-            line_ys = line_ys[:-1]
-        return line_ys
+        while len(lines) > 2 and not self._has_words_between(words, lines[0].y, lines[1].y):
+            lines = lines[1:]
+        while len(lines) > 2 and not self._has_words_between(words, lines[-2].y, lines[-1].y):
+            lines = lines[:-1]
+        return lines
 
-    @staticmethod
-    def _build_rows(line_ys: list[float]) -> list[tuple[float, float]]:
-        """由相邻水平线生成行区间."""
-        return [(line_ys[i], line_ys[i + 1]) for i in range(len(line_ys) - 1)]
+    def _detect_columns_from_header(self, words: list[tuple], lines: list[_Line]) -> list[_Column]:
+        """从 header 行单词的 x 位置聚类出列.
 
-    def _detect_columns_from_header(
-        self, words: list[tuple], header_row: tuple[float, float]
-    ) -> list[_Column]:
-        """从 header 行单词的 x 位置聚类出列."""
-        y0, y1 = header_row
+        header 行位于最上方全宽线与紧随其后的下一条全宽线之间。
+        """
+        # 此时 full_width 尚未设置，用 x0 接近表格左边界的线作为全宽线
+        table_left = min(ln.x0 for ln in lines)
+        full_ys = [ln.y for ln in lines if ln.x0 <= table_left + self.FULL_WIDTH_X0_TOLERANCE_PT]
+        full_ys.sort()
+
+        y0 = lines[0].y
+        if len(full_ys) >= 2:
+            y1 = full_ys[1]
+        else:
+            y1 = y0 + 30.0
+
         header_words = [w for w in words if y0 < (w[1] + w[3]) / 2 < y1]
         if not header_words:
             return []
 
-        # 按从左到右、从上到下排序
         header_words.sort(key=lambda w: (w[1], w[0]))
-
         clusters: list[list[tuple]] = []
         for w in header_words:
             if not clusters:
@@ -191,37 +266,118 @@ class BorderlessTableExtractor:
     def _build_markdown_table(
         self,
         words: list[tuple],
+        lines: list[_Line],
+        columns: list[_Column],
+        search_bottom: float,
+    ) -> str:
+        """根据全宽分组线和右侧短 ITEM 线重建 Markdown 表格."""
+        full_ys = [ln.y for ln in lines if ln.full_width]
+        if len(full_ys) < 2:
+            # 没有明显的全宽分组线：退化为每根线作为一个行边界
+            rows = [(lines[i].y, lines[i + 1].y) for i in range(len(lines) - 1)]
+            return self._render_rows(words, rows, columns)
+
+        # 分组：相邻全宽线之间为一个 group；最后一个 group 可能延伸到搜索底部
+        groups: list[tuple[float, float, list[float]]] = []
+        for i in range(len(full_ys) - 1):
+            y0, y1 = full_ys[i], full_ys[i + 1]
+            partials = [ln.y for ln in lines if not ln.full_width and y0 < ln.y < y1]
+            groups.append((y0, y1, sorted(partials)))
+        # 最后一个 group：从最后一条全宽线到 search_bottom
+        last_y = full_ys[-1]
+        partials = [ln.y for ln in lines if not ln.full_width and ln.y > last_y]
+        if partials or self._has_words_between(words, last_y, search_bottom):
+            groups.append((last_y, search_bottom, sorted(partials)))
+
+        if not groups:
+            return ""
+
+        # 第一组是 header 行
+        header_texts = self._cell_texts(words, groups[0][0], groups[0][1], columns)
+        if not any(header_texts):
+            return ""
+
+        md_rows: list[list[str]] = [header_texts]
+        for y0, y1, partials in groups[1:]:
+            classification = self._column_text_in_group(words, y0, y1, columns[0])
+            # 如果该 group 没有右侧 ITEM 线，则按普通列提取整行
+            if not partials:
+                row_cells = self._cell_texts(words, y0, y1, columns)
+                if classification and not row_cells[0]:
+                    row_cells[0] = classification
+                if any(row_cells):
+                    md_rows.append(row_cells)
+                continue
+            # 由 partial 线切分 item 行
+            item_bounds = [y0] + partials + [y1]
+            for k in range(len(item_bounds) - 1):
+                item_text = self._column_text_in_group(
+                    words, item_bounds[k], item_bounds[k + 1], columns[-1]
+                )
+                if classification or item_text:
+                    md_rows.append([classification, item_text])
+
+        return self._rows_to_markdown(md_rows)
+
+    def _render_rows(
+        self,
+        words: list[tuple],
         rows: list[tuple[float, float]],
         columns: list[_Column],
     ) -> str:
-        """根据行区间和列中心重建 Markdown 表格."""
-        # 用 header 单元格的几何中心作为列代表位置
-        col_centers = [(col.x0 + col.x1) / 2 for col in columns]
-
-        md_rows: list[list[str]] = []
+        """无全宽分组线时的退化渲染."""
+        md_rows = []
         for y0, y1 in rows:
-            row_words = [w for w in words if y0 < (w[1] + w[3]) / 2 < y1]
-            cells: list[str] = []
-            for col_idx, _ in enumerate(columns):
-                # 取 word 中心与该列中心最近的单词
-                cell_words: list[tuple] = []
-                for w in row_words:
-                    word_center = (w[0] + w[2]) / 2
-                    distances = [abs(word_center - c) for c in col_centers]
-                    if min(distances) == distances[col_idx]:
-                        cell_words.append(w)
-                # 按阅读顺序（从上到下、从左到右）排序后合并
-                cell_words.sort(key=lambda w: (w[1], w[0]))
-                cell_text = " ".join(w[4] for w in cell_words).strip()
-                cells.append(cell_text)
-            md_rows.append(cells)
+            md_rows.append(self._cell_texts(words, y0, y1, columns))
+        return self._rows_to_markdown(md_rows)
 
-        if not md_rows:
+    def _cell_texts(
+        self,
+        words: list[tuple],
+        y0: float,
+        y1: float,
+        columns: list[_Column],
+    ) -> list[str]:
+        """按列中心分配一个行区间内的文字."""
+        col_centers = [(col.x0 + col.x1) / 2 for col in columns]
+        row_words = [w for w in words if y0 < (w[1] + w[3]) / 2 < y1]
+        cells = []
+        for col_idx, _ in enumerate(columns):
+            cell_words = []
+            for w in row_words:
+                word_center = (w[0] + w[2]) / 2
+                distances = [abs(word_center - c) for c in col_centers]
+                if min(distances) == distances[col_idx]:
+                    cell_words.append(w)
+            cell_words.sort(key=lambda w: (w[1], w[0]))
+            cells.append(" ".join(w[4] for w in cell_words).strip())
+        return cells
+
+    def _column_text_in_group(
+        self, words: list[tuple], y0: float, y1: float, column: _Column
+    ) -> str:
+        """提取某一列在 group 区间内的全部文字（用于分类列跨多 ITEM 行的情况）."""
+        col_words = [
+            w
+            for w in words
+            if y0 < (w[1] + w[3]) / 2 < y1
+            and abs((w[0] + w[2]) / 2 - (column.x0 + column.x1) / 2)
+            <= (column.x1 - column.x0) / 2 + 20
+        ]
+        col_words.sort(key=lambda w: (w[1], w[0]))
+        return " ".join(w[4] for w in col_words).strip()
+
+    @staticmethod
+    def _rows_to_markdown(rows: list[list[str]]) -> str:
+        if not rows:
             return ""
-
-        lines: list[str] = []
-        lines.append("| " + " | ".join(md_rows[0]) + " |")
-        lines.append("| " + " | ".join("---" for _ in columns) + " |")
-        for row in md_rows[1:]:
-            lines.append("| " + " | ".join(row) + " |")
+        # 过滤空数据行，保留 header 与 separator
+        filtered = [rows[0]]
+        filtered.append(["---" for _ in rows[0]])
+        for row in rows[1:]:
+            non_empty = [cell for cell in row if cell.strip()]
+            # 只保留至少有两个非空单元格，或仅有非空 item 单元格（续页）的行
+            if len(non_empty) >= 2 or (len(non_empty) == 1 and not row[0].strip()):
+                filtered.append(row)
+        lines = ["| " + " | ".join(r) + " |" for r in filtered]
         return "\n".join(lines)

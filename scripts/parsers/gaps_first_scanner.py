@@ -1070,7 +1070,21 @@ class GapsFirstScanner:
 
             else:  # table
                 table_y0 = caption_rect.y1
-                table_y1 = min(footer_y, caption_rect.y1 + 300)
+                # 表格可能很高（如 AMBA B1.2 跨页），使用 caption 下方 zone 的底部
+                # 而不是固定的 300pt，避免截断
+                caption_zone = next(
+                    (
+                        z
+                        for z in zones
+                        if z.y0 >= caption_rect.y1 - self.CAPTION_OVERLAP_TOLERANCE
+                        and z.y0 <= caption_rect.y1 + self.CAPTION_OVERLAP_TOLERANCE
+                    ),
+                    None,
+                )
+                if caption_zone is not None:
+                    table_y1 = min(footer_y, caption_zone.y1)
+                else:
+                    table_y1 = min(footer_y, caption_rect.y1 + 600)
                 search_ranges = self._exclude_claimed(table_y0, table_y1, claimed_y_ranges)
 
                 # Determine table style / strategy for this page

@@ -397,6 +397,9 @@ class PDFParser:
         # 5. 根据章节结构组织整体 Markdown
         markdown_text = self._organize_by_chapters(page_markdowns, chapter_map, toc)
 
+        # 5b. 合并跨页的 Continued... 表格
+        markdown_text = self._merge_continued_tables(markdown_text)
+
         # 6. 【Milestone 2】最终存在性校验：移除断链图片引用
         markdown_text, all_image_paths = self._validate_image_links(
             markdown_text, all_image_paths, img_dir
@@ -465,6 +468,94 @@ class PDFParser:
             if not inside_table:
                 kept_blocks.append(block)
         return kept_blocks
+
+    @staticmethod
+    def _base_caption(caption: str) -> str:
+        """提取表格 caption 的基础编号，如 'Table B1.2 – Continued...' -> 'Table B1.2'."""
+        m = re.match(r"^(Table|表)\s*[A-Z]?\d+(?:[-\.]\d+)?", caption, re.IGNORECASE)
+        return m.group(0) if m else caption
+
+    @staticmethod
+    def _merge_continued_tables(md: str) -> str:
+        """合并被 'Continued on next page' 拆开的跨页表格."""
+        lines = md.splitlines()
+
+        # 把 markdown 拆分成普通文本段和 table-with-caption 段
+        segments: list[dict] = []
+        current_text: list[str] = []
+        i = 0
+        while i < len(lines):
+            line = lines[i]
+            if re.match(PDFParser.TABLE_CAPTION_RE, line):
+                j = i + 1
+                while j < len(lines) and lines[j].strip() == "":
+                    j += 1
+                if j < len(lines) and lines[j].startswith("|"):
+                    table_start = j
+                    while j < len(lines) and lines[j].startswith("|"):
+                        j += 1
+                    segments.append(
+                        {
+                            "text": current_text,
+                            "caption": line,
+                            "table_lines": lines[table_start:j],
+                        }
+                    )
+                    current_text = []
+                    i = j
+                    continue
+            current_text.append(line)
+            i += 1
+        segments.append({"text": current_text, "caption": None, "table_lines": []})
+
+        # 识别哪些是续表，映射到目标表
+        base_to_target: dict[str, int] = {}
+        merges: dict[int, int] = {}
+        for idx, seg in enumerate(segments):
+            cap = seg.get("caption")
+            if not cap:
+                continue
+            base = PDFParser._base_caption(cap)
+            if "continued from previous page" in cap.lower():
+                if base in base_to_target:
+                    merges[idx] = base_to_target[base]
+            else:
+                base_to_target[base] = idx
+
+        # 合并数据行
+        for cont_idx, target_idx in merges.items():
+            cont_table = segments[cont_idx]["table_lines"]
+            data_rows = cont_table[2:] if len(cont_table) >= 2 else cont_table
+            segments[target_idx]["table_lines"].extend(data_rows)
+
+        # 填充续表中空缺的 Classification 列（复制同表上方最近非空值）
+        for seg in segments:
+            if not seg["caption"]:
+                continue
+            table_lines = seg["table_lines"]
+            last_cls = ""
+            for row_idx, row in enumerate(table_lines):
+                if not row.startswith("|"):
+                    continue
+                parts = [p.strip() for p in row.split("|")]
+                # parts[0] 为空，parts[1] 是第一单元格，parts[-1] 为空
+                if len(parts) >= 3:
+                    if parts[1]:
+                        last_cls = parts[1]
+                    elif last_cls and row_idx >= 2:
+                        parts[1] = last_cls
+                        seg["table_lines"][row_idx] = "| " + " | ".join(parts[1:-1]) + " |"
+
+        # 重建 markdown
+        out_lines: list[str] = []
+        for idx, seg in enumerate(segments):
+            if idx in merges:
+                continue
+            out_lines.extend(seg["text"])
+            if seg["caption"]:
+                out_lines.append(seg["caption"])
+                out_lines.extend(seg["table_lines"])
+        return "\n".join(out_lines)
 
     @staticmethod
     def _build_table_elements_from_gaps(gaps_result: GapsPageResult) -> list[dict[str, Any]]:
