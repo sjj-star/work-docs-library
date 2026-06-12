@@ -1006,44 +1006,70 @@ class GapsFirstScanner:
                 if not clusters:
                     continue
 
-                # Sort clusters by distance to caption
+                # Build per-cluster bounding boxes.
+                cluster_bounds = [
+                    fitz.Rect(
+                        min(r.x0 for r in cl),
+                        min(r.y0 for r in cl),
+                        max(r.x1 for r in cl),
+                        max(r.y1 for r in cl),
+                    )
+                    for cl in clusters
+                ]
+
+                # Group clusters into connected components using the same gap
+                # thresholds used before. This captures vertically stacked
+                # subfigures (e.g. sprui07 page 692) and side-by-side diagrams
+                # (page 276/390) without depending on a fragile anchor order.
+                n = len(clusters)
+                parent = list(range(n))
+
+                def _find(a: int) -> int:
+                    while parent[a] != a:
+                        parent[a] = parent[parent[a]]
+                        a = parent[a]
+                    return a
+
+                def _union(a: int, b: int) -> None:
+                    ra, rb = _find(a), _find(b)
+                    if ra != rb:
+                        parent[ra] = rb
+
+                for i in range(n):
+                    bi = cluster_bounds[i]
+                    for j in range(i + 1, n):
+                        bj = cluster_bounds[j]
+                        gap_x = max(bi.x0 - bj.x1, bj.x0 - bi.x1, 0)
+                        gap_y = max(bi.y0 - bj.y1, bj.y0 - bi.y1, 0)
+                        if gap_x <= 120 and gap_y <= 50:
+                            _union(i, j)
+
+                components: dict[int, list[int]] = {}
+                for i in range(n):
+                    root = _find(i)
+                    components.setdefault(root, []).append(i)
+
+                # Pick the component closest to the caption. For a figure above
+                # the caption this is the lowest component; for a figure below,
+                # the highest. Tiny isolated components are naturally ignored.
                 if best_zone.y1 <= caption_rect.y0 + self.CAPTION_OVERLAP_TOLERANCE:
-                    sorted_clusters = sorted(
-                        clusters, key=lambda c: max(r.y1 for r in c), reverse=True
+                    # Figure is above caption: prefer lowest component (nearest y1)
+                    nearest_component = max(
+                        components.values(),
+                        key=lambda idxs: max(cluster_bounds[i].y1 for i in idxs),
                     )
                 else:
-                    sorted_clusters = sorted(clusters, key=lambda c: min(r.y0 for r in c))
-
-                # Always prefer the largest cluster as anchor to avoid tiny
-                # edge elements (e.g. a single arrow line) swallowing the main
-                # diagram body.
-                largest = max(clusters, key=lambda c: len(c))
-                sorted_clusters = [largest] + [c for c in sorted_clusters if c is not largest]
-
-                # Merge clusters whose bounding boxes are close in both axes.
-                # Thresholds increased to handle side-by-side diagrams (page 276/390)
-                # and caption-to-body gaps (page 789).
-                target_cluster: list[fitz.Rect] = list(sorted_clusters[0])
-                merged = fitz.Rect(
-                    min(r.x0 for r in sorted_clusters[0]),
-                    min(r.y0 for r in sorted_clusters[0]),
-                    max(r.x1 for r in sorted_clusters[0]),
-                    max(r.y1 for r in sorted_clusters[0]),
-                )
-                for next_cl in sorted_clusters[1:]:
-                    next_bounds = fitz.Rect(
-                        min(r.x0 for r in next_cl),
-                        min(r.y0 for r in next_cl),
-                        max(r.x1 for r in next_cl),
-                        max(r.y1 for r in next_cl),
+                    # Figure is below caption: prefer highest component (nearest y0)
+                    nearest_component = min(
+                        components.values(),
+                        key=lambda idxs: min(cluster_bounds[i].y0 for i in idxs),
                     )
-                    gap_x = max(merged.x0 - next_bounds.x1, next_bounds.x0 - merged.x1, 0)
-                    gap_y = max(merged.y0 - next_bounds.y1, next_bounds.y0 - merged.y1, 0)
-                    if gap_x <= 120 and gap_y <= 50:
-                        target_cluster.extend(next_cl)
-                        merged |= next_bounds
-                    else:
-                        break
+
+                target_cluster: list[fitz.Rect] = []
+                merged = fitz.Rect()
+                for i in nearest_component:
+                    target_cluster.extend(clusters[i])
+                    merged |= cluster_bounds[i]
 
                 all_rects = target_cluster
                 if not all_rects:

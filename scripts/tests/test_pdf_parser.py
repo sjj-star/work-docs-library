@@ -488,6 +488,25 @@ def test_fixture_sprui07_page_209_i2c_timing_diagrams():
     assert 720 < clips[1].y1 < 740
 
 
+def test_fixture_sprui07_page_692_stacked_diagram_not_truncated(tmp_path):
+    """sprui07 page 692：四个纵向堆叠的时序图应被合并为一张完整图片.
+
+    修复前只捕获最下方子图 (d)，上半部分 (a)-(c) 丢失并在 Markdown 中重复输出。
+    """
+    pdf_path = Path("scripts/tests/fixtures/pdf_pages/sprui07_page_692.pdf")
+    if not pdf_path.exists():
+        pytest.skip("fixture not found: sprui07_page_692.pdf")
+
+    parser = PDFParser()
+    md, img_paths = parser.parse(str(pdf_path), output_dir=str(tmp_path / "out"))
+
+    assert "Figure 12-35. Activity on McBSP Pins for the Possible Values of XMCM" in md
+    assert len(img_paths) == 1
+    # 子图标题应被纳入 diagram 图片，而不是在 Markdown 正文中重复出现
+    assert "(a) XMCM = 00b" not in md
+    assert "(d) XMCM = 11b" not in md
+
+
 def test_fixture_spru430f_page_015_conceptual_diagram():
     """Test fixture spru430f page 015 conceptual diagram."""
     clips = _load_fixture("spru430f_page_015")
