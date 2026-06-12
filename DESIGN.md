@@ -859,13 +859,15 @@ def _classify_table_style(zone):
 **机制与策略分离原则**：`_classify_table_style` 识别表格风格（机制），`process_page` 根据风格选择 `find_tables` 策略（策略）。
 
 **策略选择规则**：
-- 页面有任何 orphan zone 被分类为 `horizontal` → 整页使用 `lines` 策略
+- 页面有任何 orphan zone 被分类为 `horizontal_borderless`（零高度横线占多数）→ 直接调用 `BorderlessTableExtractor`，不再走 `find_tables`
+- 页面有任何 orphan zone 被分类为 `horizontal`（普通横线表）→ 整页使用 `lines` 策略
 - 页面只有 `grid` 风格的 orphan zones → 整页使用 `lines_strict` 策略
 
 **原因**：
 - `lines_strict` 对 grid 表格精确（误报低），对 horizontal 表格完全失效
-- `lines` 能检测 horizontal 表格，但对 grid 表格误报更多
-- 按页自适应，避免全文档统一策略的"一刀切"问题
+- `lines` 能检测普通 horizontal 表格，但对 grid 表格误报更多
+- 零高度横线的 AMBA 风格表格无法被 `find_tables` 任何策略识别，需要专门的几何提取器
+- 按页自适应、按风格直接路由，避免全文档统一策略的"一刀切"问题
 
 **实测效果**（4 文档基准）：
 
@@ -910,7 +912,13 @@ def _classify_table_style(zone):
 
 **根因**：这些线条的 **height=0.0**（y0 == y1），是数学意义上的**零高度线**。`find_tables` 的内部算法无法识别零高度线条。
 
-**结论**：这是 **PyMuPDF C 库层面的限制**，非代码层面可解决。AMBA 文档的表格提取率为 0 是已知限制。如需支持，需要自行实现基于文本对齐分析的表格识别算法。
+**结论与修复**：这是 `find_tables` 的固有缺陷。为支持此类表格，新增 `scripts/parsers/borderless_table_extractor.py`：
+- 以 caption 为锚点，在下方区域搜索水平线并去重，得到行边界；
+- 用 header 行单词的 x 位置聚类出列中心；
+- 按行区间 + 最近列中心分配 word，重建 Markdown 表格。
+- `GapsFirstScanner._classify_table_style` 新增 `horizontal_borderless` 风格；`process_page` 在识别到该风格时直接路由到 `BorderlessTableExtractor`，不再调用 `find_tables`。
+
+**验证**：对 AMBA CHI page 28（`Table B1.1`）实测可正确提取 3 列 4 行的无边框表格。
 
 #### 18.8.2 `tab.cells` 空伪表格：PyMuPDF 边界情况
 
@@ -1310,7 +1318,7 @@ Step 1: 内容分类（8 种类型）
 | **本地 PDF 解析目录页换行** | 目录页多行条目保留为多行 | 目录页对知识提取影响小，接受此行为 |
 | **本地 PDF 解析依赖 TOC** | 无 TOC 的 PDF 回退到启发式规则 | `_fallback_heading_detection` 提供降级方案 |
 | **_is_heading 仅识别 Markdown #** | 已删除数字编号/中文编号匹配，目录条目（如 "1 Introduction 7"）不再被识别为 heading | 目录文本被收集为 heading 之间的 content，可能混入正文 batch；当前接受此行为，后续可通过机制层策略处理 |
-| **AMBA 零高度线表格不可提取** | AMBA 表格的水平线为 height=0.0 的零高度矢量线，`find_tables` 的任何策略（lines_strict/lines/text）均无法识别 | 这是 PyMuPDF C 库层面的限制；`_classify_table_style` 能正确分类但无法提取；如需支持需自行实现文本对齐分析算法 |
+| **AMBA 零高度线表格提取** | AMBA 表格的水平线为 height=0.0 的零高度矢量线，`find_tables` 的任何策略（lines_strict/lines/text）均无法识别 | 已实现 `BorderlessTableExtractor`，对 `horizontal_borderless` 风格直接路由，可正确提取此类表格；跨页续表仍按页独立 |
 | **TABLE_CAPTION_RE 误匹配正文引用句** | `"Table X.X describes..."` 等正文引用句被正则匹配为 caption，导致所在页面触发 find_tables 但无对应表格 | AMBA 文档中发生 191 次误匹配；GapsFirstScanner 的预计算机制使误触发成本从"多次 clip 调用"降至"一次全页扫描"，影响已大幅降低 |
 | **跨页续表碎片化** | `find_tables()` 按页独立处理，无法识别 `"Continued from previous page"` 的跨页上下文 | AMBA 中 93 页跨页续表；GapsFirstScanner 的 zone 模型使续页 caption 能正确定位表格 zone，但 `find_tables` 仍只能提取当前页的部分行 |
 | **冲突日志无关系级记录** | `add_relation` 冲突只记录 property_key，不记录完整关系上下文 | 冲突日志包含 from/to/type 信息，可定位 |

@@ -211,13 +211,15 @@ PYTHONPATH=scripts ./.venv/bin/python -m pytest \
   2. 阻止 `load_dotenv` 重新加载 `.env` 文件
   3. 重定向 Config 默认路径到临时目录（DB、FAISS、Graph 均隔离）
 - **回归即修复**：任何导致测试失败的变更必须当场修复
-- **382 个测试用例必须全部通过**（2 个 skipped 为正常：真实文档参数集为空）
+- **388 个测试用例必须全部通过**（2 个 skipped 为正常：真实文档参数集为空）
 
 ### 测试文件清单
 | 测试文件 | 说明 |
 |----------|------|
 | `test_plugin_router.py` | Plugin 工具路由、参数解析 |
-| `test_pdf_parser.py` | PDF 解析核心测试（66 用例，含 13 个真实页面 fixture） |
+| `test_pdf_parser.py` | PDF 解析核心测试（72+ 用例，含 13 个真实页面 fixture） |
+| `test_borderless_table_extractor.py` | AMBA 风格无边框表格提取单元测试 |
+| `test_table_utils.py` | Markdown 表格规范化单元测试 |
 | `test_office_parser.py` | DOCX / XLSX 解析测试 |
 | `test_db.py` | SQLite 操作、事务管理 |
 | `test_vector_index.py` | FAISS 索引增删查、持久化 |
@@ -416,8 +418,9 @@ monkeypatch.setattr(
 - ✅ **AMBA 零高度线调研**：AMBA 表格水平线为 height=0.0 的零高度矢量线，find_tables 任何策略均无法识别，确认为 PyMuPDF C 库层面限制
 - ✅ **`tab.cells` 空伪表格防御**：`find_tables()` 返回 cells=[] 的伪表格导致 `tab.bbox` 触发 `ValueError`，添加防御性跳过
 - ✅ **`_fix_drawing_rect` 前零高度线统计**：在 rect 扩展前统计原始 drawing 的 `height==0.0`，避免检测永远失效
-- ✅ **`_classify_table_style` v2**：去掉 `len<10` 门槛，增加 drawing 风格分类（h/v/other）、文本密度过滤（<0.02 text/pt）、零高度线过滤（>50% 时跳过）
+- ✅ **`_classify_table_style` v2/v3**：去掉 `len<10` 门槛，增加 drawing 风格分类（h/v/other）、文本密度过滤（<0.02 text/pt）、零高度线过滤（>50% 时跳过）；新增 `horizontal_borderless` 风格并按风格直接路由到 `BorderlessTableExtractor`，不做 fallback
 - ✅ **空跑率优化**：TI 15.9%→1.4%，AMBA 92.9%→0.0%，SPRUI07 10.4%→8.8%，DC_UG 31.0%→28.6%
+- ✅ **AMBA 零高度线表格提取**：新增 `scripts/parsers/borderless_table_extractor.py`，基于横线 + 文本 x 对齐重建 Markdown 表格；`GapsFirstScanner` 识别 `horizontal_borderless` 后直接进入该提取器，不再尝试 `find_tables`
 - ✅ **解析器输出格式改为 PNG**：矢量图/光栅图/表格区域统一输出 PNG（无损高保真），移除 `PARSER_IMAGE_JPEG_QUALITY` 配置；LLM API 发送时的压缩由 `_compress_image_to_base64` 独立处理（三层分类策略不变）
 
 ### 下一阶段（精确到下一步）
@@ -434,7 +437,8 @@ monkeypatch.setattr(
 
 **当前状态**（2026-06-10）：
 - Grid 表格（TI/SPRUI07）：`lines_strict` 有效，自适应策略已优化
-- Horizontal 表格（AMBA）：**不可提取**，PyMuPDF C 库层面限制
+- Horizontal 表格（AMBA）：已通过 `BorderlessTableExtractor` 支持零高度线风格表格；普通 horizontal 表格仍走 `find_tables(strategy="lines")`
+- 路由原则：先由 `_classify_table_style` 判断风格，再直接调用最优方法，不做 fallback
 - 误触发成本：预计算机制使 TABLE_CAPTION_RE 误匹配的影响从 "142 次 clip 调用" 降至 "一次全页扫描"
 - 空跑率：TI 1.4% / AMBA 0.0% / SPRUI07 8.8% / DC_UG 28.6%（v2 算法，详见 DESIGN.md 18.8.4）
 
