@@ -1451,15 +1451,9 @@ def test_parse_sprui07_page_080_extracts_tables_and_diagrams(tmp_path):
     md, img_paths = parser.parse(str(pdf_path), output_dir=str(tmp_path / "out"))
 
     # 三个表格 caption 均保留
-    assert (
-        "Table 1-28. Watchdog Counter Register (WDCNTR) Field Descriptions" in md
-    )
-    assert (
-        "Table 1-29. Watchdog Reset Key Register (WDKEY) Field Descriptions" in md
-    )
-    assert (
-        "Table 1-30. Watchdog Control Register (WDCR) Field Descriptions" in md
-    )
+    assert "Table 1-28. Watchdog Counter Register (WDCNTR) Field Descriptions" in md
+    assert "Table 1-29. Watchdog Reset Key Register (WDKEY) Field Descriptions" in md
+    assert "Table 1-30. Watchdog Control Register (WDCR) Field Descriptions" in md
 
     # 三个位域图 caption 均保留，并渲染为图片
     assert "Figure 1-28. Watchdog Counter Register (WDCNTR)" in md
@@ -1470,3 +1464,110 @@ def test_parse_sprui07_page_080_extracts_tables_and_diagrams(tmp_path):
     # 至少提取出 3 个 Markdown 表格（表头 + 分隔 + 若干行）
     table_lines = [line for line in md.splitlines() if line.startswith("|")]
     assert len(table_lines) >= 6
+
+
+# ---------------------------------------------------------------------------
+# 分组无边框表格（partial-line）与跨页续表回归测试
+# ---------------------------------------------------------------------------
+
+
+def _make_pdf_with_grouped_borderless_table(path, caption, groups, item_x=220):
+    """生成 AMBA B1.2 风格的分组无边框表格 PDF.
+
+    groups: list of (classification, [item1, item2, ...])
+    每个 group 内部用右侧短 ITEM 线分隔，group 之间用全宽线分隔。
+    """
+    doc = fitz.open()
+    page = doc.new_page()
+    x0, y0 = 72, 200
+    table_width = 460
+    row_height = 30
+
+    # caption 放在表格上方
+    page.insert_text((x0, y0 - 15), caption)
+
+    # 表顶线（全宽）
+    line_y = y0
+    page.draw_line((x0, line_y), (x0 + table_width, line_y), color=(0, 0, 0))
+
+    # header 行
+    page.insert_text((x0 + 8, y0 + 15), "Classification")
+    page.insert_text((item_x, y0 + 15), "Items")
+
+    line_y += row_height  # header bottom / first group top
+    page.draw_line((x0, line_y), (x0 + table_width, line_y), color=(0, 0, 0))
+
+    for classification, items in groups:
+        group_top = line_y
+        # 每个 item 占一个 row_height，item 之间用右侧短 ITEM 线分隔
+        for idx, item in enumerate(items):
+            item_y = group_top + idx * row_height + 15
+            page.insert_text((item_x, item_y), item)
+            if idx < len(items) - 1:
+                line_y += row_height
+                page.draw_line(
+                    (item_x, line_y),
+                    (x0 + table_width, line_y),
+                    color=(0, 0, 0),
+                )
+        # group 底线（全宽）
+        line_y += row_height
+        page.draw_line((x0, line_y), (x0 + table_width, line_y), color=(0, 0, 0))
+        # classification 放在 group 中间偏左
+        cls_y = (group_top + line_y) / 2
+        page.insert_text((x0 + 8, cls_y), classification)
+
+    doc.save(str(path))
+    doc.close()
+
+
+def test_parse_extracts_grouped_borderless_table_with_partial_lines(tmp_path):
+    """分组表格中第一个 item 行不应丢失（修复 rows[2:] 误跳过首行）."""
+    pdf_path = tmp_path / "grouped_borderless_table.pdf"
+    groups = [
+        ("Read", ["ReadNoSnp", "ReadOnce", "ReadUnique"]),
+        ("Write", ["WriteNoSnpPtl", "WriteNoSnpFull"]),
+    ]
+    _make_pdf_with_grouped_borderless_table(
+        pdf_path, "Table B1.2. Transaction classification", groups
+    )
+
+    parser = PDFParser()
+    md, _ = parser.parse(str(pdf_path), output_dir=str(tmp_path / "out"))
+
+    table_lines = [line for line in md.splitlines() if line.startswith("|")]
+    # header + separator + 5 data rows
+    assert len(table_lines) == 7, f"unexpected table lines: {table_lines}"
+    assert "| Read | ReadNoSnp |" in md
+    assert "| Read | ReadOnce |" in md
+    assert "| Read | ReadUnique |" in md
+    assert "| Write | WriteNoSnpPtl |" in md
+    assert "| Write | WriteNoSnpFull |" in md
+
+
+def test_merge_continued_tables_appends_rows_and_fills_classification():
+    """_merge_continued_tables 应合并跨页续表并回填空的 Classification 列."""
+    md = (
+        "# Section\n\n"
+        "Table B1.2. Transaction classification\n\n"
+        "| Classification | Supporting transactions |\n"
+        "| --- | --- |\n"
+        "| Read | ReadNoSnp |\n"
+        "| Read | ReadOnce |\n\n"
+        "Table B1.2 – Continued from previous page\n\n"
+        "| Classification | Supporting transactions |\n"
+        "| --- | --- |\n"
+        "| | WriteNoSnpPtl |\n"
+        "| | WriteNoSnpFull |\n"
+    )
+    merged = PDFParser._merge_continued_tables(md)
+
+    # 只保留一个 caption
+    assert merged.count("Table B1.2") == 1
+
+    table_lines = [line for line in merged.splitlines() if line.startswith("|")]
+    data_rows = [line for line in table_lines if "---" not in line][1:]
+    assert "| Read | ReadNoSnp |" in data_rows
+    assert "| Read | ReadOnce |" in data_rows
+    assert "| Read | WriteNoSnpPtl |" in data_rows
+    assert "| Read | WriteNoSnpFull |" in data_rows
