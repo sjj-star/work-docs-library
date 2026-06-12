@@ -5,7 +5,7 @@ from pathlib import Path
 
 import fitz
 import pytest
-from parsers.gaps_first_scanner import GapsFirstScanner
+from parsers.gaps_first_scanner import GapsFirstScanner, GapsPageResult
 from parsers.pdf_parser import PDFParser
 
 
@@ -1063,8 +1063,8 @@ def test_detect_tables_with_caption(tmp_path):
     md_text, _ = parser.parse(str(pdf_path), output_dir=str(tmp_path / "out"))
 
     # Should contain markdown table
-    assert "|Header1|Header2|Header3|" in md_text
-    assert "|Cell A1|Cell B1|Cell C1|" in md_text
+    assert "| Header1 | Header2 | Header3 |" in md_text
+    assert "| Cell A1 | Cell B1 | Cell C1 |" in md_text
     # Body text should still be present
     assert "body text after the table" in md_text
 
@@ -1112,12 +1112,12 @@ def test_build_page_markdown_with_tables():
     lines = md.split("\n")
     # Order should be: text before, table, text after
     assert "Paragraph before table" in lines[0]
-    assert "|A|B|" in md
+    assert "| A | B |" in md
     assert "Paragraph after table" in md
 
     # Table should appear between the two paragraphs
     before_idx = md.find("Paragraph before table")
-    table_idx = md.find("|A|B|")
+    table_idx = md.find("| A | B |")
     after_idx = md.find("Paragraph after table")
     assert before_idx < table_idx < after_idx
 
@@ -1271,3 +1271,171 @@ def test_is_strict_figure_caption():
     # 非 caption
     assert parser._is_strict_figure_caption("Normal paragraph.") is False
 
+
+# ---------------------------------------------------------------------------
+# 表格输出回归测试（Phase 1）
+# ---------------------------------------------------------------------------
+
+
+def test_strip_table_text_blocks_removes_blocks_inside_table():
+    parser = PDFParser()
+    table_bbox = fitz.Rect(50, 100, 500, 200)
+    text_blocks = [
+        {"text": "above", "y0": 50, "y1": 90, "bbox": fitz.Rect(50, 50, 500, 90)},
+        {"text": "inside", "y0": 120, "y1": 180, "bbox": fitz.Rect(50, 120, 500, 180)},
+        {"text": "below", "y0": 210, "y1": 250, "bbox": fitz.Rect(50, 210, 500, 250)},
+    ]
+    table_elements = [{"type": "table", "y0": 100, "y1": 200, "text": "| a |", "bbox": table_bbox}]
+    result = parser._strip_table_text_blocks(text_blocks, table_elements)
+    texts = [b["text"] for b in result]
+    assert "above" in texts
+    assert "below" in texts
+    assert "inside" not in texts
+
+
+def test_build_table_elements_from_gaps_preserves_bbox():
+    parser = PDFParser()
+    gaps_result = GapsPageResult(tables=[{"markdown": "| a |", "bbox": [10, 20, 100, 200]}])
+    elems = parser._build_table_elements_from_gaps(gaps_result)
+    assert len(elems) == 1
+    assert elems[0]["type"] == "table"
+    assert elems[0]["text"] == "| a |"
+    assert isinstance(elems[0]["bbox"], fitz.Rect)
+    assert elems[0]["bbox"] == fitz.Rect(10, 20, 100, 200)
+    assert elems[0]["y0"] == 20
+    assert elems[0]["y1"] == 200
+
+
+def test_build_page_markdown_table_format_no_duplicate_text():
+    parser = PDFParser()
+    table_bbox = fitz.Rect(50, 100, 500, 200)
+    text_blocks = [
+        {"type": "text", "text": "Above paragraph", "y0": 50, "y1": 90, "is_heading": False},
+        {"type": "text", "text": "Cell A Cell B", "y0": 120, "y1": 180, "is_heading": False},
+    ]
+    table_elements = [
+        {
+            "type": "table",
+            "y0": 100,
+            "y1": 200,
+            "text": "| A | B |\n|---|---|\n| a | b |",
+            "bbox": table_bbox,
+        }
+    ]
+    md = parser._build_page_markdown(text_blocks, [], [], table_elements)
+    assert "Cell A" not in md
+    assert "| A | B |" in md
+    assert "| a | b |" in md
+    assert "Above paragraph" in md
+
+
+def _make_pdf_with_grid_table(path, caption, rows, col_widths, row_height=30):
+    doc = fitz.open()
+    page = doc.new_page()
+    x0, y0 = 72, 200
+    n_rows = len(rows)
+    table_width = sum(col_widths)
+    table_height = n_rows * row_height
+
+    for i in range(n_rows + 1):
+        y = y0 + i * row_height
+        page.draw_line((x0, y), (x0 + table_width, y), color=(0, 0, 0))
+    x = x0
+    page.draw_line((x, y0), (x, y0 + table_height), color=(0, 0, 0))
+    for cw in col_widths:
+        x += cw
+        page.draw_line((x, y0), (x, y0 + table_height), color=(0, 0, 0))
+
+    for i, row in enumerate(rows):
+        x = x0
+        for j, cell in enumerate(row):
+            page.insert_text((x + 5, y0 + i * row_height + 20), cell)
+            x += col_widths[j]
+
+    # caption 放在表格上方：GapsFirstScanner 对 table caption 向下搜索
+    page.insert_text((x0, y0 - 15), caption)
+    doc.save(str(path))
+    doc.close()
+
+
+def test_parse_extracts_grid_table_with_valid_markdown(tmp_path):
+    pdf_path = tmp_path / "grid_table.pdf"
+    rows = [["Name", "Value"], ["A", "1"], ["B", "2"]]
+    _make_pdf_with_grid_table(pdf_path, "Table 1-1. Example grid", rows, [120, 80])
+
+    parser = PDFParser()
+    md, img_paths = parser.parse(str(pdf_path), output_dir=str(tmp_path / "out"))
+
+    assert "Table 1-1. Example grid" in md
+    assert len(img_paths) == 0
+
+    table_lines = [line for line in md.splitlines() if line.startswith("|")]
+    assert len(table_lines) >= 3
+    assert any("Name" in line and "Value" in line for line in table_lines)
+    assert any("A" in line and "1" in line for line in table_lines)
+    assert any("B" in line and "2" in line for line in table_lines)
+
+    non_table_lines = [line for line in md.splitlines() if not line.startswith("|")]
+    non_table_text = "\n".join(non_table_lines)
+    # 单元格内容不应在 Markdown 表格外重复出现（caption 本身不含大写 A）
+    assert "A" not in non_table_text
+
+
+# ---------------------------------------------------------------------------
+# 无边框表格（AMBA 风格）路由测试（Phase 2）
+# ---------------------------------------------------------------------------
+
+
+def _make_pdf_with_horizontal_lines_table(path, caption, rows, col_lefts, row_height=25):
+    """生成仅有横线、无竖线的表格 PDF."""
+    doc = fitz.open()
+    page = doc.new_page()
+    x0, y0 = 72, 200
+    n_rows = len(rows)
+    table_width = 460
+
+    # caption 放在表格上方
+    page.insert_text((x0, y0 - 15), caption)
+
+    # 横线（零高度）
+    for i in range(n_rows + 1):
+        y = y0 + i * row_height
+        page.draw_line((x0, y), (x0 + table_width, y), color=(0, 0, 0))
+
+    # 单元格文本
+    for i, row in enumerate(rows):
+        for j, cell in enumerate(row):
+            page.insert_text((col_lefts[j], y0 + i * row_height + 18), cell)
+
+    doc.save(str(path))
+    doc.close()
+
+
+def test_parse_extracts_horizontal_borderless_table(tmp_path):
+    pdf_path = tmp_path / "borderless_table.pdf"
+    rows = [
+        ["Layer", "Granularity", "Function"],
+        ["Protocol", "Transaction", "Generates requests"],
+        ["Network", "Packet", "Packetizes messages"],
+        ["Link", "Flit", "Provides flow control"],
+        ["Stream", "Beat", "Transfers data"],
+    ]
+    _make_pdf_with_horizontal_lines_table(
+        pdf_path, "Table 1-1. Borderless example", rows, [80, 240, 380]
+    )
+
+    parser = PDFParser()
+    md, img_paths = parser.parse(str(pdf_path), output_dir=str(tmp_path / "out"))
+
+    assert "Table 1-1. Borderless example" in md
+    assert len(img_paths) == 0
+
+    table_lines = [line for line in md.splitlines() if line.startswith("|")]
+    assert len(table_lines) >= 6  # header + separator + 4 data rows
+    assert "| Layer | Granularity | Function |" in md
+    assert "| Protocol | Transaction | Generates requests |" in md
+    assert "| Network | Packet | Packetizes messages |" in md
+
+    # 单元格文本不应在 Markdown 表格外重复
+    non_table_text = "\n".join(line for line in md.splitlines() if not line.startswith("|"))
+    assert "Protocol" not in non_table_text

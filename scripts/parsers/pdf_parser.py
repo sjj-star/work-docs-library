@@ -47,8 +47,15 @@ class PDFParser:
     # Reference verbs that indicate a body-text reference sentence rather than
     # a true caption (e.g. "Table B1.3 shows the representations...").
     REFERENCE_VERBS = (
-        "shows", "describes", "lists", "illustrates", "presents",
-        "gives", "provides", "details", "summarizes",
+        "shows",
+        "describes",
+        "lists",
+        "illustrates",
+        "presents",
+        "gives",
+        "provides",
+        "details",
+        "summarizes",
     )
 
     CALLOUT_PREFIXES = ("A.", "B.", "C.", "D.", "E.", "F.", "G.", "H.")
@@ -346,7 +353,11 @@ class PDFParser:
             # 4a. 【Gaps-First】线性区域扫描：表格 + 图片
             page_toc_entries = toc_by_page.get(page_idx, [])
             gaps_result = scanner.process_page(
-                page, page.rect, header_margin, footer_margin, img_dir,
+                page,
+                page.rect,
+                header_margin,
+                footer_margin,
+                img_dir,
                 toc_entries=page_toc_entries,
             )
 
@@ -437,14 +448,20 @@ class PDFParser:
         if not table_elements:
             return text_blocks
 
+        # 兼容未提供 bbox 的历史调用：用 y0/y1 + 全页宽度兜底
+        table_bboxes: list[fitz.Rect] = []
+        for te in table_elements:
+            bbox = te.get("bbox")
+            if bbox is None:
+                bbox = fitz.Rect(0, te.get("y0", 0), 1e9, te.get("y1", 0))
+            elif not isinstance(bbox, fitz.Rect):
+                bbox = fitz.Rect(bbox)
+            table_bboxes.append(bbox)
+
         kept_blocks = []
         for block in text_blocks:
             block_center_y = (block["y0"] + block["y1"]) / 2
-            inside_table = False
-            for te in table_elements:
-                if te["bbox"].y0 <= block_center_y <= te["bbox"].y1:
-                    inside_table = True
-                    break
+            inside_table = any(bbox.y0 <= block_center_y <= bbox.y1 for bbox in table_bboxes)
             if not inside_table:
                 kept_blocks.append(block)
         return kept_blocks
@@ -454,12 +471,14 @@ class PDFParser:
         """从 GapsPageResult 构建表格元素列表（兼容 _build_page_markdown 格式）."""
         table_elements: list[dict[str, Any]] = []
         for table in gaps_result.tables:
+            bbox = fitz.Rect(table.get("bbox", [0, 0, 0, 0]))
             table_elements.append(
                 {
                     "type": "table",
-                    "y0": 0,
-                    "y1": 0,
+                    "y0": bbox.y0,
+                    "y1": bbox.y1,
                     "text": table["markdown"],
+                    "bbox": bbox,
                 }
             )
         return table_elements
@@ -1214,7 +1233,11 @@ class PDFParser:
         非 heading 文本块中的 \n 是 PyMuPDF 的段落内换行，替换为空格以保持同一段落。
         不同文本块之间的 \n\n 是段落分隔。
         """
+        from parsers.table_utils import normalize_markdown_table
+
         table_elements = table_elements or []
+        # 剔除落在表格区域内的文本块，避免 Markdown 表与原始文本重复输出
+        text_blocks = self._strip_table_text_blocks(text_blocks, table_elements)
         elements = text_blocks + raster_images + diagram_images + table_elements
         elements.sort(key=lambda e: e["y0"])
 
@@ -1231,7 +1254,9 @@ class PDFParser:
             elif elem["type"] == "image":
                 parts.append(f"\n![{elem['alt']}]({elem['rel_path']})\n")
             elif elem["type"] == "table":
-                parts.append(f"\n{elem['text']}\n")
+                # 规范化 Markdown 表格格式，确保可被标准渲染器识别
+                table_md = normalize_markdown_table(elem["text"])
+                parts.append(f"\n{table_md}\n")
 
         return "\n\n".join(parts)
 

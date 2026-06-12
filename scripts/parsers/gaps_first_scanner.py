@@ -19,6 +19,9 @@ import fitz
 from core.config import Config
 from PIL import Image
 
+from parsers.borderless_table_extractor import BorderlessTableExtractor
+from parsers.table_utils import normalize_markdown_table
+
 logger = logging.getLogger(__name__)
 
 
@@ -180,9 +183,7 @@ class GapsFirstScanner:
         non_caption_sizes = [
             avg_size for i, (_, _, avg_size) in enumerate(text_blocks) if categories[i] is None
         ]
-        estimated_body_size = (
-            statistics.median(non_caption_sizes) if non_caption_sizes else 10.0
-        )
+        estimated_body_size = statistics.median(non_caption_sizes) if non_caption_sizes else 10.0
         heading_threshold = max(estimated_body_size + 2, self.HEADING_MIN_FONT)
 
         # Second pass: heading (TOC-first, then heuristic fallback)
@@ -302,9 +303,7 @@ class GapsFirstScanner:
         for _txt, rect, _avg_size, cat in classified:
             if cat in ("figure_caption", "table_caption", "heading"):
                 separators.append((cat, rect))
-            elif cat == "body_text" and (
-                rect.height > 20.0 and rect.width > page_rect.width * 0.6
-            ):
+            elif cat == "body_text" and (rect.height > 20.0 and rect.width > page_rect.width * 0.6):
                 separators.append((cat, rect))
         separators.sort(key=lambda x: x[1].y0)
 
@@ -319,7 +318,10 @@ class GapsFirstScanner:
                     last_rect.y1 = max(last_rect.y1, sep_rect.y1)
                     # Prefer caption/heading over body_text/header/footer
                     priority = {
-                        "figure_caption": 4, "table_caption": 3, "heading": 2, "body_text": 1
+                        "figure_caption": 4,
+                        "table_caption": 3,
+                        "heading": 2,
+                        "body_text": 1,
                     }
                     if priority.get(sep_type, 0) > priority.get(last_type, 0):
                         merged[-1] = (sep_type, last_rect)
@@ -534,12 +536,8 @@ class GapsFirstScanner:
             )
         else:
             raw_blocks = page.get_text("blocks", clip=clip)
-            text_blocks = cast(
-                list[tuple[float, float, float, float, str, int, int]], raw_blocks
-            )
-            text_area = sum(
-                (b[2] - b[0]) * (b[3] - b[1]) for b in text_blocks
-            )
+            text_blocks = cast(list[tuple[float, float, float, float, str, int, int]], raw_blocks)
+            text_area = sum((b[2] - b[0]) * (b[3] - b[1]) for b in text_blocks)
         text_ratio = min(text_area / clip_area, 1.0)
 
         # 3. Image presence bonus
@@ -623,7 +621,10 @@ class GapsFirstScanner:
     _UNSCANNED = object()
 
     def _find_tables_in_zone(
-        self, page: fitz.Page, zone: _Zone, page_rect: fitz.Rect,
+        self,
+        page: fitz.Page,
+        zone: _Zone,
+        page_rect: fitz.Rect,
         precomputed_tables: list[Any] | object = _UNSCANNED,
         strategy: str = "lines_strict",
     ) -> list[tuple[str, fitz.Rect]]:
@@ -652,10 +653,7 @@ class GapsFirstScanner:
                 tab_bbox = fitz.Rect(tab.bbox)
                 # Skip tables not mostly inside this zone
                 intersection = tab_bbox & clip_rect
-                if (
-                    not intersection
-                    or intersection.get_area() / tab_bbox.get_area() < 0.5
-                ):
+                if not intersection or intersection.get_area() / tab_bbox.get_area() < 0.5:
                     continue
                 if tab.row_count < self.TABLE_MIN_ROWS or tab.col_count < self.TABLE_MIN_COLS:
                     continue
@@ -665,7 +663,7 @@ class GapsFirstScanner:
                     continue
                 md_table = tab.to_markdown(clean=False)
                 if md_table.strip():
-                    tables_md.append((md_table.strip(), tab_bbox))
+                    tables_md.append((normalize_markdown_table(md_table), tab_bbox))
         except Exception as e:
             pnum = page.number + 1 if page.number is not None else 0
             logger.warning(f"Table detection failed on page {pnum}: {e}")
@@ -686,9 +684,9 @@ class GapsFirstScanner:
         if not zone.drawings:
             return None
 
-        h_lines = 0           # width > height * 3
-        v_lines = 0           # height > width * 3
-        other = 0             # curves, arrows, squares, circles, etc.
+        h_lines = 0  # width > height * 3
+        v_lines = 0  # height > width * 3
+        other = 0  # curves, arrows, squares, circles, etc.
 
         for r in zone.drawings:
             if r.width > r.height * 3:
@@ -709,31 +707,44 @@ class GapsFirstScanner:
         if other > total_lines * 0.5:
             return None
 
+        # 用 drawing 的垂直跨度估计表格实际高度，避免 zone 延伸到页脚导致密度被稀释
+        if zone.drawings:
+            active_height = max(
+                1.0,
+                max(d.y1 for d in zone.drawings) - min(d.y0 for d in zone.drawings),
+            )
+        else:
+            active_height = zone_height
+        text_density = zone.text_block_count / active_height
+
         # Style A: Grid table
         if h_lines >= 4 and v_lines >= 3:
             # Bitfield diagrams have many lines but very few text blocks.
             # A real table should have at least ~1 text block per 50pt of height.
-            if zone.text_block_count / zone_height < 0.02:
+            if text_density < 0.02:
                 logger.debug(
                     f"Grid zone filtered (low text density): "
                     f"y={zone.y0:.0f}-{zone.y1:.0f} text={zone.text_block_count} "
-                    f"density={zone.text_block_count/zone_height:.3f}"
+                    f"density={text_density:.3f}"
                 )
                 return None
             return "grid"
 
-        # Style B: Horizontal-only table
-        if v_lines <= 1 and h_lines >= 6 and zone.text_block_count >= 5:
-            # Zero-height lines (AMBA style): find_tables cannot detect them at all.
-            # If majority of horizontal lines are zero-height, skip to avoid empty runs.
-            # NOTE: h_zero_height is counted BEFORE _fix_drawing_rect expands the rects.
-            if zone.h_zero_height > 0 and zone.h_zero_height >= h_lines * 0.5:
-                logger.debug(
-                    f"Horizontal zone filtered (zero-height lines): "
-                    f"y={zone.y0:.0f}-{zone.y1:.0f} h={h_lines} zero_h={zone.h_zero_height}"
-                )
-                return None
-            return "horizontal"
+        # Style B/C: Horizontal-only tables
+        if v_lines <= 1 and h_lines >= 4 and zone.text_block_count >= 4:
+            zero_ratio = zone.h_zero_height / h_lines if h_lines else 0.0
+            if zero_ratio >= 0.5:
+                # AMBA 风格：只有横线且多为零高度线，find_tables 完全失效
+                if text_density < 0.01:
+                    logger.debug(
+                        f"Borderless zone filtered (low text density): "
+                        f"y={zone.y0:.0f}-{zone.y1:.0f} text={zone.text_block_count} "
+                        f"density={text_density:.3f}"
+                    )
+                    return None
+                return "horizontal_borderless"
+            if h_lines >= 6:
+                return "horizontal"
 
         return None
 
@@ -773,9 +784,7 @@ class GapsFirstScanner:
         figure_captions = [
             (txt, rect) for txt, rect, _, cat in classified if cat == "figure_caption"
         ]
-        table_captions = [
-            (txt, rect) for txt, rect, _, cat in classified if cat == "table_caption"
-        ]
+        table_captions = [(txt, rect) for txt, rect, _, cat in classified if cat == "table_caption"]
 
         # 3. Build hard separators and zones
         separators = self._build_hard_separators(
@@ -866,9 +875,7 @@ class GapsFirstScanner:
                     break
 
         # 5. Sequential top-down processing of all captions
-        footer_y = page_rect.y1 - (
-            footer_margin if footer_margin > 0 else self.FOOTER_MARGIN_PT
-        )
+        footer_y = page_rect.y1 - (footer_margin if footer_margin > 0 else self.FOOTER_MARGIN_PT)
 
         all_captions: list[tuple[float, str, str, fitz.Rect]] = []
         for txt, rect in figure_captions:
@@ -922,9 +929,7 @@ class GapsFirstScanner:
                 for direction, zone in candidates:
                     clusters = self._cluster_drawings(zone.drawings)
                     all_rects = [r for cluster in clusters for r in cluster]
-                    clip = self._build_clip(
-                        all_rects, zone.y0, zone.y1, classified, page_rect
-                    )
+                    clip = self._build_clip(all_rects, zone.y0, zone.y1, classified, page_rect)
                     score = self._score_cluster(all_rects, clip, page, classified)
                     # Prefer closer zone when scores are close (< 0.5 apart)
                     dist = (
@@ -976,16 +981,16 @@ class GapsFirstScanner:
                         for r in sorted(all_rects, key=lambda x: x.y0):
                             if merged and r.y0 <= merged[-1].y1 and r.x0 <= merged[-1].x1:
                                 merged[-1] = fitz.Rect(
-                                    min(merged[-1].x0, r.x0), min(merged[-1].y0, r.y0),
-                                    max(merged[-1].x1, r.x1), max(merged[-1].y1, r.y1),
+                                    min(merged[-1].x0, r.x0),
+                                    min(merged[-1].y0, r.y0),
+                                    max(merged[-1].x1, r.x1),
+                                    max(merged[-1].y1, r.y1),
                                 )
                             else:
                                 merged.append(fitz.Rect(r))
                         drawing_area = sum(r.get_area() for r in merged)
                         drawing_ratio = drawing_area / clip.get_area()
-                        is_table_like = any(
-                            self._is_table_like_cluster(c) for c in clusters
-                        )
+                        is_table_like = any(self._is_table_like_cluster(c) for c in clusters)
                         if drawing_ratio > 0.5 and not is_table_like:
                             best_score = self.FIGURE_MIN_SCORE
                         else:
@@ -1003,17 +1008,13 @@ class GapsFirstScanner:
                         clusters, key=lambda c: max(r.y1 for r in c), reverse=True
                     )
                 else:
-                    sorted_clusters = sorted(
-                        clusters, key=lambda c: min(r.y0 for r in c)
-                    )
+                    sorted_clusters = sorted(clusters, key=lambda c: min(r.y0 for r in c))
 
                 # Always prefer the largest cluster as anchor to avoid tiny
                 # edge elements (e.g. a single arrow line) swallowing the main
                 # diagram body.
                 largest = max(clusters, key=lambda c: len(c))
-                sorted_clusters = [largest] + [
-                    c for c in sorted_clusters if c is not largest
-                ]
+                sorted_clusters = [largest] + [c for c in sorted_clusters if c is not largest]
 
                 # Merge clusters whose bounding boxes are close in both axes.
                 # Thresholds increased to handle side-by-side diagrams (page 276/390)
@@ -1070,62 +1071,99 @@ class GapsFirstScanner:
             else:  # table
                 table_y0 = caption_rect.y1
                 table_y1 = min(footer_y, caption_rect.y1 + 300)
-                search_ranges = self._exclude_claimed(
-                    table_y0, table_y1, claimed_y_ranges
-                )
+                search_ranges = self._exclude_claimed(table_y0, table_y1, claimed_y_ranges)
 
-                # Determine table strategy for this page (if not already)
+                # Determine table style / strategy for this page
+                page_table_style = None
                 table_strategy = "lines_strict"
                 for zone in zones:
                     if zone.consumed or not zone.drawings:
                         continue
                     style = self._classify_table_style(zone)
+                    if style == "grid":
+                        page_table_style = "grid"
+                        table_strategy = "lines_strict"
+                        break
                     if style == "horizontal":
+                        page_table_style = "horizontal"
                         table_strategy = "lines"
                         break
-
-                # Pre-compute tables once if needed
-                all_page_tables: list[Any] = []
-                if self.TABLE_DETECTION_ENABLED and search_ranges:
-                    try:
-                        tabs = page.find_tables(strategy=table_strategy)
-                        if tabs is not None:
-                            all_page_tables = tabs.tables
-                    except Exception:
-                        pass
+                    if style == "horizontal_borderless":
+                        page_table_style = "horizontal_borderless"
+                        break
 
                 found_any = False
-                for s_y0, s_y1 in search_ranges:
-                    zone = _Zone(y0=s_y0, y1=s_y1)
-                    tables_md = self._find_tables_in_zone(
-                        page, zone, page_rect, all_page_tables, table_strategy
-                    )
-                    if tables_md:
-                        # Only keep the first table (closest to caption)
-                        md, tab_bbox = tables_md[0]
-                        result.tables.append(
-                            {
-                                "page_idx": page_idx,
-                                "markdown": md,
-                                "caption": caption_text,
-                                "bbox": [tab_bbox.x0, tab_bbox.y0, tab_bbox.x1, tab_bbox.y1],
-                            }
+                tab_bbox: fitz.Rect | None = None
+
+                if page_table_style == "horizontal_borderless" and search_ranges:
+                    extractor = BorderlessTableExtractor()
+                    for s_y0, s_y1 in search_ranges:
+                        tab_results = extractor.extract(
+                            page, fitz.Rect(page_rect.x0, s_y0, page_rect.x1, s_y1)
                         )
-                        found_any = True
-                        self._add_claimed(tab_bbox.y0, tab_bbox.y1, claimed_y_ranges)
-                        break
+                        if tab_results:
+                            md, tab_bbox = tab_results[0]
+                            result.tables.append(
+                                {
+                                    "page_idx": page_idx,
+                                    "markdown": md,
+                                    "caption": caption_text,
+                                    "bbox": [
+                                        tab_bbox.x0,
+                                        tab_bbox.y0,
+                                        tab_bbox.x1,
+                                        tab_bbox.y1,
+                                    ],
+                                }
+                            )
+                            found_any = True
+                            self._add_claimed(tab_bbox.y0, tab_bbox.y1, claimed_y_ranges)
+                            break
+                else:
+                    # Pre-compute tables once if needed
+                    all_page_tables: list[Any] = []
+                    if self.TABLE_DETECTION_ENABLED and search_ranges:
+                        try:
+                            tabs = page.find_tables(strategy=table_strategy)
+                            if tabs is not None:
+                                all_page_tables = tabs.tables
+                        except Exception:
+                            pass
+
+                    for s_y0, s_y1 in search_ranges:
+                        zone = _Zone(y0=s_y0, y1=s_y1)
+                        tables_md = self._find_tables_in_zone(
+                            page, zone, page_rect, all_page_tables, table_strategy
+                        )
+                        if tables_md:
+                            # Only keep the first table (closest to caption)
+                            md, tab_bbox = tables_md[0]
+                            result.tables.append(
+                                {
+                                    "page_idx": page_idx,
+                                    "markdown": md,
+                                    "caption": caption_text,
+                                    "bbox": [
+                                        tab_bbox.x0,
+                                        tab_bbox.y0,
+                                        tab_bbox.x1,
+                                        tab_bbox.y1,
+                                    ],
+                                }
+                            )
+                            found_any = True
+                            self._add_claimed(tab_bbox.y0, tab_bbox.y1, claimed_y_ranges)
+                            break
 
                 # Mark caption itself as claimed if table found
                 if found_any:
+                    assert tab_bbox is not None
                     self._add_claimed(caption_rect.y0, caption_rect.y1, claimed_y_ranges)
                     # Also mark overlapping zones as consumed to avoid orphan re-processing
                     for z in zones:
                         if z.consumed:
                             continue
-                        # noinspection PyUnboundLocalVariable
-                        overlap = max(
-                            0, min(z.y1, tab_bbox.y1) - max(z.y0, tab_bbox.y0)
-                        )
+                        overlap = max(0, min(z.y1, tab_bbox.y1) - max(z.y0, tab_bbox.y0))
                         if overlap > (z.y1 - z.y0) * 0.5:
                             z.consumed = True
 
@@ -1137,9 +1175,7 @@ class GapsFirstScanner:
             if zone.consumed or not zone.drawings:
                 continue
             # Skip if zone is mostly claimed
-            search_ranges = self._exclude_claimed(
-                zone.y0, zone.y1, claimed_y_ranges
-            )
+            search_ranges = self._exclude_claimed(zone.y0, zone.y1, claimed_y_ranges)
             if not search_ranges:
                 continue
             if self._classify_table_style(zone):
@@ -1167,8 +1203,7 @@ class GapsFirstScanner:
                     )
                     self._add_claimed(tab_bbox.y0, tab_bbox.y1, claimed_y_ranges)
                 if tables_md and not all(
-                    self._is_in_claimed(tab_bbox, claimed_y_ranges)
-                    for _md, tab_bbox in tables_md
+                    self._is_in_claimed(tab_bbox, claimed_y_ranges) for _md, tab_bbox in tables_md
                 ):
                     self._add_claimed(zone.y0, zone.y1, claimed_y_ranges)
 
