@@ -53,6 +53,15 @@ class BorderlessTableExtractor:
     HEADER_WORD_GAP_PT = 12.0
     HEADER_BASELINE_TOLERANCE_PT = 3.0
 
+    # 页脚文字过滤：避免页脚版权/页码进入表格
+    FOOTER_TEXT_EXCLUSION_PT = 60.0
+
+    # 判断一行是否为段落后文本（非表格行）的最小水平间隙
+    MIN_HORIZONTAL_GAP_PT = 25.0
+
+    # rowspan partial 线与列边界对齐容差
+    PARTIAL_COL_TOLERANCE_PT = 10.0
+
     def extract(self, page: fitz.Page, search_rect: fitz.Rect) -> list[tuple[str, fitz.Rect]]:
         """在 search_rect 范围内查找并提取无边框表格.
 
@@ -196,15 +205,21 @@ class BorderlessTableExtractor:
     def _filter_excluded_words(
         self, page: fitz.Page, words: list[tuple], search_rect: fitz.Rect
     ) -> list[tuple]:
-        """过滤掉跨页标记与相邻 caption 文字，避免进入单元格."""
+        """过滤掉跨页标记、相邻 caption 文字与页脚文字，避免进入单元格."""
         exclude_bboxes: list[fitz.Rect] = []
         for block in page.get_text("blocks", clip=search_rect):
             txt = block[4]
             if self._CONTINUATION_RE.search(txt) or self._CAPTION_RE.match(txt.strip()):
                 exclude_bboxes.append(fitz.Rect(block[:4]))
         if not exclude_bboxes:
-            return words
-        return [w for w in words if not any(fitz.Rect(w[:4]).intersects(b) for b in exclude_bboxes)]
+            filtered = words
+        else:
+            filtered = [
+                w for w in words if not any(fitz.Rect(w[:4]).intersects(b) for b in exclude_bboxes)
+            ]
+        # 额外按 y 坐标过滤页脚文字（page number / copyright 等）
+        footer_y = page.rect.y1 - self.FOOTER_TEXT_EXCLUSION_PT
+        return [w for w in filtered if w[1] < footer_y]
 
     @staticmethod
     def _has_words_between(words: list[tuple], y0: float, y1: float) -> bool:
@@ -270,7 +285,7 @@ class BorderlessTableExtractor:
         columns: list[_Column],
         search_bottom: float,
     ) -> str:
-        """根据全宽分组线和右侧短 ITEM 线重建 Markdown 表格."""
+        """根据全宽分组线和 partial 线重建 Markdown 表格."""
         full_ys = [ln.y for ln in lines if ln.full_width]
         if len(full_ys) < 2:
             # 没有明显的全宽分组线：退化为每根线作为一个行边界
@@ -299,23 +314,38 @@ class BorderlessTableExtractor:
 
         md_rows: list[list[str]] = [header_texts]
         for y0, y1, partials in groups[1:]:
-            classification = self._column_text_in_group(words, y0, y1, columns[0])
-            # 如果该 group 没有右侧 ITEM 线，则按普通列提取整行
             if not partials:
+                # 没有 partial 线：按普通列提取整行，但先排除段落后文本
+                if self._max_horizontal_gap(words, y0, y1) < self.MIN_HORIZONTAL_GAP_PT:
+                    continue
                 row_cells = self._cell_texts(words, y0, y1, columns)
-                if classification and not row_cells[0]:
-                    row_cells[0] = classification
                 if any(row_cells):
                     md_rows.append(row_cells)
                 continue
-            # 由 partial 线切分 item 行
+
+            # 泛化 partial-line / rowspan 处理：
+            # partial 线从第 span_n 列开始，之前列在该 group 内跨行。
+            partial_line = next((ln for ln in lines if abs(ln.y - partials[0]) < 0.1), None)
+            span_n = self._span_col_count(partial_line.x0, columns) if partial_line else 1
             item_bounds = [y0] + partials + [y1]
             for k in range(len(item_bounds) - 1):
-                item_text = self._column_text_in_group(
-                    words, item_bounds[k], item_bounds[k + 1], columns[-1]
-                )
-                if classification or item_text:
-                    md_rows.append([classification, item_text])
+                iy0, iy1 = item_bounds[k], item_bounds[k + 1]
+                row = [""] * len(columns)
+                # 跨行列：从整个 group 区间提取
+                for c in range(span_n):
+                    row[c] = self._column_text_in_group(words, y0, y1, columns[c])
+                # 非跨行列：从子区间提取，并排除跨行列区域内的单词
+                sub_words = [
+                    w
+                    for w in words
+                    if iy0 < (w[1] + w[3]) / 2 < iy1
+                    and (w[0] + w[2]) / 2 >= columns[span_n].x0 - self.PARTIAL_COL_TOLERANCE_PT
+                ]
+                sub_cells = self._cell_texts(sub_words, iy0, iy1, columns[span_n:])
+                for j, txt in enumerate(sub_cells):
+                    row[span_n + j] = txt
+                if any(row):
+                    md_rows.append(row)
 
         return self._rows_to_markdown(md_rows)
 
@@ -366,6 +396,23 @@ class BorderlessTableExtractor:
         ]
         col_words.sort(key=lambda w: (w[1], w[0]))
         return " ".join(w[4] for w in col_words).strip()
+
+    @staticmethod
+    def _max_horizontal_gap(words: list[tuple], y0: float, y1: float) -> float:
+        """计算区间内单词按 x 排序后的最大水平间隙，用于区分表格行与连续段落."""
+        ws = [w for w in words if y0 < (w[1] + w[3]) / 2 < y1]
+        if len(ws) < 2:
+            return 0.0
+        ws.sort(key=lambda w: w[0])
+        return max(ws[i][0] - ws[i - 1][2] for i in range(1, len(ws)))
+
+    @staticmethod
+    def _span_col_count(partial_x0: float, columns: list[_Column]) -> int:
+        """根据 partial 线 x0 判断它从哪一列开始，返回需要跨行的列数."""
+        for idx, col in enumerate(columns):
+            if col.x0 >= partial_x0 - 10.0:
+                return idx
+        return len(columns)
 
     @staticmethod
     def _rows_to_markdown(rows: list[list[str]]) -> str:

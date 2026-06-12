@@ -1571,3 +1571,109 @@ def test_merge_continued_tables_appends_rows_and_fills_classification():
     assert "| Read | ReadOnce |" in data_rows
     assert "| Read | WriteNoSnpPtl |" in data_rows
     assert "| Read | WriteNoSnpFull |" in data_rows
+
+
+# ---------------------------------------------------------------------------
+# 多列无边框表格 rowspan 与段落后文本过滤回归测试
+# ---------------------------------------------------------------------------
+
+
+def _make_pdf_with_rowspan_table(path, caption, rows, col_lefts, table_width=460):
+    """生成多列水平线表格 PDF，支持第一列跨行（rowspan）."""
+    doc = fitz.open()
+    page = doc.new_page()
+    x0, y0 = 72, 200
+    row_height = 30
+    header_height = 30
+
+    # caption
+    page.insert_text((x0, y0 - 15), caption)
+
+    # header line
+    line_y = y0
+    page.draw_line((x0, line_y), (x0 + table_width, line_y), color=(0, 0, 0))
+
+    # header cells
+    headers = ["Order", "ExpCompAck", "DMT", "DCT", "Notes"]
+    for txt, left in zip(headers, col_lefts):
+        page.insert_text((left, y0 + 20), txt)
+
+    line_y += header_height
+    page.draw_line((x0, line_y), (x0 + table_width, line_y), color=(0, 0, 0))
+
+    for row in rows:
+        group_top = line_y
+        order_text = row["order"]
+        sub_rows = row["sub_rows"]
+        # 每个 sub_row 占一个 row_height
+        for idx, sub in enumerate(sub_rows):
+            sub_y = group_top + idx * row_height + 20
+            if idx == 0:
+                # Order 跨行，放在 group 中间更美观
+                order_y = group_top + (len(sub_rows) * row_height) / 2 + 5
+                page.insert_text((col_lefts[0], order_y), order_text)
+            for col_idx, cell in enumerate(sub):
+                # col_idx 对应 col_lefts[1:]
+                page.insert_text((col_lefts[col_idx + 1], sub_y), cell)
+            if idx < len(sub_rows) - 1:
+                # partial line：从第 1 列后开始，到表格右边缘
+                line_y += row_height
+                page.draw_line(
+                    (col_lefts[1] - 10, line_y),
+                    (x0 + table_width, line_y),
+                    color=(0, 0, 0),
+                )
+        # group 底线
+        line_y += row_height
+        page.draw_line((x0, line_y), (x0 + table_width, line_y), color=(0, 0, 0))
+
+    # 表格下方正文段落（不应被纳入表格）
+    page.insert_text(
+        (x0, line_y + 25),
+        "For partial transactions, the size is less than 64B. The Home cannot use a DCT flow.",
+    )
+
+    doc.save(str(path))
+    doc.close()
+
+
+def test_parse_extracts_multicolumn_rowspan_table_and_excludes_paragraph(tmp_path):
+    """5 列无边框表格：第一列 rowspan + 表格后正文段落不被吸入表格."""
+    pdf_path = tmp_path / "rowspan_table.pdf"
+    col_lefts = [80, 160, 250, 320, 400]
+    rows = [
+        {
+            "order": "00",
+            "sub_rows": [["0", "Y", "Y", "Note for 00."]],
+        },
+        {
+            "order": "01",
+            "sub_rows": [["-", "-", "-", "Not permitted."]],
+        },
+        {
+            "order": "10 11",
+            "sub_rows": [
+                ["0", "N", "Y", "Note for 10."],
+                ["1", "Y", "Y", "Note for 11."],
+            ],
+        },
+    ]
+    _make_pdf_with_rowspan_table(pdf_path, "Table B2.6. Rowspan example", rows, col_lefts)
+
+    parser = PDFParser()
+    md, _ = parser.parse(str(pdf_path), output_dir=str(tmp_path / "out"))
+
+    table_lines = [line for line in md.splitlines() if line.startswith("|")]
+    # header + separator + 4 data rows
+    assert len(table_lines) == 6, f"unexpected table lines: {table_lines}"
+
+    assert "| Order | ExpCompAck | DMT | DCT | Notes |" in md
+    assert "| 00 | 0 | Y | Y | Note for 00. |" in md
+    assert "| 01 | - | - | - | Not permitted. |" in md
+    assert "| 10 11 | 0 | N | Y | Note for 10. |" in md
+    assert "| 10 11 | 1 | Y | Y | Note for 11. |" in md
+
+    # 正文段落不应出现在表格行中
+    assert "For partial transactions" not in "\n".join(table_lines)
+    # 但正文段落仍应在 Markdown 中保留
+    assert "For partial transactions" in md

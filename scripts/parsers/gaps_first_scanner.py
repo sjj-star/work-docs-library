@@ -731,7 +731,8 @@ class GapsFirstScanner:
             return "grid"
 
         # Style B/C: Horizontal-only tables
-        if v_lines <= 1 and h_lines >= 4 and zone.text_block_count >= 4:
+        # threshold 3 覆盖只有表头 + 一行数据 + Continued... 的底部表格（如 AMBA B2.6 page 59）
+        if v_lines <= 1 and h_lines >= 4 and zone.text_block_count >= 3:
             zero_ratio = zone.h_zero_height / h_lines if h_lines else 0.0
             if zero_ratio >= 0.5:
                 # AMBA 风格：只有横线且多为零高度线，find_tables 完全失效
