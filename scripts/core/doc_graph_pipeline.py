@@ -899,7 +899,7 @@ class EntityExtractor:
             results = self.batch_client.submit_parallel_batches(requests)
         except Exception as e:
             logger.error(f"Batch 请求失败 | error={e}")
-            return [], [], []
+            raise
 
         return self._parse_results(results, batches, doc_id)
 
@@ -2007,9 +2007,10 @@ class DocGraphPipeline:
                 finally:
                     embedder.close()
 
-        # 4. 统一写入 SQLite（block_db_id）和 FAISS（faiss_id），带失败回滚
+        # 4. 写入 FAISS（faiss_id）和 SQLite（block_db_id）。先写 FAISS 再写 SQLite，
+        # 避免 SQLite 中已存在 embedding 记录但向量索引缺失。FAISS 失败时仍回滚 SQLite。
+        # TODO: 理想情况应使用两阶段提交，SQLite 失败时也能回滚 FAISS。
         if sqlite_items:
-            self.db.update_blocks_embedded_batch(sqlite_items)
             try:
                 self.vec.add_batch(faiss_items)
             except Exception as e:
@@ -2026,6 +2027,7 @@ class DocGraphPipeline:
                                 (json.dumps(meta, ensure_ascii=False), block_db_id),
                             )
                 raise
+            self.db.update_blocks_embedded_batch(sqlite_items)
 
         # 5. 更新状态为 done
         for block in db_blocks:

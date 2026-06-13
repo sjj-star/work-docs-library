@@ -156,3 +156,42 @@ def test_parse_pdf_full_flow(monkeypatch, tmp_path):
     assert "Hello world." in md_text
     assert len(images) == 1
     assert images[0].name == "image.png"
+
+
+def test_parse_pdf_rejects_zip_path_traversal(monkeypatch, tmp_path):
+    """parse_pdf 应拒绝包含路径遍历的恶意 ZIP 条目，且不写入 output_dir 之外."""
+    client = BigModelParserClient(api_key="test-key")
+
+    # 构建包含恶意路径遍历条目的 ZIP
+    zip_buf = io.BytesIO()
+    with zipfile.ZipFile(zip_buf, "w") as zf:
+        zf.writestr("result.md", "# Safe")
+        zf.writestr("../../../evil.txt", "malicious")
+    zip_bytes = zip_buf.getvalue()
+
+    def fake_post(url, **kwargs):
+        return FakeResponse(json_data={"task_id": "task-traversal"})
+
+    def fake_get(url, **kwargs):
+        if "result" in url:
+            return FakeResponse(
+                json_data={
+                    "status": "succeeded",
+                    "parsing_result_url": "http://x.zip",
+                    "data": {"parsingResultUrl": "http://x.zip"},
+                }
+            )
+        return FakeResponse(content=zip_bytes)
+
+    monkeypatch.setattr("core.bigmodel_parser_client.requests.post", fake_post)
+    monkeypatch.setattr("core.bigmodel_parser_client.requests.get", fake_get)
+
+    pdf = tmp_path / "test.pdf"
+    pdf.write_bytes(b"pdf")
+    output_dir = tmp_path / "a" / "b" / "extracted"
+
+    with pytest.raises(ValueError):
+        client.parse_pdf(pdf, output_dir=output_dir)
+
+    # 确认没有文件被写到 output_dir 之外
+    assert not (tmp_path / "evil.txt").exists()

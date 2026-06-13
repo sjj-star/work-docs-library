@@ -324,7 +324,7 @@ class BaseBatchClient(ABC):
             for future in as_completed(future_to_idx):
                 idx = future_to_idx[future]
                 try:
-                    results = future.result()
+                    results = future.result(timeout=timeout)
                     all_results.extend(results)
                     logger.info(f"Chunk {idx} 完成 | results={len(results)}")
                 except Exception as e:

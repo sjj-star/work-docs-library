@@ -166,7 +166,19 @@ class BigModelParserClient:
                 info = z.getinfo(name)
                 if info.is_dir():
                     continue
+
+                # Defensive ZIP path validation: block absolute paths, parent
+                # directory traversal, and Windows-style drive/colon/backslash.
+                if name.startswith("/") or ".." in name or ":" in name or "\\" in name:
+                    raise ValueError(f"Malformed ZIP entry path: {name!r}")
                 target = output_dir / name
+                target_resolved = target.resolve()
+                output_resolved = output_dir.resolve()
+                if not target_resolved.is_relative_to(output_resolved):
+                    raise ValueError(
+                        f"ZIP entry escapes output directory: {name!r} -> {target_resolved}"
+                    )
+
                 target.parent.mkdir(parents=True, exist_ok=True)
                 with open(target, "wb") as f:
                     f.write(z.read(name))

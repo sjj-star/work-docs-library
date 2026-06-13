@@ -333,14 +333,10 @@ class Config:
         )
         # GapsFirstScanner 参数（Caption-driven 提取器）
         cls.PARSER_FIGURE_MIN_SCORE = float(
-            _resolve_config(
-                "WORKDOCS_PARSER_FIGURE_MIN_SCORE", "parser.figure_min_score", "2.0"
-            )
+            _resolve_config("WORKDOCS_PARSER_FIGURE_MIN_SCORE", "parser.figure_min_score", "2.0")
         )
         cls.PARSER_EDGE_LABEL_MAX_LEN = int(
-            _resolve_config(
-                "WORKDOCS_PARSER_EDGE_LABEL_MAX_LEN", "parser.edge_label_max_len", "30"
-            )
+            _resolve_config("WORKDOCS_PARSER_EDGE_LABEL_MAX_LEN", "parser.edge_label_max_len", "30")
         )
         # Plugin 默认值
         cls.PLUGIN_SEARCH_TOP_K = int(
@@ -386,7 +382,8 @@ class Config:
                 continue
             if isinstance(val, Path):
                 val = str(val)
-            if key in sensitive_keys and mask_sensitive and isinstance(val, str) and val:
+            # Sensitive keys are always masked regardless of the caller's request.
+            if key in sensitive_keys and isinstance(val, str) and val:
                 result[key] = "***"
             else:
                 result[key] = val
@@ -414,7 +411,7 @@ class Config:
             level=level,
             format="%(asctime)s | %(levelname)-8s | %(name)s | %(message)s",
             datefmt="%H:%M:%S",
-            stream=sys.stdout,
+            stream=sys.stderr,
         )
 
 

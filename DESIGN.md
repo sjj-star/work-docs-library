@@ -697,13 +697,27 @@ graph_query(entity_type="Product", name="TMS320F28379D")
 
 ## 20. 审计修复经验总结
 
-**背景**：2026-04 代码审计发现 21 项缺陷（9 个 P0 数据损坏风险、7 个 P1 可靠性缺陷、5 个 P2 代码质量问题），已全部修复并通过 283 个测试验证。
+**背景**：
+- 2026-04 代码审计发现 21 项缺陷（9 个 P0 数据损坏风险、7 个 P1 可靠性缺陷、5 个 P2 代码质量问题），已全部修复并通过 283 个测试验证。
+- 2026-06 再次审计发现 Critical/High 级安全与数据完整性问题，按「最小紧急修复」方案修复后测试数达到 400 个。
 
 **关键教训**：
 
 | 教训 | 来源缺陷 | 修复措施 |
 |------|---------|---------|
 | **JSON 修复正则必须验证** | `_safe_parse_json` 用 `\x01` 替代 `\1` | 单字符修复，新增边界测试 |
+| **用户路径必须沙箱校验** | Plugin 工具直接接受 `path`/`output_dir` | `_resolve_allowed_path` 校验，禁止跳出允许目录 |
+| **敏感配置输出必须强制脱敏** | `tool_config` 允许 `mask_sensitive=false` | 忽略请求参数，敏感 key 始终返回 `***` |
+| **外部 ZIP 必须校验条目路径** | BigModel 解析结果 ZIP 未过滤 `..` | 拒绝含 `..`、绝对路径、盘符的条目，校验 resolve 后仍在输出目录 |
+| **多存储写入顺序必须避免幽灵记录** | SQLite 先写、FAISS 后写导致 DB 引用缺失向量 | 改为先写 FAISS 再写 SQLite；失败时回滚 SQLite |
+| **保存 + 辅助日志必须原子失败处理** | `_save_global_graph()` 成功但冲突日志写入失败 | `save_ok` 跟踪，失败时把回滚状态重新落盘 |
+| **返回全局对象前必须深拷贝（含关系）** | `_apply_doc_properties_to_relation` 使用 `copy.copy` | 统一使用 `copy.deepcopy` |
+| **属性合并必须深拷贝可变值** | `merged_props[k] = v` 直接引用可变对象 | 合并时 `copy.deepcopy(v)`，快照也深拷贝 |
+| **删除文档贡献必须清理 per-doc 快照** | `remove_document_contributions` 保留 `doc_properties[doc_id]` | 保留节点/边时同步 `pop(doc_id, None)` |
+| **资源句柄必须上下文管理** | `PDFParser.parse()` 中 `fitz.open` 异常时不关闭 | `with fitz.open(...) as doc:` |
+| **并发 Future 必须超时** | `submit_parallel_batches` 中 `future.result()` 无 timeout | 传递 `timeout=timeout` |
+| **Batch 失败不可静默丢数据** | `extract_from_requests` 捕获异常后返回空结果 | 记录错误后重新抛出 |
+| **日志默认必须输出到 stderr** | `setup_logging` 默认 `sys.stdout` | 改为 `sys.stderr`，避免污染 plugin JSON 协议 |
 | **返回全局对象前必须深拷贝** | `_apply_doc_properties` 修改原始节点 | `copy.copy` + `dict()` 深拷贝属性 |
 | **删除操作必须同步清理索引** | `remove_document_contributions` 遗漏索引 | 节点移除循环中调用 `_remove_from_property_index` |
 | **多存储系统操作必须原子化** | SQLite 已插入但 FAISS 向量化失败 | 统一批量写入，失败时 `remove_doc` 回滚 |

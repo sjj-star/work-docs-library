@@ -314,96 +314,94 @@ class PDFParser:
         矢量图区域内的文本标签被包含在渲染的图片中，不在 Markdown 中单独输出。
         """
         file_path = Path(file_path)
-        doc = fitz.open(str(file_path))
-        total_pages = len(doc)
+        with fitz.open(str(file_path)) as doc:
+            total_pages = len(doc)
 
-        # 1. 全局文档布局分析（最高优先级：页眉/页脚检测 + 字体统计）
-        header_margin, footer_margin, body_size, heading_threshold, has_bold_fonts = (
-            self._analyze_document_layout(doc)
-        )
-        logger.info(
-            f"布局分析完成 | header={header_margin:.1f}pt | footer={footer_margin:.1f}pt | "
-            f"body_size={body_size:.1f}pt | heading_threshold={heading_threshold:.1f}pt | "
-            f"has_bold_fonts={has_bold_fonts}"
-        )
-
-        # 2. 确定输出目录
-        if output_dir is None:
-            file_hash = hashlib.md5(file_path.read_bytes()).hexdigest()
-            output_dir = Config.DB_PATH.parent / "parsed" / file_hash[:16]
-        else:
-            output_dir = Path(output_dir)
-        img_dir = output_dir / "images"
-        img_dir.mkdir(parents=True, exist_ok=True)
-
-        # 3. TOC
-        toc = doc.get_toc()
-        toc_by_page = self._build_toc_by_page(toc) if toc else {}
-        chapter_map = self._build_chapter_map(toc, total_pages)
-
-        # 4. 逐页处理
-        all_image_paths: list[Path] = []
-        page_markdowns: list[str] = []
-        scanner = GapsFirstScanner()
-
-        for page_num in range(total_pages):
-            page = doc.load_page(page_num)
-            page_idx = page_num + 1
-
-            # 4a. 【Gaps-First】线性区域扫描：表格 + 图片
-            page_toc_entries = toc_by_page.get(page_idx, [])
-            gaps_result = scanner.process_page(
-                page,
-                page.rect,
-                header_margin,
-                footer_margin,
-                img_dir,
-                toc_entries=page_toc_entries,
+            # 1. 全局文档布局分析（最高优先级：页眉/页脚检测 + 字体统计）
+            header_margin, footer_margin, body_size, heading_threshold, has_bold_fonts = (
+                self._analyze_document_layout(doc)
+            )
+            logger.info(
+                f"布局分析完成 | header={header_margin:.1f}pt | footer={footer_margin:.1f}pt | "
+                f"body_size={body_size:.1f}pt | heading_threshold={heading_threshold:.1f}pt | "
+                f"has_bold_fonts={has_bold_fonts}"
             )
 
-            # 4b. 获取文本块（排除 diagram 区域内的文本，避免重复输出）
-            diagram_regions = [fitz.Rect(img["bbox"]) for img in gaps_result.images]
-            text_blocks = self._get_page_text_blocks(
-                page, diagram_regions, header_margin, footer_margin
-            )
-
-            # 4b2. 用 TOC 识别 heading
-            page_toc_entries = toc_by_page.get(page_idx, [])
-            if page_toc_entries:
-                text_blocks = self._identify_headings_by_toc(text_blocks, page_toc_entries)
+            # 2. 确定输出目录
+            if output_dir is None:
+                file_hash = hashlib.md5(file_path.read_bytes()).hexdigest()
+                output_dir = Config.DB_PATH.parent / "parsed" / file_hash[:16]
             else:
-                text_blocks = self._fallback_heading_detection(
-                    text_blocks, heading_threshold, has_bold_fonts
+                output_dir = Path(output_dir)
+            img_dir = output_dir / "images"
+            img_dir.mkdir(parents=True, exist_ok=True)
+
+            # 3. TOC
+            toc = doc.get_toc()
+            toc_by_page = self._build_toc_by_page(toc) if toc else {}
+            chapter_map = self._build_chapter_map(toc, total_pages)
+
+            # 4. 逐页处理
+            all_image_paths: list[Path] = []
+            page_markdowns: list[str] = []
+            scanner = GapsFirstScanner()
+
+            for page_num in range(total_pages):
+                page = doc.load_page(page_num)
+                page_idx = page_num + 1
+
+                # 4a. 【Gaps-First】线性区域扫描：表格 + 图片
+                page_toc_entries = toc_by_page.get(page_idx, [])
+                gaps_result = scanner.process_page(
+                    page,
+                    page.rect,
+                    header_margin,
+                    footer_margin,
+                    img_dir,
+                    toc_entries=page_toc_entries,
                 )
 
-            # 4b3. 从 gaps 构建表格元素
-            table_elements = self._build_table_elements_from_gaps(gaps_result)
+                # 4b. 获取文本块（排除 diagram 区域内的文本，避免重复输出）
+                diagram_regions = [fitz.Rect(img["bbox"]) for img in gaps_result.images]
+                text_blocks = self._get_page_text_blocks(
+                    page, diagram_regions, header_margin, footer_margin
+                )
 
-            # 4c. 提取图片（diagram + raster）
-            diagram_images = self._build_images_from_gaps(gaps_result)
-            raster_images = self._extract_raster_images(doc, page, page_idx, img_dir)
+                # 4b2. 用 TOC 识别 heading
+                page_toc_entries = toc_by_page.get(page_idx, [])
+                if page_toc_entries:
+                    text_blocks = self._identify_headings_by_toc(text_blocks, page_toc_entries)
+                else:
+                    text_blocks = self._fallback_heading_detection(
+                        text_blocks, heading_threshold, has_bold_fonts
+                    )
 
-            all_image_paths.extend([img["path"] for img in raster_images])
-            all_image_paths.extend([img["path"] for img in diagram_images])
+                # 4b3. 从 gaps 构建表格元素
+                table_elements = self._build_table_elements_from_gaps(gaps_result)
 
-            # 4e. 合并排序生成 Markdown（含表格元素）
-            page_md = self._build_page_markdown(
-                text_blocks, raster_images, diagram_images, table_elements
+                # 4c. 提取图片（diagram + raster）
+                diagram_images = self._build_images_from_gaps(gaps_result)
+                raster_images = self._extract_raster_images(doc, page, page_idx, img_dir)
+
+                all_image_paths.extend([img["path"] for img in raster_images])
+                all_image_paths.extend([img["path"] for img in diagram_images])
+
+                # 4e. 合并排序生成 Markdown（含表格元素）
+                page_md = self._build_page_markdown(
+                    text_blocks, raster_images, diagram_images, table_elements
+                )
+                page_markdowns.append(page_md)
+
+            # 5. 根据章节结构组织整体 Markdown
+            markdown_text = self._organize_by_chapters(page_markdowns, chapter_map, toc)
+
+            # 5b. 合并跨页的 Continued... 表格
+            markdown_text = self._merge_continued_tables(markdown_text)
+
+            # 6. 【Milestone 2】最终存在性校验：移除断链图片引用
+            markdown_text, all_image_paths = self._validate_image_links(
+                markdown_text, all_image_paths, img_dir
             )
-            page_markdowns.append(page_md)
-
-        doc.close()
-
-        # 5. 根据章节结构组织整体 Markdown
-        markdown_text = self._organize_by_chapters(page_markdowns, chapter_map, toc)
-
-        # 5b. 合并跨页的 Continued... 表格
-        markdown_text = self._merge_continued_tables(markdown_text)
-
-        # 6. 【Milestone 2】最终存在性校验：移除断链图片引用
-        markdown_text, all_image_paths = self._validate_image_links(
-            markdown_text, all_image_paths, img_dir
-        )
 
         logger.info(
             f"PDF 解析完成 | file={file_path.name} | pages={total_pages} | "

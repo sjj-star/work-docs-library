@@ -9,6 +9,7 @@ import json
 import logging
 import os
 import sys
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -99,6 +100,23 @@ def _get_service() -> KnowledgeBaseService:
     return KnowledgeBaseService()
 
 
+def _resolve_allowed_path(path: str | Path | None, base_dirs: list[Path] | None = None) -> Path:
+    """Resolve a user-provided path and enforce a path sandbox.
+
+    Relative paths are resolved against ``Path.cwd()``. The resolved path must
+    be contained within at least one of ``base_dirs``.
+    """
+    if not path:
+        raise ValueError("Path is empty or not provided")
+    resolved = Path(path).expanduser().resolve()
+    if base_dirs is None:
+        base_dirs = [Path.cwd(), Config.DB_PATH.parent, Path(tempfile.gettempdir())]
+    if not any(resolved.is_relative_to(b) for b in base_dirs):
+        allowed = ", ".join(str(b) for b in base_dirs)
+        raise ValueError(f"Path {resolved} is outside allowed directories: {allowed}")
+    return resolved
+
+
 # ---------------------------------------------------------------------------
 # 文档导入工具
 # ---------------------------------------------------------------------------
@@ -106,9 +124,10 @@ def _get_service() -> KnowledgeBaseService:
 
 def tool_ingest(params: dict) -> dict:
     """导入文档."""
-    path = params.get("path")
-    if not path:
-        return {"success": False, "error": "Missing required parameter: path"}
+    try:
+        path = _resolve_allowed_path(params.get("path"))
+    except ValueError as e:
+        return {"success": False, "error": f"Unsafe path: {e}"}
     dry_run = params.get("dry_run", False)
 
     svc = _get_service()
@@ -124,15 +143,19 @@ def tool_ingest(params: dict) -> dict:
 
 def tool_doc_parse(params: dict) -> dict:
     """阶段1: PDF → Markdown."""
-    path = params.get("path")
-    if not path:
-        return {"success": False, "error": "Missing required parameter: path"}
+    try:
+        path = _resolve_allowed_path(params.get("path"))
+        output_dir_param = params.get("output_dir")
+        if output_dir_param:
+            _resolve_allowed_path(output_dir_param)
+    except ValueError as e:
+        return {"success": False, "error": f"Unsafe path: {e}"}
 
     from core.doc_graph_pipeline import DocGraphPipeline
 
     pipe = DocGraphPipeline()
     try:
-        doc_id, output_dir, text, images = pipe.stage1_parse(path)
+        doc_id, output_dir, text, images = pipe.stage1_parse(str(path))
         return {
             "success": True,
             "doc_id": doc_id,
@@ -178,17 +201,17 @@ def tool_doc_submit_batches(params: dict) -> dict:
     if not doc_id:
         return {"success": False, "error": "Missing required parameter: doc_id"}
 
-    from pathlib import Path
-
     from core.doc_graph_pipeline import DocGraphPipeline
 
     pipe = DocGraphPipeline()
     try:
         file_path = params.get("file_path")
-        if not file_path:
+        if file_path:
+            file_path = _resolve_allowed_path(file_path)
+        else:
             doc = pipe.db.get_document(doc_id)
             if doc:
-                file_path = doc.source_path
+                file_path = _resolve_allowed_path(doc.source_path)
             else:
                 return {
                     "success": False,
@@ -196,11 +219,11 @@ def tool_doc_submit_batches(params: dict) -> dict:
                 }
 
         jsonl_path_param = params.get("jsonl_path")
-        jsonl_path = Path(jsonl_path_param) if jsonl_path_param else None
+        jsonl_path = _resolve_allowed_path(jsonl_path_param) if jsonl_path_param else None
 
         results_path = pipe.stage3_submit_batches(
             doc_id=doc_id,
-            file_path=file_path,
+            file_path=str(file_path),
             jsonl_path=jsonl_path,
             force=params.get("force", False),
         )
@@ -223,17 +246,17 @@ def tool_doc_ingest_results(params: dict) -> dict:
     if not doc_id:
         return {"success": False, "error": "Missing required parameter: doc_id"}
 
-    from pathlib import Path
-
     from core.doc_graph_pipeline import DocGraphPipeline
 
     pipe = DocGraphPipeline()
     try:
         file_path = params.get("file_path")
-        if not file_path:
+        if file_path:
+            file_path = _resolve_allowed_path(file_path)
+        else:
             doc = pipe.db.get_document(doc_id)
             if doc:
-                file_path = doc.source_path
+                file_path = _resolve_allowed_path(doc.source_path)
             else:
                 return {
                     "success": False,
@@ -242,13 +265,13 @@ def tool_doc_ingest_results(params: dict) -> dict:
 
         results_path_param = params.get("results_path")
         if results_path_param:
-            results_path = Path(results_path_param)
+            results_path = _resolve_allowed_path(results_path_param)
         else:
             results_path = Path(Config.DB_PATH).parent / "batch" / f"{doc_id}_results.jsonl"
 
         result_doc_id = pipe.stage4_ingest_results(
             doc_id=doc_id,
-            file_path=file_path,
+            file_path=str(file_path),
             results_path=results_path,
             force=params.get("force", False),
         )
@@ -293,14 +316,14 @@ def tool_doc_submit_embed_batches(params: dict) -> dict:
     if not doc_id:
         return {"success": False, "error": "Missing required parameter: doc_id"}
 
-    from pathlib import Path
-
     from core.doc_graph_pipeline import DocGraphPipeline
 
     pipe = DocGraphPipeline()
     try:
         embed_jsonl_path_param = params.get("embed_jsonl_path")
-        embed_jsonl_path = Path(embed_jsonl_path_param) if embed_jsonl_path_param else None
+        embed_jsonl_path = (
+            _resolve_allowed_path(embed_jsonl_path_param) if embed_jsonl_path_param else None
+        )
 
         result_doc_id = pipe.stage6_submit_embed_batches(doc_id, embed_jsonl_path)
         return {
@@ -964,8 +987,8 @@ def tool_config(params: dict) -> dict:
     """打印当前生效的配置参数值（支持敏感字段脱敏）."""
     from core.config import Config
 
-    mask = params.get("mask_sensitive", True)
-    config_dict = Config.to_dict(mask_sensitive=mask)
+    # Always mask sensitive keys regardless of caller request (defense in depth).
+    config_dict = Config.to_dict(mask_sensitive=True)
 
     groups: dict[str, dict[str, Any]] = {
         "LLM 配置": {},

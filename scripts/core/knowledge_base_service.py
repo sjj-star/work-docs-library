@@ -615,7 +615,7 @@ class KnowledgeBaseService:
         返回深拷贝，避免修改内存中的全局图边。
         """
         if doc_id and relation.doc_properties and doc_id in relation.doc_properties:
-            relation = copy.copy(relation)
+            relation = copy.deepcopy(relation)
             relation.properties = dict(relation.doc_properties[doc_id])
         return relation
 
@@ -768,8 +768,10 @@ class KnowledgeBaseService:
         # 保存操作前快照，用于失败时恢复而非删除
         old_entity = self.graph.get_entity(entity.entity_type, entity.name)
         conflicts = self.graph.add_entity(entity)
+        save_ok = False
         try:
             self._save_global_graph()
+            save_ok = True
             if conflicts:
                 self.db.insert_conflict_logs(conflicts)
         except Exception:
@@ -785,6 +787,11 @@ class KnowledgeBaseService:
                 )
             else:
                 self.graph.delete_entity(entity.entity_type, entity.name)
+            if save_ok:
+                try:
+                    self._save_global_graph()
+                except Exception:
+                    logger.exception("回滚全局图后再次保存失败")
             raise
         return conflicts
 
@@ -823,8 +830,10 @@ class KnowledgeBaseService:
             relation.rel_type,
         )
         conflicts = self.graph.add_relation(relation)
+        save_ok = False
         try:
             self._save_global_graph()
+            save_ok = True
             if conflicts:
                 self.db.insert_conflict_logs(conflicts)
         except Exception:
@@ -849,6 +858,11 @@ class KnowledgeBaseService:
                     relation.to_name,
                     relation.rel_type,
                 )
+            if save_ok:
+                try:
+                    self._save_global_graph()
+                except Exception:
+                    logger.exception("回滚全局图后再次保存失败")
             raise
         return conflicts
 

@@ -34,6 +34,17 @@ def test_parse_returns_tuple(tmp_path):
     assert all(isinstance(p, Path) for p in img_paths)
 
 
+def test_parse_valid_pdf_returns_and_doc_closed(tmp_path):
+    """Regression: parse() opens/closes the fitz document and returns expected types."""
+    pdf_path = tmp_path / "valid.pdf"
+    _make_pdf(pdf_path, ["Chapter A content"])
+    parser = PDFParser()
+    md_text, img_paths = parser.parse(str(pdf_path), output_dir=str(tmp_path / "out"))
+    assert isinstance(md_text, str)
+    assert "Chapter A content" in md_text
+    assert isinstance(img_paths, list)
+
+
 def test_parse_text_only(tmp_path):
     """Test parse text only."""
     pdf_path = tmp_path / "sample.pdf"

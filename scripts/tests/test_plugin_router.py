@@ -1057,3 +1057,34 @@ def test_tool_doc_submit_batches_missing_file_path(patched_config, monkeypatch):
     result = plugin_router.tool_doc_submit_batches({"doc_id": "nonexistent_doc_id"})
     assert result["success"] is False
     assert "源文件路径" in result["error"] or "file_path" in result["error"]
+
+
+# ---------------------------------------------------------------------------
+# Security fixes
+# ---------------------------------------------------------------------------
+
+
+def test_tool_config_always_masks_sensitive_keys(monkeypatch):
+    """tool_config 应始终脱敏敏感字段，即使显式传入 mask_sensitive=False."""
+    monkeypatch.setattr(Config, "LLM_API_KEY", "super-secret-key")
+    monkeypatch.setattr(Config, "EMBEDDING_API_KEY", "emb-secret-key")
+    monkeypatch.setattr(Config, "PARSER_API_KEY", "parser-secret-key")
+
+    result = plugin_router.tool_config({"mask_sensitive": False})
+    assert result["success"] is True
+
+    llm_group = result["config_groups"]["LLM 配置"]
+    assert llm_group["LLM_API_KEY"] == "***"
+
+    embed_group = result["config_groups"]["Embedding 配置"]
+    assert embed_group["EMBEDDING_API_KEY"] == "***"
+
+    parser_group = result["config_groups"]["解析器配置"]
+    assert parser_group["PARSER_API_KEY"] == "***"
+
+
+def test_tool_ingest_rejects_unsafe_path():
+    """tool_ingest 应拒绝沙箱外的路径."""
+    result = plugin_router.tool_ingest({"path": "../../etc/passwd"})
+    assert result["success"] is False
+    assert "unsafe" in result["error"].lower() or "outside" in result["error"].lower()

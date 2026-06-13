@@ -281,6 +281,49 @@ def test_submit_parallel_batches_empty():
     assert results == []
 
 
+def test_submit_parallel_batches_passes_timeout_to_future_result(monkeypatch, tmp_path):
+    """测试 submit_parallel_batches 将 timeout 传给 future.result()，避免挂起永久阻塞."""
+    monkeypatch.setattr(Config, "DB_PATH", tmp_path / "workdocs.db")
+    client = FakeBatchClient()
+    received_timeouts: list[Any] = []
+
+    class FakeFuture:
+        """记录 result(timeout) 参数并返回固定结果."""
+
+        def result(self, timeout=None):
+            received_timeouts.append(timeout)
+            return [{"chunk": 0}]
+
+    class FakeExecutor:
+        """模拟 ThreadPoolExecutor，返回 FakeFuture."""
+
+        def __init__(self, max_workers: int) -> None:
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc_val, exc_tb):
+            return False
+
+        def submit(self, fn, *args, **kwargs):
+            return FakeFuture()
+
+    def fake_as_completed(fs):
+        return fs
+
+    monkeypatch.setattr("concurrent.futures.ThreadPoolExecutor", FakeExecutor)
+    monkeypatch.setattr("concurrent.futures.as_completed", fake_as_completed)
+
+    # max_file_size_mb=0 会拆分为多个 chunk，从而进入并行提交分支
+    results = client.submit_parallel_batches(
+        [{"body": "a"}, {"body": "b"}], max_file_size_mb=0, timeout=42
+    )
+
+    assert results == [{"chunk": 0}, {"chunk": 0}]
+    assert received_timeouts == [42, 42]
+
+
 # ---------------------------------------------------------------------------
 # BatchClient 初始化
 # ---------------------------------------------------------------------------

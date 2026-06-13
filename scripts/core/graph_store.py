@@ -762,7 +762,7 @@ class NetworkXGraphStore(GraphStore):
                     if old_doc_id:
                         old_score = self._completeness_score(existing_doc_props.get(old_doc_id, {}))
                         if new_score > old_score:
-                            merged_props[k] = v
+                            merged_props[k] = copy.deepcopy(v)
                     else:
                         old_score = -1  # 无法推断来源，保留旧值
 
@@ -780,7 +780,7 @@ class NetworkXGraphStore(GraphStore):
                         }
                     )
                 else:
-                    merged_props[k] = v
+                    merged_props[k] = copy.deepcopy(v)
             existing["properties"] = merged_props
             # 加入新属性索引
             self._add_to_property_index(nid, entity.entity_type, merged_props)
@@ -902,7 +902,7 @@ class NetworkXGraphStore(GraphStore):
                     if old_doc_id:
                         old_score = self._completeness_score(existing_doc_props.get(old_doc_id, {}))
                         if new_score > old_score:
-                            merged_props[k] = v
+                            merged_props[k] = copy.deepcopy(v)
                     else:
                         old_score = -1  # 无法推断来源，保留旧值
 
@@ -923,25 +923,25 @@ class NetworkXGraphStore(GraphStore):
                         }
                     )
                 else:
-                    merged_props[k] = v
+                    merged_props[k] = copy.deepcopy(v)
             existing["properties"] = merged_props
             existing_sids = _normalize_sids(existing.get("source_doc_ids", set()))
             existing_sids.update(relation.source_doc_ids)
             existing["source_doc_ids"] = existing_sids
             # 保存文档级属性快照
             if doc_id:
-                existing_doc_props[doc_id] = dict(relation.properties)
+                existing_doc_props[doc_id] = copy.deepcopy(relation.properties)
             existing["doc_properties"] = existing_doc_props
             existing["confidence"] = min(existing.get("confidence", 1.0), relation.confidence)
             existing["verified"] = existing.get("verified", False) or relation.verified
             existing["updated_at"] = now
         else:
-            doc_props = {doc_id: dict(relation.properties)} if doc_id else {}
+            doc_props = {doc_id: copy.deepcopy(relation.properties)} if doc_id else {}
             self._g.add_edge(
                 from_nid,
                 to_nid,
                 rel_type=relation.rel_type,
-                properties=relation.properties,
+                properties=copy.deepcopy(relation.properties),
                 doc_properties=doc_props,
                 source_doc_ids=set(relation.source_doc_ids),
                 confidence=relation.confidence,
@@ -1169,6 +1169,7 @@ class NetworkXGraphStore(GraphStore):
                 sids.discard(doc_id)
                 if sids:
                     self._g.nodes[nid]["source_doc_ids"] = sids
+                    self._g.nodes[nid]["doc_properties"].pop(doc_id, None)
                 else:
                     nodes_to_remove.append(nid)
 
@@ -1190,6 +1191,7 @@ class NetworkXGraphStore(GraphStore):
                 sids.discard(doc_id)
                 if sids:
                     self._g.edges[u, v]["source_doc_ids"] = sids
+                    self._g.edges[u, v]["doc_properties"].pop(doc_id, None)
                 else:
                     edges_to_remove.append((u, v))
 
