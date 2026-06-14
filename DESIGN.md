@@ -847,19 +847,28 @@ graph_query(entity_type="Product", name="TMS320F28379D")
 
 ```python
 def _classify_table_style(zone):
-    if not zone.drawings or len(zone.drawings) < 10:
+    if not zone.drawings:
         return None
 
     h_lines = sum(1 for r in zone.drawings if r.width > r.height * 3)
     v_lines = sum(1 for r in zone.drawings if r.height > r.width * 3)
+    other = sum(1 for r in zone.drawings if not above)
+
+    # 非线条元素占多数 → 框图/位域图，不是表格
+    if other > (h_lines + v_lines) * 0.5:
+        return None
 
     # Style A: Grid table（多横线 + 多竖线）
     if h_lines >= 4 and v_lines >= 3:
+        if text_density < 0.02:
+            return None  # 过滤位域图
         return "grid"
 
-    # Style B: Horizontal-only table（无竖线 + 多横线 + 多文字）
-    if v_lines <= 1 and h_lines >= 6 and zone.text_block_count >= 5:
-        return "horizontal"
+    # Style B: Horizontal / borderless table
+    if v_lines <= 1 and h_lines >= 4 and zone.text_block_count >= 3:
+        if text_density < 0.01:
+            return None
+        return "horizontal"   # 统一由 BorderlessTableExtractor 处理
 
     return None
 ```
@@ -873,14 +882,13 @@ def _classify_table_style(zone):
 **机制与策略分离原则**：`_classify_table_style` 识别表格风格（机制），`process_page` 根据风格选择 `find_tables` 策略（策略）。
 
 **策略选择规则**：
-- 页面有任何 orphan zone 被分类为 `horizontal_borderless`（零高度横线占多数）→ 直接调用 `BorderlessTableExtractor`，不再走 `find_tables`
-- 页面有任何 orphan zone 被分类为 `horizontal`（普通横线表）→ 整页使用 `lines` 策略
+- 页面有任何 orphan zone 被分类为 `horizontal`（含零高度横线占多数的无边框表格）→ 直接调用 `BorderlessTableExtractor`，不再走 `find_tables`
 - 页面只有 `grid` 风格的 orphan zones → 整页使用 `lines_strict` 策略
 
 **原因**：
-- `lines_strict` 对 grid 表格精确（误报低），对 horizontal 表格完全失效
-- `lines` 能检测普通 horizontal 表格，但对 grid 表格误报更多
-- 零高度横线的 AMBA 风格表格无法被 `find_tables` 任何策略识别，需要专门的几何提取器
+- `lines_strict` 对 grid 表格精确（误报低），对 horizontal/无边框表格完全失效
+- AMBA 零高度横线表格无法被 `find_tables` 任何策略识别，需要专门的几何提取器
+- 实测 `find_tables(strategy="lines")` 在 AMBA 上零产出，且对 grid 表格误报更多，因此移除该策略
 - 按页自适应、按风格直接路由，避免全文档统一策略的"一刀切"问题
 
 **实测效果**（4 文档基准）：
@@ -930,7 +938,7 @@ def _classify_table_style(zone):
 - 以 caption 为锚点，在下方区域搜索水平线并去重，得到行边界；
 - 用 header 行单词的 x 位置聚类出列中心；
 - 按行区间 + 最近列中心分配 word，重建 Markdown 表格。
-- `GapsFirstScanner._classify_table_style` 新增 `horizontal_borderless` 风格；`process_page` 在识别到该风格时直接路由到 `BorderlessTableExtractor`，不再调用 `find_tables`。
+- `GapsFirstScanner._classify_table_style` 将零高度线/无边框表格统一归类为 `horizontal`；`process_page` 在识别到该风格时直接路由到 `BorderlessTableExtractor`，不再调用 `find_tables`。
 
 **验证**：对 AMBA CHI page 28（`Table B1.1`）实测可正确提取 3 列 4 行的无边框表格。
 
@@ -1006,7 +1014,7 @@ if v_lines <= 1 and h_lines >= 6 and text >= 5: return "horizontal"
 # 2. 区分 horizontal / vertical / other 三类 drawing
 # 3. other > lines*0.5 时过滤（非线条元素占多数）
 # 4. grid 风格增加文本密度过滤（<0.02 text/pt 过滤位域图）
-# 5. horizontal 风格增加零高度线过滤（>50% 零高度线时跳过 find_tables）
+# 5. horizontal 风格统一路由到 BorderlessTableExtractor（不再使用 find_tables）
 ```
 
 **空跑率对比实验**（ orphan zone 触发 find_tables 但返回 0 表格的比例）：
@@ -1332,7 +1340,7 @@ Step 1: 内容分类（8 种类型）
 | **本地 PDF 解析目录页换行** | 目录页多行条目保留为多行 | 目录页对知识提取影响小，接受此行为 |
 | **本地 PDF 解析依赖 TOC** | 无 TOC 的 PDF 回退到启发式规则 | `_fallback_heading_detection` 提供降级方案 |
 | **_is_heading 仅识别 Markdown #** | 已删除数字编号/中文编号匹配，目录条目（如 "1 Introduction 7"）不再被识别为 heading | 目录文本被收集为 heading 之间的 content，可能混入正文 batch；当前接受此行为，后续可通过机制层策略处理 |
-| **AMBA 零高度线表格提取** | AMBA 表格的水平线为 height=0.0 的零高度矢量线，`find_tables` 的任何策略（lines_strict/lines/text）均无法识别 | 已实现 `BorderlessTableExtractor`，对 `horizontal_borderless` 风格直接路由，可正确提取此类表格；跨页续表仍按页独立 |
+| **AMBA 零高度线表格提取** | AMBA 表格的水平线为 height=0.0 的零高度矢量线，`find_tables` 的任何策略（lines_strict/lines/text）均无法识别 | 已实现 `BorderlessTableExtractor`，对 `horizontal` 风格直接路由，可正确提取此类表格；跨页续表仍按页独立 |
 | **TABLE_CAPTION_RE 误匹配正文引用句** | `"Table X.X describes..."` 等正文引用句被正则匹配为 caption，导致所在页面触发 find_tables 但无对应表格 | AMBA 文档中发生 191 次误匹配；GapsFirstScanner 的预计算机制使误触发成本从"多次 clip 调用"降至"一次全页扫描"，影响已大幅降低 |
 | **跨页续表碎片化** | `find_tables()` 按页独立处理，无法识别 `"Continued from previous page"` 的跨页上下文 | AMBA 中 93 页跨页续表；GapsFirstScanner 的 zone 模型使续页 caption 能正确定位表格 zone，但 `find_tables` 仍只能提取当前页的部分行 |
 | **冲突日志无关系级记录** | `add_relation` 冲突只记录 property_key，不记录完整关系上下文 | 冲突日志包含 from/to/type 信息，可定位 |

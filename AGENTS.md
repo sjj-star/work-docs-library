@@ -90,7 +90,7 @@ work-docs-library/
 │   │   ├── pdf_parser.py         # PDF 本地解析器（PyMuPDF + TOC 驱动章节识别 + 表格/图片检测）
 │   │   ├── office_parser.py      # DOCX / XLSX 解析器（代码存在，尚未接入 pipeline）
 │   │   └── image_utils.py        # 图片压缩与三分类（彩色/灰度/黑白）
-│   ├── tests/                    # pytest 测试集（382 passed, 2 skipped）
+│   ├── tests/                    # pytest 测试集（400 passed, 2 skipped）
 │   │   ├── conftest.py           # 三重环境隔离（清除 WORKDOCS_ 环境变量、阻止 load_dotenv、临时目录重定向）
 │   │   ├── fixtures/             # 测试 fixture（PDF 页样本、解析输出样本）
 │   │   └── test_*.py             # 各模块测试文件
@@ -138,7 +138,7 @@ cd /path/to/work-docs-library
 
 ### 测试执行
 ```bash
-# 完整测试集（当前状态：382 passed, 2 skipped, 0 failed）
+# 完整测试集（当前状态：400 passed, 2 skipped, 0 failed）
 cd /path/to/work-docs-library
 PYTHONPATH=scripts ./.venv/bin/python -m pytest scripts/tests/ -v
 
@@ -211,36 +211,33 @@ PYTHONPATH=scripts ./.venv/bin/python -m pytest \
   2. 阻止 `load_dotenv` 重新加载 `.env` 文件
   3. 重定向 Config 默认路径到临时目录（DB、FAISS、Graph 均隔离）
 - **回归即修复**：任何导致测试失败的变更必须当场修复
-- **388 个测试用例必须全部通过**（2 个 skipped 为正常：真实文档参数集为空）
+- **400 个测试用例必须全部通过**（2 个 skipped 为正常：真实文档参数集为空）
 
 ### 测试文件清单
-| 测试文件 | 说明 |
-|----------|------|
-| `test_plugin_router.py` | Plugin 工具路由、参数解析 |
-| `test_pdf_parser.py` | PDF 解析核心测试（72+ 用例，含 13 个真实页面 fixture） |
-| `test_borderless_table_extractor.py` | AMBA 风格无边框表格提取单元测试 |
-| `test_table_utils.py` | Markdown 表格规范化单元测试 |
-| `test_office_parser.py` | DOCX / XLSX 解析测试 |
-| `test_db.py` | SQLite 操作、事务管理 |
-| `test_vector_index.py` | FAISS 索引增删查、持久化 |
-| `test_llm_client.py` | LLM 客户端 Mock |
-| `test_config_json.py` | 配置优先级、凭证注入 |
-| `test_models.py` | 数据模型测试（含 StrEnum） |
-| `test_chapter_parser.py` | ChapterParser 树形章节解析测试 |
-| `test_image_utils.py` | 图片压缩工具测试 |
-| `test_graph_store.py` | NetworkX 图谱存储 CRUD、冲突检测、属性索引、子图、路径搜索、持久化 |
-| `test_batch_clients.py` | Batch API 客户端 Mock 测试 |
-| `test_knowledge_base_service.py` | KnowledgeBaseService 统一服务层测试 |
-| `test_knowledge_base_service_queries.py` | 语义-图谱联合查询、block+实体联合返回测试 |
-| `test_bigmodel_parser_client.py` | BigModel 解析客户端全路径覆盖测试 |
-| `test_content_blocks.py` | 内容块切分、heading_maps 构建 |
-| `test_batch_builder.py` | BatchBuilder 切分保护与空 content 过滤测试 |
-| `test_parsed_docs_jsonl.py` | 真实文档端到端 JSONL 生成测试 |
-| `test_pipeline_stages.py` | 六阶段 pipeline 拆分测试 |
-| `test_audit_issues.py` | 6 项生产 bug 定向回归测试 |
-| `test_mp_find_tables_feasibility.py` | 多进程 find_tables 可行性验证（执行极慢，>3min） |
-| `test_mp_find_tables_perf_detail.py` | 多进程 find_tables 详细性能分析 |
-| `analyze_amba_empty_runs.py` | AMBA 文档 find_tables 空跑根因分析 |
+| 测试文件 | 用例数 | 说明 |
+|----------|--------|------|
+| `test_plugin_router.py` | 45 | Plugin 工具路由、参数解析、路径沙箱 |
+| `test_pdf_parser.py` | 71 | PDF 解析核心测试（含 14 个真实页面 fixture） |
+| `test_borderless_table_extractor.py` | 3 | AMBA 风格无边框表格提取单元测试 |
+| `test_table_utils.py` | 4 | Markdown 表格规范化单元测试 |
+| `test_office_parser.py` | 3 | DOCX / XLSX 解析测试 |
+| `test_db.py` | 15 | SQLite 操作、事务管理 |
+| `test_vector_index.py` | 9 | FAISS 索引增删查、持久化 |
+| `test_llm_client.py` | 9 | LLM 客户端 Mock |
+| `test_config_json.py` | 15 | 配置优先级、凭证注入 |
+| `test_chapter_parser.py` | 20 | ChapterParser 树形章节解析测试 |
+| `test_image_utils.py` | 13 | 图片压缩工具测试 |
+| `test_graph_store.py` | 77 | NetworkX 图谱存储 CRUD、冲突检测、属性索引、子图、路径搜索、持久化 |
+| `test_batch_clients.py` | 19 | Batch API 客户端 Mock 测试 |
+| `test_knowledge_base_service.py` | 21 | KnowledgeBaseService 统一服务层测试 |
+| `test_knowledge_base_service_queries.py` | 3 | 语义-图谱联合查询、block+实体联合返回测试 |
+| `test_bigmodel_parser_client.py` | 8 | BigModel 解析客户端全路径覆盖测试 |
+| `test_content_blocks.py` | 10 | 内容块切分、heading_maps 构建 |
+| `test_batch_builder.py` | 14 | BatchBuilder 切分保护与空 content 过滤测试 |
+| `test_parsed_docs_jsonl.py` | 2 | 真实文档端到端 JSONL 生成测试 |
+| `test_pipeline_stages.py` | 31 | 六阶段 pipeline 拆分测试 |
+| `test_audit_issues.py` | 8 | 8 项生产 bug/审计问题定向回归测试 |
+| `scripts/benchmark/*` | — | 性能基准与诊断脚本（非 pytest 常规用例） |
 
 ### Mock 方法
 使用 `monkeypatch.setattr` 替换客户端类方法：
@@ -259,6 +256,7 @@ monkeypatch.setattr(
 - API Key 存储于 `scripts/.env`（gitignored），**禁止**硬编码到源码或提交到版本控制
 - `config.json` 中的 `api_key` 字段为空字符串模板，实际值由环境变量或 Kimi CLI 运行时注入
 - `plugin.json` 的 `inject` 字段声明了凭证注入映射：`llm.api_key` ← `api_key`
+- `Config.to_dict()` 对 `LLM_API_KEY`/`EMBEDDING_API_KEY`/`PARSER_API_KEY` 始终脱敏为 `***`；`tool_config` 忽略用户传入的 `mask_sensitive` 参数，强制返回脱敏配置
 
 ### 2. 数据库安全
 - 所有 SQL 必须使用参数化查询（`?` 占位符），禁止字符串拼接 SQL
@@ -277,6 +275,8 @@ monkeypatch.setattr(
 ### 5. 文件系统安全
 - 所有图谱/索引持久化使用「临时文件 + `os.replace`」原子写入，避免崩溃导致文件损坏
 - `Config.setup_logging()` 将日志输出到 stderr，确保 stdout 保持纯 JSON（Plugin 通信协议要求）
+- Plugin 所有用户传入的文件路径必须通过 `_resolve_allowed_path()` 沙箱校验，禁止跳出允许目录或包含 `..`（已新增回归测试）
+- `BigModelParserClient` 解压 ZIP 时校验条目名，禁止 `..`、绝对路径、盘符，防止路径遍历
 
 ---
 
@@ -403,7 +403,7 @@ monkeypatch.setattr(
 - ✅ **环境隔离三重机制**：彻底根治 `.env` 污染测试环境的问题
 - ✅ **存储粒度与查询粒度解耦（方案C）**：引入 `content_blocks` 表作为存储粒度，`heading_maps` 表作为查询粒度，batch 数量减少 40-50%
 - ✅ **FAISS ID 偏移**：`_BLOCK_FAISS_OFFSET = 10_000_000` 避免 block db_id 与旧 chunks ID 冲突
-- ✅ **382 个测试全部通过**
+- ✅ **400 个测试全部通过**
 - ✅ **PDF Parser 表格检测增强（Milestone 1-4）**：`find_tables(strategy="lines_strict")`、caption-gated 预筛选、位域图重叠保护、PyMuPDF4LLM fallback、全部 14 个 Magic Number 配置化
 - ✅ **PDF Parser 图片检测增强（Milestone 2）**：`page.get_image_info()` 过滤链、双路径提取
 - ✅ **性能基准测试**：TI (219页) 10.3s/0表格 → 46.2s/68表格；AMBA (585页) 8.7s/0表格 → 93.3s/22表格
@@ -413,20 +413,23 @@ monkeypatch.setattr(
 - ✅ **Hard Separator + Zone 模型**：header/footer/heading/caption/body_text 构成 y 轴硬分割，提取只在 zone 内部搜索
 - ✅ **Cluster-based 图片渲染**：每个 drawing cluster 独立渲染为图片，修复过度合并问题
 - ✅ **Orphan Zone 检测**：无 Caption 表格通过 `_classify_table_style` 启发式检测，命中率 90.5%
-- ✅ **自适应表格策略**：`_classify_table_style` 识别 grid/horizontal 风格，`find_tables` 按页选择 lines_strict/lines 策略
-- ✅ **预计算优化**：每页一次 `find_tables` 全页扫描，结果复用于所有 caption/orphan zone，避免 142 次重复调用
-- ✅ **AMBA 零高度线调研**：AMBA 表格水平线为 height=0.0 的零高度矢量线，find_tables 任何策略均无法识别，确认为 PyMuPDF C 库层面限制
+- ✅ **自适应表格策略**：`_classify_table_style` 识别 grid/horizontal 风格；grid 走 `find_tables(strategy="lines_strict")`，horizontal（含零高度线）走 `BorderlessTableExtractor`
+- ✅ **预计算优化**：grid 页面每页一次 `find_tables` 全页扫描，结果复用于所有 caption/orphan zone，避免 142 次重复调用
+- ✅ **AMBA 零高度线调研**：AMBA 表格水平线为 height=0.0 的零高度矢量线，`find_tables` 任何策略均无法识别，确认为 PyMuPDF C 库层面限制
 - ✅ **`tab.cells` 空伪表格防御**：`find_tables()` 返回 cells=[] 的伪表格导致 `tab.bbox` 触发 `ValueError`，添加防御性跳过
 - ✅ **`_fix_drawing_rect` 前零高度线统计**：在 rect 扩展前统计原始 drawing 的 `height==0.0`，避免检测永远失效
-- ✅ **`_classify_table_style` v2/v3**：去掉 `len<10` 门槛，增加 drawing 风格分类（h/v/other）、文本密度过滤（<0.02 text/pt）、零高度线过滤（>50% 时跳过）；新增 `horizontal_borderless` 风格并按风格直接路由到 `BorderlessTableExtractor`，不做 fallback
+- ✅ **`_classify_table_style` v2/v3**：去掉 `len<10` 门槛，增加 drawing 风格分类（h/v/other）、文本密度过滤（<0.02 text/pt）、零高度线过滤；`horizontal` 风格直接路由到 `BorderlessTableExtractor`，不做 `find_tables` fallback
 - ✅ **空跑率优化**：TI 15.9%→1.4%，AMBA 92.9%→0.0%，SPRUI07 10.4%→8.8%，DC_UG 31.0%→28.6%
-- ✅ **AMBA 零高度线表格提取**：新增 `scripts/parsers/borderless_table_extractor.py`，基于横线 + 文本 x 对齐重建 Markdown 表格；`GapsFirstScanner` 识别 `horizontal_borderless` 后直接进入该提取器，不再尝试 `find_tables`
+- ✅ **AMBA 零高度线表格提取**：新增 `scripts/parsers/borderless_table_extractor.py`，基于横线 + 文本 x 对齐重建 Markdown 表格；`GapsFirstScanner` 识别 `horizontal` 后直接进入该提取器，不再尝试 `find_tables`
+- ✅ **sprui07 page 692 纵向堆叠时序图修复**：cluster 合并改为连通分量 + 最近 caption 分量，防止只渲染底部子图
+- ✅ **审计选项 A 最小紧急修复**：路径沙箱、强制脱敏、ZIP 路径遍历防护、FAISS/SQLite 写入顺序、KBService 原子失败处理、GraphStore 深拷贝、`fitz.open` 上下文管理、Batch 超时与失败抛错
 - ✅ **解析器输出格式改为 PNG**：矢量图/光栅图/表格区域统一输出 PNG（无损高保真），移除 `PARSER_IMAGE_JPEG_QUALITY` 配置；LLM API 发送时的压缩由 `_compress_image_to_base64` 独立处理（三层分类策略不变）
 
 ### 下一阶段（精确到下一步）
 1. **可视化**：图谱可视化导出（Graphviz / D3.js）
 2. **评估体系**：实体提取准确率、关系提取召回率的自动化评估
 3. **DOCX/XLSX 接入 pipeline**：当前解析器代码存在但未接入 `DocGraphPipeline`
+4. **系统化加固（审计选项 B）**：跨存储事务回滚、VectorIndex 原子重建、参数限流、解析阈值配置化、fuzz/property 测试
 
 ### PDF Parser 表格检测已知问题与下一步方向
 
@@ -437,7 +440,7 @@ monkeypatch.setattr(
 
 **当前状态**（2026-06-10）：
 - Grid 表格（TI/SPRUI07）：`lines_strict` 有效，自适应策略已优化
-- Horizontal 表格（AMBA）：已通过 `BorderlessTableExtractor` 支持零高度线风格表格；普通 horizontal 表格仍走 `find_tables(strategy="lines")`
+- Horizontal 表格（AMBA/DC_UG）：统一由 `BorderlessTableExtractor` 处理，不再使用 `find_tables(strategy="lines")`（实测 AMBA 该策略零产出）
 - 路由原则：先由 `_classify_table_style` 判断风格，再直接调用最优方法，不做 fallback
 - 误触发成本：预计算机制使 TABLE_CAPTION_RE 误匹配的影响从 "142 次 clip 调用" 降至 "一次全页扫描"
 - 空跑率：TI 1.4% / AMBA 0.0% / SPRUI07 8.8% / DC_UG 28.6%（v2 算法，详见 DESIGN.md 18.8.4）

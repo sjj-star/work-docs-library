@@ -160,7 +160,7 @@ work-docs-library/
 │   │   ├── pdf_parser.py         # PDF 本地解析器（fallback，输出与 BigModel 一致）
 │   │   ├── office_parser.py      # DOCX / XLSX 解析器（代码存在，尚未接入 pipeline）
 │   │   └── image_utils.py        # 图片压缩工具
-│   └── tests/                    # pytest 测试集（382 个用例）
+│   └── tests/                    # pytest 测试集（400 个用例）
 ├── knowledge_base/               # 运行时自动生成
 │   ├── workdocs.db               # SQLite 元数据
 │   ├── faiss.index               # FAISS 向量索引
@@ -464,6 +464,21 @@ Kimi CLI 通过 `plugin.json` 注册以下工具：
 | `WORKDOCS_PARSER_TIMEOUT` | `parser.timeout` | `60` | 解析请求超时（秒） |
 | `WORKDOCS_PARSER_MAX_RETRIES` | `parser.max_retries` | `60` | 解析轮询最大重试次数 |
 | `WORKDOCS_PARSER_POLL_INTERVAL` | `parser.poll_interval` | `3` | 解析轮询间隔（秒） |
+| `WORKDOCS_PARSER_MIN_IMAGE_WIDTH` | `parser.min_image_width` | `100` | 可识别为图的最小宽度（px） |
+| `WORKDOCS_PARSER_MIN_IMAGE_HEIGHT` | `parser.min_image_height` | `100` | 可识别为图的最小高度（px） |
+| `WORKDOCS_PARSER_PAGE_RENDER_DPI` | `parser.page_render_dpi` | `200` | 页面/图片渲染 DPI |
+| `WORKDOCS_PARSER_TABLE_DETECTION_ENABLED` | `parser.table_detection_enabled` | `true` | 是否启用表格检测 |
+| `WORKDOCS_PARSER_TABLE_OVERLAP_THRESHOLD` | `parser.table_overlap_threshold` | `0.5` | 表格与 drawing 重叠判定阈值 |
+| `WORKDOCS_PARSER_TABLE_MIN_ROWS` | `parser.table_min_rows` | `2` | 表格最小行数 |
+| `WORKDOCS_PARSER_TABLE_MIN_COLS` | `parser.table_min_cols` | `2` | 表格最小列数 |
+| `WORKDOCS_PARSER_TABLE_MIN_HEIGHT_PT` | `parser.table_min_height_pt` | `20.0` | 表格最小高度（pt） |
+| `WORKDOCS_PARSER_TABLE_MIN_WIDTH_RATIO` | `parser.table_min_width_ratio` | `0.15` | 表格最小宽度占页面比例 |
+| `WORKDOCS_PARSER_TAB_MERGE_THRESHOLD_PT` | `parser.tab_merge_threshold_pt` | `4.0` | 制表位/列间隙合并阈值（pt） |
+| `WORKDOCS_PARSER_IMAGE_SIZE_LIMIT` | `parser.image_size_limit` | `0.05` | 过小图片面积占比上限 |
+| `WORKDOCS_PARSER_MAX_IMAGES_PER_PAGE` | `parser.max_images_per_page` | `30` | 单页最多渲染图片数 |
+| `WORKDOCS_PARSER_IMAGE_MERGE_Y_THRESHOLD` | `parser.image_merge_y_threshold` | `20.0` | 同一图 cluster 的纵向合并阈值（pt） |
+| `WORKDOCS_PARSER_FIGURE_MIN_SCORE` | `parser.figure_min_score` | `2.0` | 候选 zone 被视为 figure 的最低评分 |
+| `WORKDOCS_PARSER_EDGE_LABEL_MAX_LEN` | `parser.edge_label_max_len` | `30` | 图边缘标注文本最大长度 |
 | **Batch 通用配置** | | | |
 | `WORKDOCS_BATCH_POLL_INTERVAL` | `batch.poll_interval` | `10` | Batch 状态轮询间隔（秒） |
 | `WORKDOCS_BATCH_MAX_POLL_RETRIES` | `batch.max_poll_retries` | `360` | Batch 状态轮询最大次数 |
@@ -683,7 +698,7 @@ cd /path/to/work-docs-library
 PYTHONPATH=scripts ./.venv/bin/python -m pytest scripts/tests/ -v
 ```
 
-**当前状态：382 passed, 2 skipped, 0 failed。**
+**当前状态：400 passed, 2 skipped, 0 failed。**
 
 ### 测试分类与审计
 
@@ -709,39 +724,29 @@ PYTHONPATH=scripts ./.venv/bin/python -m pytest \
 |------|------|--------|------|------|
 | **核心基础设施** | `test_graph_store.py` | 77 | 🔴 高 | 图谱存储 CRUD、路径搜索、属性索引、持久化 |
 | | `test_vector_index.py` | 9 | 🔴 高 | FAISS 向量索引增删查、持久化、迁移 |
-| | `test_db.py` | 12 | 🔴 高 | SQLite CRUD、事务、冲突日志、反馈 |
+| | `test_db.py` | 15 | 🔴 高 | SQLite CRUD、事务、冲突日志、反馈 |
 | | `test_knowledge_base_service.py` | 21 | 🔴 高 | 统一服务层、实体-Chunk 桥接 |
 | | `test_knowledge_base_service_queries.py` | 3 | 🔴 高 | 语义-图谱联合查询（核心卖点） |
-| **Pipeline 集成** | `test_pdf_parser.py` | 66 | 🔴 高 | PDF 解析、图片提取、表格检测、13 个真实页面 fixture |
-| | `test_pipeline_stages.py` | 28 | 🔴 高 | 六阶段 pipeline 拆分、增量更新、fallback |
-| | `test_plugin_router.py` | 43 | 🔴 高 | Plugin 22 个工具路由、参数校验 |
-| **回归测试** | `test_audit_issues.py` | 6 | 🔴 高 | 6 项生产 bug 的定向回归（FAISS 重复、深拷贝污染等） |
+| **Pipeline 集成** | `test_pdf_parser.py` | 71 | 🔴 高 | PDF 解析、图片提取、表格检测、14 个真实页面 fixture |
+| | `test_pipeline_stages.py` | 31 | 🔴 高 | 六阶段 pipeline 拆分、增量更新、fallback |
+| | `test_plugin_router.py` | 45 | 🔴 高 | Plugin 工具路由、参数校验、路径沙箱 |
+| **回归测试** | `test_audit_issues.py` | 8 | 🔴 高 | 8 项生产 bug/审计问题的定向回归（FAISS 重复、深拷贝污染、路径沙箱等） |
 | **模块单元测试** | `test_batch_builder.py` | 14 | 🟡 中 | Batch 文本切分保护（代码块/表格/段落边界） |
-| | `test_batch_clients.py` | 18 | 🟡 中 | Batch API 客户端 JSONL/提交/轮询/超时 |
+| | `test_batch_clients.py` | 19 | 🟡 中 | Batch API 客户端 JSONL/提交/轮询/超时 |
 | | `test_chapter_parser.py` | 20 | 🟡 中 | 章节树解析、标题层级、代码块保护 |
 | | `test_config_json.py` | 15 | 🟡 中 | 配置优先级（env > json > .env > 默认） |
 | | `test_content_blocks.py` | 10 | 🟡 中 | 内容块切分、heading_maps 构建 |
 | | `test_llm_client.py` | 9 | 🟡 中 | Embedding/Chat 客户端、重试退避 |
 | | `test_image_utils.py` | 13 | 🟡 中 | 图片压缩、三分类（彩色/灰度/黑白） |
-| | `test_bigmodel_parser_client.py` | 7 | 🟡 中 | BigModel Expert 解析器轮询/下载 |
+| | `test_bigmodel_parser_client.py` | 8 | 🟡 中 | BigModel Expert 解析器轮询/下载/ZIP 路径遍历防护 |
 | | `test_office_parser.py` | 3 | 🟡 中 | DOCX/XLSX 解析（尚未接入 pipeline） |
-| **可精简/合并** | `test_models.py` | 3 | 🟢 低 | 数据模型默认值检查，可被 `test_db.py` 覆盖 |
-| | `test_entity_extractor.py` | 3 | 🟢 低 | doc_context 占位符替换，范围极窄 |
-| | `test_jsonl_consistency.py` | 1 | 🟢 低 | 与 `test_parsed_docs_jsonl.py` 高度重叠 |
-| | `test_parsed_docs_jsonl.py` | 1 | 🟢 低 | 同上，两者可合并为 1 个集成测试 |
-| **诊断/实验脚本** | `test_mp_find_tables_feasibility.py` | 9 | ⚪ 诊断 | 多进程 `find_tables()` 可行性验证，**执行极慢**（>3min），非常规 CI 用例 |
-| | `test_mp_find_tables_perf_detail.py` | 0 | ⚪ 诊断 | 性能分析脚本（非 pytest 文件），建议移至 `scripts/benchmark/` |
+| | `test_borderless_table_extractor.py` | 3 | 🟡 中 | AMBA 风格无边框表格提取 |
+| | `test_table_utils.py` | 4 | 🟡 中 | Markdown 表格规范化 |
+| **诊断/实验脚本** | `scripts/benchmark/*` | — | ⚪ 诊断 | 性能基准与诊断脚本（非 pytest 常规用例） |
 
-#### 删减/合并建议
+#### 当前状态
 
-| 建议 | 目标文件 | 理由 |
-|------|----------|------|
-| **合并** | `test_models.py` → `test_db.py` | 3 个默认值检查可被 `test_db.py` 的 CRUD 测试自然覆盖 |
-| **合并** | `test_entity_extractor.py` → `test_pipeline_stages.py` | doc_context 替换逻辑在端到端测试中已验证 |
-| **合并** | `test_jsonl_consistency.py` + `test_parsed_docs_jsonl.py` | 两者均验证 parsed-doc→JSONL 一致性，保留 1 个即可 |
-| **移出** | `test_mp_find_tables_feasibility.py` + `test_mp_find_tables_perf_detail.py` | 移至 `scripts/benchmark/` 或 `scripts/tests/experimental/`，避免拖慢常规测试运行 |
-
-执行上述合并后，核心测试集从 **391 个压缩至 382 个**（移出 9 个诊断脚本），且常规 CI 运行时间从含慢测试的 >5min 降至 **<5s**（仅运行核心+Pipeline+回归测试）。移出的诊断脚本位于 `scripts/benchmark/`。
+核心测试集已稳定在 **400 个用例**（含 2 个正常 skipped）。诊断脚本已统一移入 `scripts/benchmark/`，不参与常规 CI。
 
 ### 常用测试文档
 
@@ -855,12 +860,12 @@ Prompt 中显式规定格式，确保 LLM 输出统一：
 2. **Batch API 延迟**：Batch API 成本为同步 API 的 50%，但存在分钟级排队延迟
 3. **JSONL 大小限制**：单个 JSONL 文件不能超过 100MB，超大文档会自动拆分为多个并行 batch
 4. **Embedding 维度不可变**：FAISS 索引创建后维度固定。更换模型导致维度变化时，必须删除旧索引并重新处理
-5. **FAISS 与 SQLite 非原子**：已缓解——FAISS 操作加 `fcntl` 进程锁，修改前 `_reload()` 磁盘最新状态。极端情况仍可通过 `reprocess` 重建
+5. **FAISS 与 SQLite 非原子**：已缓解——写入顺序改为先 FAISS 后 SQLite，避免 DB 记录引用缺失向量；FAISS 操作加 `fcntl` 进程锁，修改前 `_reload()` 磁盘最新状态。极端情况仍可通过 `reprocess` 重建
 6. **图片压缩**：`IMAGE_MAX_SIZE`（默认 1024）将图片最长边缩放到 1024px，经 API 实测可将单张图片 token 消耗降低约 80%（如 9342×5442 原图 4176 tokens → 1024 缩放后 825 tokens）。三层分类策略（blackwhite→PNG 1-bit、grayscale→JPEG L、color→JPEG RGB）基于色度距离自动选择最小体积格式，显著减小 JSONL 文件大小和网络传输开销，但不影响 API token 计费（Kimi Vision 按分辨率动态计费，与格式/质量无关）
 7. **NetworkX 内存上限**：全局图为内存存储，数百个文档 × 万页级时可能达到 GB 级。当前单机目标规模可接受，预留 Neo4j 迁移接口
 8. **输入文档约束**：Markdown 图片引用 `![name](images/path.png)` 中的 `name` 将作为 `image_id`，建议填写有意义的名称
 9. **PDF 解析依赖 BigModel 专用 API**：文档提取主路径使用 BigModel 专有 Expert API（`/files/parser/create`），非 OpenAI-compatible，无法直接切换至其他厂商。若 BigModel 不可用，可依赖本地 `PDFParser`（PyMuPDF）作为 fallback，输出格式与 BigModel 完全一致，但解析质量可能略有差异
-10. **本地 PDF Parser 表格检测限制**：`find_tables(strategy="lines_strict")` 对无竖线/弱线条表格（如 AMBA 规范中大量使用的空白对齐表格）检测率极低（AMBA 仅 ~9%）。这是保守的正确性优先策略——`lines_strict` 误检率极低，可保护位域图不被表格化，但代价是大量无边框表格漏检。PyMuPDF4LLM fallback 对此类表格同样无效（12 页触发 / 0 产出）
+10. **本地 PDF Parser 表格检测策略**：Grid 表格使用 `find_tables(strategy="lines_strict")`，对无竖线/弱线条表格检测率极低（AMBA 仅 ~9%），但误检率极低，可保护位域图不被表格化。Horizontal/无边框表格（含 AMBA 零高度线表格）现在统一由 `BorderlessTableExtractor` 处理，不再 fallback 到 `find_tables(strategy="lines")`（该策略在 AMBA 上实测零产出）。PyMuPDF4LLM fallback 对此类无边框表格同样无效（12 页触发 / 0 产出）
 11. **正文引用句误触发表格检测**：`TABLE_CAPTION_RE` 会匹配 `"Table X.X describes..."` 等正文引用句，导致所在页面触发 `find_tables()` 但无实际表格。AMBA 文档中发生 191 次此类误匹配，是性能空跑的主要来源之一
 12. **跨页续表碎片化**：`find_tables()` 按页独立处理，无法识别 `"Continued from previous page"` 的跨页表格上下文。AMBA 中 93 页跨页续表全部空跑
 13. **跨产品外设变体**：同一个外设/寄存器出现在多个产品手册中时，`doc_properties` 保存每个文档的原始属性快照，全局图的 `properties` 仍为合并后值。查询时通过 `doc_id` 参数获取指定产品的精确属性。产品型号通过启发式正则从文档标题/文件名自动提取
