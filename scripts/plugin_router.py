@@ -5,7 +5,6 @@ Reads JSON parameters from stdin and returns structured JSON via stdout.
 Each tool is dispatched by sys.argv[1].
 """
 
-import json
 import logging
 import os
 import sys
@@ -1095,39 +1094,3 @@ TOOL_MAP = {
     "graph_provenance": tool_graph_provenance,
     "rebuild_global_graph": tool_rebuild_global_graph,
 }
-
-
-if __name__ == "__main__":
-    if len(sys.argv) < 2:
-        print(
-            json.dumps(
-                {"success": False, "error": "Missing tool name argument"}, ensure_ascii=False
-            )
-        )
-        sys.exit(1)
-
-    tool_name = sys.argv[1]
-    func = TOOL_MAP.get(tool_name)
-    if not func:
-        print(
-            json.dumps(
-                {"success": False, "error": f"Unknown tool: {tool_name}"}, ensure_ascii=False
-            )
-        )
-        sys.exit(1)
-
-    try:
-        params = json.load(sys.stdin) if not sys.stdin.isatty() else {}
-    except json.JSONDecodeError as e:
-        print(
-            json.dumps({"success": False, "error": f"Invalid JSON input: {e}"}, ensure_ascii=False)
-        )
-        sys.exit(1)
-
-    try:
-        result = func(params)
-    except Exception as e:
-        logger.exception("Tool %s failed", tool_name)
-        result = {"success": False, "error": str(e)}
-
-    print(json.dumps(result, ensure_ascii=False))

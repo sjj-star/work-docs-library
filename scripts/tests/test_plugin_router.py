@@ -306,57 +306,50 @@ def test_get_content_missing_params():
 
 
 # ---------------------------------------------------------------------------
-# plugin.json regression
+# kimi.plugin.json regression
 # ---------------------------------------------------------------------------
 
 
-def test_plugin_json_all_commands_use_venv_python():
-    """Test plugin json all commands use venv python."""
-    plugin_path = _SKILL_ROOT.parent / "plugin.json"
+def test_kimi_plugin_json_mcp_server_uses_venv_python():
+    """Test kimi.plugin.json declares a venv-python MCP server."""
+    plugin_path = _SKILL_ROOT.parent / "kimi.plugin.json"
     data = json.loads(plugin_path.read_text(encoding="utf-8"))
-    assert "tools" in data
-    for tool in data["tools"]:
-        cmd = tool.get("command", [])
-        assert len(cmd) >= 1, f"{tool['name']} has empty command"
-        assert cmd[0] == ".venv/bin/python3", (
-            f"{tool['name']} command should start with '.venv/bin/python3', got {cmd[0]}"
-        )
+    servers = data.get("mcpServers", {})
+    assert "workdocs" in servers, "Missing mcpServer 'workdocs'"
+    server = servers["workdocs"]
+    assert server.get("command") == ".venv/bin/python3"
+    assert "scripts/mcp_server.py" in server.get("args", [])
 
 
-def test_plugin_json_valid_schema():
-    """Test plugin json valid schema."""
-    plugin_path = _SKILL_ROOT.parent / "plugin.json"
+def test_kimi_plugin_json_valid_schema():
+    """Test kimi.plugin.json follows the new spec and exposes 11 MCP tools via mcp_server."""
+    plugin_path = _SKILL_ROOT.parent / "kimi.plugin.json"
     data = json.loads(plugin_path.read_text(encoding="utf-8"))
     assert data.get("name") == "work-docs-library"
     assert "version" in data
-    assert "tools" in data
-    names = [t["name"] for t in data["tools"]]
-    expected = [
+    assert "skills" in data
+    assert data.get("sessionStart", {}).get("skill") == "using-workdocs"
+    # Old fields are no longer used
+    assert "tools" not in data
+    assert "inject" not in data
+    assert "configFile" not in data
+
+    # The MCP server white-list is the source of truth for exposed tools.
+    import mcp_server as mcp
+
+    assert set(mcp.MCP_TOOL_MAP.keys()) == {
         "ingest",
         "semantic_search",
         "query",
+        "get_content",
         "status",
         "toc",
-        "reprocess",
-        "get_content",
         "graph_query",
         "graph_path",
-        "graph_upsert_entity",
-        "graph_delete_entity",
-        "graph_upsert_relation",
-        "graph_delete_relation",
-        "graph_feedback",
-        "graph_conflicts",
         "graph_provenance",
-        "doc_parse",
-        "doc_build_batches",
-        "doc_submit_batches",
-        "doc_ingest_results",
-        "rebuild_global_graph",
+        "graph_conflicts",
         "config",
-    ]
-    for name in expected:
-        assert name in names, f"Missing tool: {name}"
+    }
 
 
 # ---------------------------------------------------------------------------

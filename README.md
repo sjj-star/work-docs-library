@@ -131,12 +131,16 @@ flowchart TB
 
 ```
 work-docs-library/
-├── plugin.json                   # Kimi Code CLI Plugin 配置
+├── kimi.plugin.json              # Kimi Code 新规范插件 Manifest（MCP server + Skill）
+├── skills/
+│   └── using-workdocs/
+│       └── SKILL.md              # 会话启动时注入的 Agent 使用指南
 ├── AGENTS.md                     # Agent 开发指南（架构、策略、代码规范）
 ├── README.md                     # 本文件
 ├── config.json                   # 用户持久化配置（API 参数、模型选择等）
 ├── scripts/
-│   ├── plugin_router.py          # Plugin 统一路由（stdin/stdout JSON）
+│   ├── mcp_server.py             # MCP stdio server（JSON-RPC，stdout 隔离）
+│   ├── plugin_router.py          # Plugin 工具函数库（被 mcp_server / admin_tools 复用）
 │   ├── requirements.txt
 │   ├── .env.example              # 环境变量模板
 │   ├── .env                      # 实际环境变量（gitignored）
@@ -211,17 +215,27 @@ cp scripts/.env.example scripts/.env
 
 用户持久化配置也可写入 `config.json`（项目根目录），详见 [配置说明](#配置说明)。
 
+### 注册插件
+
+在 Kimi Code CLI 中安装（manifest 为 `kimi.plugin.json`）：
+
+```bash
+/plugins install ~/.kimi/plugins/work-docs-library
+```
+
+安装成功后，会话启动时会自动加载 `skills/using-workdocs/SKILL.md`，Agent 可通过 `mcp__workdocs__*` 调用插件能力。
+
 ---
 
 ## 快速开始
 
-本项目以 **Kimi Code CLI Plugin** 形式运行，通过 Kimi CLI 的命令行界面调用工具。
+本项目以 **Kimi Code CLI Plugin** 形式运行，通过 MCP 工具调用。
 
 ### 1. 导入文档（完整流程）
 
-```bash
-# 在 Kimi CLI 中执行
-/ingest path/to/document.pdf
+```text
+# 在 Kimi CLI 中通过 MCP 工具调用
+mcp__workdocs__ingest {"path": "path/to/document.pdf"}
 ```
 
 处理流程：
@@ -231,27 +245,29 @@ cp scripts/.env.example scripts/.env
 4. 构建知识图谱并持久化
 5. 向量化后写入 SQLite + FAISS
 
-### 2. 分阶段导入（支持人工干预）
+### 2. 分阶段导入（支持人工干预，不通过 MCP）
 
 当需要审查或修正中间产物时，可使用六阶段流程。每个阶段的产物均持久化到磁盘，支持人工编辑后重新触发下游阶段。
+
+> 阶段工具（`doc_parse`、`doc_build_batches` 等）以及 `reprocess`、`rebuild_global_graph` 属于数据改写/管理操作，**不通过 MCP 暴露给 Agent**。它们通过 `scripts/admin_tools.py` 提供命令行入口，或可直接调用 `KnowledgeBaseService` Python API。
 
 #### 阶段1: 解析（PDF → Markdown）
 
 ```bash
-/doc_parse path/to/document.pdf
+python scripts/admin_tools.py stage1_parse --params '{"file_path":"path/to/document.pdf","output_dir":"knowledge_base/parsed"}'
 ```
 
 - **输入**: PDF 文件
 - **输出**: `knowledge_base/parsed/{doc_id}/result.md` + `images/`
 - **干预**: 直接编辑 `result.md`（修正文本、调整标题层级、补充内容）
-- **触发下一阶段**: `/doc_build_batches {doc_id}`
+- **触发下一阶段**: `python scripts/admin_tools.py stage2_build_batches --params '{"doc_id":"{doc_id}"}'`
 - **注意**: 编辑后 content_hash 会变化，阶段3 的增量分析将识别为全部变更
 
 #### 阶段2: 构建 Batch JSONL
 
 ```bash
-/doc_build_batches {doc_id}
-# 可选参数: --max-chars 10000（每个 batch 最大字符数）
+python scripts/admin_tools.py stage2_build_batches --params '{"doc_id":"{doc_id}"}'
+# 可选在 params 中加入 "max_chars": 10000（每个 batch 最大字符数）
 ```
 
 - **输入**: `parsed/{doc_id}/result.md`
@@ -263,15 +279,16 @@ cp scripts/.env.example scripts/.env
   - 修改 `custom_id`：无需同步修改 `batch_info.json`（不会报错，但该 request 在增量过滤时可能不会被选中）
   - **新增 requests：必须在 `batch_info.json` 中同步添加对应的 `custom_id` → `chapter_titles` 映射**，否则 stage4 的 `chapter_map` 无法回填，导致新增实体的 `source_chapter` 为空
   - `extra_body.thinking` 会被 stage3 自动补充（无需手动添加）
-- **触发下一阶段**: `/doc_submit_batches {doc_id}`
+- **触发下一阶段**: `python scripts/admin_tools.py stage3_submit_batches --params '{"doc_id":"{doc_id}"}'`
 
 #### 阶段3: 提交 LLM Batch API（支持 Chat 回退）
 
 ```bash
-/doc_submit_batches {doc_id}
-# 可选参数: --file-path PATH（原始 PDF 路径，数据库无记录时必填）
-#            --jsonl-path PATH（自定义 JSONL 路径）
-#            --force（强制重新处理，忽略缓存）
+python scripts/admin_tools.py stage3_submit_batches --params '{"doc_id":"{doc_id}"}'
+# 可选在 params 中加入：
+#   "file_path": "PATH"（原始 PDF 路径，数据库无记录时必填）
+#   "jsonl_path": "PATH"（自定义 JSONL 路径）
+#   "force": true（强制重新处理，忽略缓存）
 ```
 
 - **输入**: 优先读取 `batch/{doc_id}.jsonl`（支持用户编辑后重新提交），结合 `batch_info.json` 做增量过滤
@@ -280,27 +297,28 @@ cp scripts/.env.example scripts/.env
 - **干预**: 编辑 `results.jsonl`（修正 LLM 提取错误：修改 entity 名称、添加遗漏的关系、修正图片描述）
 - **注意**: `incremental.json` 是机器生成的 hash 校验文件，**不要手动编辑**
 - **模式切换**: 设置 `WORKDOCS_LLM_MODE=chat`（`.env` 中）或 `config.json` 中 `"llm.mode": "chat"` 可切换到同步 Chat API 模式。`.env` 优先级高于 `config.json`。Chat 模式逐条调用同步 API，结果以与 Batch API 完全一致的格式写入 `results.jsonl`，Stage 4 无需任何修改即可复用。单条失败不中断流程，适合调试或 Batch API 不可用时作为回退
-- **触发下一阶段**: `/doc_ingest_results {doc_id}`
+- **触发下一阶段**: `python scripts/admin_tools.py stage4_ingest_results --params '{"doc_id":"{doc_id}"}'`
 
 #### 阶段4: 解析入库（不含向量化）
 
 ```bash
-/doc_ingest_results {doc_id}
-# 可选参数: --file-path PATH（原始 PDF 路径）
-#            --results-path PATH（自定义 results.jsonl 路径）
-#            --force（强制重新处理）
+python scripts/admin_tools.py stage4_ingest_results --params '{"doc_id":"{doc_id}"}'
+# 可选在 params 中加入：
+#   "file_path": "PATH"（原始 PDF 路径）
+#   "results_path": "PATH"（自定义 results.jsonl 路径）
+#   "force": true（强制重新处理）
 ```
 
 - **输入**: `batch/{doc_id}_results.jsonl` + `batch/{doc_id}_batch_info.json` + `batch/{doc_id}_incremental.json`
 - **输出**: SQLite content_blocks + heading_maps（content_block 状态 `embedded`）+ `graphs/{doc_id}.json`
-- **干预**: 直接编辑 `graphs/{doc_id}.json`（但推荐通过 `graph_upsert_entity`/`graph_upsert_relation` 等 Plugin 工具修改，自动维护索引一致性）
-- **注意**: 直接编辑子图后，必须调用 `/rebuild_global_graph` 才能同步全局图 `global.json`
-- **触发下一阶段**: `/doc_build_embed_jsonl {doc_id}`
+- **干预**: 直接编辑 `graphs/{doc_id}.json`（但推荐通过 `graph_upsert_entity`/`graph_upsert_relation` 等管理命令修改，自动维护索引一致性）
+- **注意**: 直接编辑子图后，必须调用 `python scripts/admin_tools.py rebuild_global_graph` 才能同步全局图 `global.json`
+- **触发下一阶段**: `python scripts/admin_tools.py stage5_build_embed_jsonl --params '{"doc_id":"{doc_id}"}'`
 
 #### 阶段5: 构建 Embedding Batch JSONL
 
 ```bash
-/doc_build_embed_jsonl {doc_id}
+python scripts/admin_tools.py stage5_build_embed_jsonl --params '{"doc_id":"{doc_id}"}'
 ```
 
 - **输入**: SQLite content_blocks（状态 `embedded` 且暂无 `metadata.embedding`）
@@ -311,13 +329,13 @@ cp scripts/.env.example scripts/.env
 - **⚠️ 关键限制**:
   - 删除行：可直接删除，不影响其他行（每个 request 独立）
   - 新增行：不建议新增（新 block 需先有 db_id）
-- **触发下一阶段**: `/doc_submit_embed_batches {doc_id}`
+- **触发下一阶段**: `python scripts/admin_tools.py stage6_submit_embed_batches --params '{"doc_id":"{doc_id}"}'`
 
 #### 阶段6: 同步 Embedding 向量化
 
 ```bash
-/doc_submit_embed_batches {doc_id}
-# 可选参数: --embed-jsonl-path PATH（自定义 Embedding JSONL 路径）
+python scripts/admin_tools.py stage6_submit_embed_batches --params '{"doc_id":"{doc_id}"}'
+# 可选在 params 中加入 "embed_jsonl_path": "PATH"（自定义 Embedding JSONL 路径）
 ```
 
 - **输入**: `batch/{doc_id}_embed.jsonl`
@@ -328,29 +346,29 @@ cp scripts/.env.example scripts/.env
 
 ### 3. 语义搜索
 
-```bash
-/search AH bus arbitration
+```text
+mcp__workdocs__semantic_search {"text": "AH bus arbitration", "top_k": 5}
 ```
 
 ### 4. 按章节查询
 
 支持子串匹配和递归子标题查询：
 
-```bash
+```text
 # 子串匹配："CPU" 可匹配 "2.1 CPU Architecture"
-/query --doc-id <DOC_HASH> --chapter "CPU"
+mcp__workdocs__query {"doc_id": "<DOC_HASH>", "chapter": "CPU"}
 
 # 正则匹配（利用 heading_maps 索引，避免全表扫描）
-/query --doc-id <DOC_HASH> --chapter-regex "^2\\."
+mcp__workdocs__query {"doc_id": "<DOC_HASH>", "chapter_regex": "^2\\."}
 
 # 包含子章节内容（自动包含 2.1.1、2.1.2 等）
-/query --doc-id <DOC_HASH> --chapter "2.1" --include-children
+mcp__workdocs__query {"doc_id": "<DOC_HASH>", "chapter": "2.1", "include_children": true}
 ```
 
 ### 5. 查看已导入文档
 
-```bash
-/status
+```text
+mcp__workdocs__status {}
 ```
 
 ### 6. 图谱查询
@@ -374,34 +392,32 @@ print(f'entities={len(g.get(\"nodes\", []))}, relations={len(g.get(\"edges\", []
 
 ## Plugin 工具说明
 
-Kimi CLI 通过 `plugin.json` 注册以下工具：
+本插件遵循最新 Kimi Code 插件规范：
 
-| 工具名 | 作用 |
-|--------|------|
-| `ingest` | 提取并存储文档（PDF），完整流程一次性执行 |
-| `doc_parse` | 阶段1：PDF → Markdown + 图片（可手动调整） |
-| `doc_build_batches` | 阶段2：Markdown → Batch JSONL（本地生成，不调用 API） |
-| `doc_submit_batches` | 阶段3：读取 `batch/{doc_id}.jsonl`（支持用户编辑后重新提交），提交 Batch API 并保存原始结果文件 |
-| `doc_build_embed_jsonl` | 阶段5：从已入库 content_blocks 构建 Embedding Batch JSONL（本地，可审查） |
-| `doc_submit_embed_batches` | 阶段6：提交 Embedding Batch API 并解析结果入库（完成向量化） |
-| `doc_ingest_results` | 阶段4：从结果文件解析实体、构建图谱、保存 content_blocks（不含向量化） |
-| `semantic_search` | 语义向量搜索（`graph_depth=0`）+ 可选关联图谱扩展（`graph_depth>0`） |
-| `query` | 按章节、关键词、概念查询 content_block |
-| `status` | 列出所有已导入文档，或查看指定文档的详细状态与进度 |
-| `toc` | 查看文档目录 |
-| `reprocess` | 强制重新处理文档 |
-| `get_content` | 获取完整未截断内容，可选同时返回关联图谱实体/关系 |
-| `graph_query` | 查询知识图谱实体（`depth=0`），支持扩展邻居（`depth=1`）和子图（`depth>1`） |
-| `graph_path` | 查找两实体间的路径（支持关系过滤） |
-| `graph_upsert_entity` | 添加/更新图谱实体（已存在则更新，不存在则创建） |
-| `graph_delete_entity` | 删除实体（级联删边） |
-| `graph_upsert_relation` | 添加/更新图谱关系 |
-| `graph_delete_relation` | 删除关系 |
-| `graph_feedback` | 提交（`action=submit`）或查询（`action=query`）对实体/关系的反馈 |
-| `graph_conflicts` | 查询冲突日志 |
-| `graph_provenance` | 实体来源溯源：从图谱实体通过桥接索引 O(1) 反向查找原始文档 content_block（调试与验证） |
-| `rebuild_global_graph` | 全量重建全局图谱（修复不一致） |
-| `config` | 打印当前生效配置（支持脱敏） |
+- **Manifest**：`kimi.plugin.json` 声明了一个 MCP server (`workdocs`) 和会话启动 Skill (`using-workdocs`)。
+- **MCP 工具**：仅暴露适合 Agent 自主调用的 **读取 + 导入** 类工具，调用格式为 `mcp__workdocs__<tool_name>`。
+- **管理工具**：数据改写/阶段调试类功能不通过 MCP 暴露，保留在 `scripts/admin_tools.py`（阶段 2）中供手动维护。
+
+### MCP 工具（11 个）
+
+| MCP 工具名 | 作用 |
+|-----------|------|
+| `mcp__workdocs__ingest` | 一键导入 PDF/目录，自动完成解析→Batch→入库→向量化 |
+| `mcp__workdocs__semantic_search` | 语义向量搜索；`graph_depth>0` 时联合图谱扩展 |
+| `mcp__workdocs__query` | 按章节、关键词、概念查询 content_block |
+| `mcp__workdocs__status` | 列出所有已导入文档或查看指定文档进度 |
+| `mcp__workdocs__toc` | 查看文档目录 |
+| `mcp__workdocs__get_content` | 获取完整未截断内容，可选同时返回关联图谱实体/关系 |
+| `mcp__workdocs__graph_query` | 查询图谱实体/邻居/子图 |
+| `mcp__workdocs__graph_path` | 查找两实体间路径 |
+| `mcp__workdocs__graph_provenance` | 实体来源溯源 |
+| `mcp__workdocs__graph_conflicts` | 查询属性冲突日志 |
+| `mcp__workdocs__config` | 打印当前生效配置（强制脱敏） |
+
+### 不暴露为 MCP 的内部功能
+
+以下功能直接改写知识库数据或属于人工阶段调试，不进入 MCP 工具面：
+`doc_parse`、`doc_build_batches`、`doc_submit_batches`、`doc_ingest_results`、`doc_build_embed_jsonl`、`doc_submit_embed_batches`、`reprocess`、`graph_upsert_entity`、`graph_delete_entity`、`graph_upsert_relation`、`graph_delete_relation`、`graph_feedback`、`rebuild_global_graph`。
 
 ---
 
@@ -412,17 +428,16 @@ Kimi CLI 通过 `plugin.json` 注册以下工具：
 ```
 1. 环境变量（.env 文件，如 WORKDOCS_LLM_API_KEY）— 用户手动配置
    ↓
-2. 环境变量（Kimi CLI 运行时注入，如 llm.api_key）— 工具动态注入
+2. config.json（项目根目录）— 工具自动持久化
    ↓
-3. config.json（项目根目录）— 工具自动持久化
-   ↓
-4. 代码硬编码默认值
+3. 代码硬编码默认值
 ```
 
 `config.json` 与 `.env` 为双轨配置系统：
-- **`.env`**：用户手动配置，优先级最高，适合存放 API Key 等凭证，gitignored，不进入版本控制。`.env` 中的值会覆盖 Kimi CLI 注入和 `config.json`
-- **环境变量**：Kimi CLI 运行时动态注入，优先级第二
-- **`config.json`**：工具自动持久化，优先级第三，适合存放模型选择、端点地址等不敏感参数。由 `plugin.json` 的 `config_file` 指定路径，Kimi CLI 安装时自动注入凭证
+- **`.env`**：用户手动配置，优先级最高，适合存放 API Key 等凭证，gitignored，不进入版本控制。`.env` 中的值会覆盖 `config.json`
+- **`config.json`**：工具自动持久化，优先级第二，适合存放模型选择、端点地址等不敏感参数
+
+> 注意：新版 `kimi.plugin.json` 不再使用旧 `plugin.json` 的 `inject`/`configFile` 字段。API Key 请通过 `.env` 或 `config.json` 配置。
 
 ### 完整配置参考
 
@@ -682,10 +697,10 @@ pending ────────────────────────
 
 | 场景 | 行为 | 恢复方法 |
 |------|------|----------|
-| 进程崩溃在 stage4 与 stage6 之间 | content_blocks 状态为 `embedded`，FAISS 中无对应向量 | 重新调用 `/doc_submit_embed_batches {doc_id}` |
+| 进程崩溃在 stage4 与 stage6 之间 | content_blocks 状态为 `embedded`，FAISS 中无对应向量 | `python scripts/admin_tools.py stage6_submit_embed_batches --params '{"doc_id":"{doc_id}"}'` |
 | FAISS 索引文件损坏 | 加载时抛出 `RuntimeError` | 删除 `faiss.index` + `id_map.json`，重新处理所有文档 |
-| 全局图异常（节点<10 但文档>0） | 启动时检测到全局图不完整 | 自动触发 `rebuild_global_graph()` 重建；手动调用 `/rebuild_global_graph` 亦可 |
-| 子图 `{doc_id}.json` 缺失但 SQLite 存在 | 全局图缺少该文档实体 | 调用 `/doc_reprocess {doc_id}` 重新提取 |
+| 全局图异常（节点<10 但文档>0） | 启动时检测到全局图不完整 | 自动触发 `rebuild_global_graph()` 重建；手动执行 `python scripts/admin_tools.py rebuild_global_graph` 亦可 |
+| 子图 `{doc_id}.json` 缺失但 SQLite 存在 | 全局图缺少该文档实体 | `python scripts/admin_tools.py reprocess --params '{"doc_id":"{doc_id}"}'` |
 
 ---
 
@@ -772,7 +787,7 @@ WORKDOCS_PARSER_API_KEY=your-api-key
 
 ## Prompts 提示词文件
 
-`scripts/prompts/` 目录下的文本文件被代码**运行时读取**，无需重启即可生效。修改提示词后，重新执行 `/doc_build_batches` → `/doc_submit_batches` → `/doc_ingest_results` 即可看到效果，无需重启 Kimi CLI。
+`scripts/prompts/` 目录下的文本文件被代码**运行时读取**，无需重启即可生效。修改提示词后，重新执行 `stage2_build_batches` → `stage3_submit_batches` → `stage4_ingest_results` 即可看到效果，无需重启 Kimi CLI。
 
 ### `entity_extraction_system.txt` — 实体提取 system 提示词
 
@@ -838,7 +853,7 @@ Prompt 中显式规定格式，确保 LLM 输出统一：
 
 **Prompt 版本化管理流程**：
 1. 修改 `scripts/prompts/entity_extraction_system.txt`
-2. 执行 `/doc_build_batches {doc_id}` → `/doc_submit_batches {doc_id}` → `/doc_ingest_results {doc_id}`
+2. 执行 `python scripts/admin_tools.py stage2_build_batches --params '{"doc_id":"{doc_id}"}'` → `stage3_submit_batches` → `stage4_ingest_results`
 3. 对比全局节点/边数量变化、具体实体差异
 4. 记录"预期效果 vs 实际效果"，修正 Prompt 表述
 
@@ -881,7 +896,7 @@ Prompt 中显式规定格式，确保 LLM 输出统一：
 | **bits 格式不统一** | 同一文档中出现 `15-4`、`15:8`、`7-0`（减号）和 `15:8`、`7:0`（冒号）混用 | Prompt 已规定 `"15:0"` 冒号格式 | 在 Prompt 最终检查清单中增加 bits 格式校验 |
 | **reset_value 格式不统一** | `0`（数字）与 `0x0000`（十六进制）混用 | Prompt 已规定 `"0x0000"` 字符串格式 | 同上，在最终检查清单中增加格式校验 |
 | **孤立 RegisterField** | `TBPHSH`、`Reserved` 来源为 Appendix A 而非字段描述表格 | — | 在 Prompt 中增加 Appendix/附录章节排除规则 |
-| **跨文档属性合并** | 已修复：全局 `properties` 合并时比较文档信息完整性（非空属性数量），完整性高的文档优先。互补属性始终取并集。平局保留旧值。无法推断来源时保留现有值 | `doc_properties` 保存原始快照，`doc_id` 查询可获取精确属性 | 完整性评分基于属性数量而非语义权重。修改后建议调用 `/rebuild_global_graph` 重建全局图
+| **跨文档属性合并** | 已修复：全局 `properties` 合并时比较文档信息完整性（非空属性数量），完整性高的文档优先。互补属性始终取并集。平局保留旧值。无法推断来源时保留现有值 | `doc_properties` 保存原始快照，`doc_id` 查询可获取精确属性 | 完整性评分基于属性数量而非语义权重。修改后建议执行 `python scripts/admin_tools.py rebuild_global_graph` 重建全局图
 
 ---
 
@@ -889,7 +904,8 @@ Prompt 中显式规定格式，确保 LLM 输出统一：
 
 ### 官方 API 开发文档
 
-- [Kimi Code CLI 插件](https://moonshotai.github.io/kimi-cli/zh/customization/plugins.html)
+- [Kimi Code Plugins](https://moonshotai.github.io/kimi-code/zh/customization/plugins.html)
+- [Kimi Code MCP](https://moonshotai.github.io/kimi-code/zh/customization/mcp.html)
 - [Kimi API 概述](https://platform.kimi.com/docs/api/overview)
 - [Kimi 模型参数参考](https://platform.kimi.com/docs/api/models-overview)
 - [Kimi 使用 Batch API 批量处理任务](https://platform.kimi.com/docs/guide/use-batch-api)

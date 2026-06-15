@@ -63,11 +63,16 @@
 
 ```
 work-docs-library/
-├── plugin.json                   # Kimi Code CLI Plugin 配置（暴露 22 个工具）
+├── kimi.plugin.json              # Kimi Code 新规范插件 Manifest（MCP server + Skill）
+├── skills/
+│   └── using-workdocs/
+│       └── SKILL.md              # 会话启动时注入的 Agent 使用指南
 ├── config.json                   # 用户持久化配置模板（四层优先级）
 ├── pyproject.toml                # Python 项目配置、依赖、ruff/pyright/pytest 设置
 ├── scripts/
-│   ├── plugin_router.py          # Plugin 统一路由（stdin/stdout JSON）
+│   ├── mcp_server.py             # MCP stdio server（JSON-RPC，stdout 隔离）
+│   ├── plugin_router.py          # Plugin 工具函数库（被 mcp_server / admin_tools 复用）
+│   ├── admin_tools.py            # 不暴露为 MCP 的内部管理命令入口
 │   ├── requirements.txt          # 向后兼容的备用依赖清单（主要依赖在 pyproject.toml）
 │   ├── .env / .env.example       # 环境变量（凭证等，gitignored）
 │   ├── prompts/                  # LLM 提示词文件（运行时读取，无需重启）
@@ -255,7 +260,7 @@ monkeypatch.setattr(
 ### 1. API 密钥管理
 - API Key 存储于 `scripts/.env`（gitignored），**禁止**硬编码到源码或提交到版本控制
 - `config.json` 中的 `api_key` 字段为空字符串模板，实际值由环境变量或 Kimi CLI 运行时注入
-- `plugin.json` 的 `inject` 字段声明了凭证注入映射：`llm.api_key` ← `api_key`
+- 新版 `kimi.plugin.json` 不再使用旧 `plugin.json` 的 `inject` 字段；API Key 通过 `.env` 或 `config.json` 配置，由 `Config` 自行读取
 - `Config.to_dict()` 对 `LLM_API_KEY`/`EMBEDDING_API_KEY`/`PARSER_API_KEY` 始终脱敏为 `***`；`tool_config` 忽略用户传入的 `mask_sensitive` 参数，强制返回脱敏配置
 
 ### 2. 数据库安全
@@ -274,9 +279,10 @@ monkeypatch.setattr(
 
 ### 5. 文件系统安全
 - 所有图谱/索引持久化使用「临时文件 + `os.replace`」原子写入，避免崩溃导致文件损坏
-- `Config.setup_logging()` 将日志输出到 stderr，确保 stdout 保持纯 JSON（Plugin 通信协议要求）
+- `Config.setup_logging()` 将日志输出到 stderr；**MCP server 的 stdout 必须仅用于 JSON-RPC 消息**，严禁 print 或日志混入 stdout
 - Plugin 所有用户传入的文件路径必须通过 `_resolve_allowed_path()` 沙箱校验，禁止跳出允许目录或包含 `..`（已新增回归测试）
 - `BigModelParserClient` 解压 ZIP 时校验条目名，禁止 `..`、绝对路径、盘符，防止路径遍历
+- MCP 工具面仅暴露适合 Agent 自主调用的读取/导入类工具；数据改写/管理类功能放入 `scripts/admin_tools.py`，不进入 MCP
 
 ---
 
@@ -288,7 +294,9 @@ monkeypatch.setattr(
 | `scripts/prompts/*.txt` | ✅ 可改 | 提示词文件，运行时读取 |
 | `scripts/tests/*.py` | ✅ 可改 | 测试文件 |
 | `scripts/parsers/*.py` | ⚠️ 需批准 | 解析器影响数据输入质量 |
-| `plugin.json` | ⚠️ 需批准 | 插件定义，用户明确要求时可修改 |
+| `kimi.plugin.json` | ⚠️ 需批准 | Kimi Code 新规范插件 Manifest |
+| `scripts/mcp_server.py` | ⚠️ 需批准 | MCP stdio server，协议层变更影响插件可用性 |
+| `skills/using-workdocs/SKILL.md` | ⚠️ 需批准 | 会话启动 Skill，影响 Agent 使用行为 |
 | `config.json` | ✅ 可改 | 用户持久化配置模板 |
 | `README.md` / `AGENTS.md` / `DESIGN.md` | ✅ 可改 | 文档必须随代码同步更新 |
 | `knowledge_base/` | ❌ 禁止 | 运行时生成数据 |
@@ -313,7 +321,7 @@ monkeypatch.setattr(
 - 修改 Pipeline 核心流程（解析 → 章节树 → batch 构建 → 实体提取 → 图谱 → 向量化）
 - 删除已有功能或文件
 - 涉及真实 API 调用的操作（测试除外）
-- 修改 `plugin.json` 插件定义（除非用户明确要求）
+- 修改 `kimi.plugin.json` 插件 Manifest（除非用户明确要求）
 
 ---
 
@@ -340,7 +348,7 @@ monkeypatch.setattr(
 | 新增/删除实体或关系类型 | `DESIGN.md` Schema 扩展策略 + 第 22 章 | `AGENTS.md`「开发计划」只记完成标记，不记设计决策 |
 | 修复数据损坏/状态安全类 bug | `DESIGN.md` 第 20 章（审计教训） | 修复后不在文档中记录教训 |
 | 修改测试基础设施 | `README.md`「开发与测试」 | 在 `AGENTS.md`「测试策略」中重复粘贴实现代码 |
-| 修改 `.venv` / `plugin.json` / 安装方式 | `README.md`「安装」+ `plugin.json` | 安装路径在三份文档中不一致 |
+| 修改 `.venv` / `kimi.plugin.json` / 安装方式 | `README.md`「安装」+ `kimi.plugin.json` | 安装路径在三份文档中不一致 |
 
 ### 关键约束
 
@@ -430,6 +438,10 @@ monkeypatch.setattr(
 2. **评估体系**：实体提取准确率、关系提取召回率的自动化评估
 3. **DOCX/XLSX 接入 pipeline**：当前解析器代码存在但未接入 `DocGraphPipeline`
 4. **系统化加固（审计选项 B）**：跨存储事务回滚、VectorIndex 原子重建、参数限流、解析阈值配置化、fuzz/property 测试
+
+### 已完成的非表格项
+
+- ✅ **Kimi Code 新插件规范迁移**：旧 `plugin.json` 替换为 `kimi.plugin.json`；新增 `scripts/mcp_server.py` 暴露 11 个 MCP 工具；`scripts/admin_tools.py` 承载数据改写/管理命令；新增 `skills/using-workdocs/SKILL.md`
 
 ### PDF Parser 表格检测已知问题与下一步方向
 
