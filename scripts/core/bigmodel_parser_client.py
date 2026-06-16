@@ -34,7 +34,8 @@ class BigModelParserClient:
         self.base_url = "https://open.bigmodel.cn/api/paas/v4"
         if not self.api_key:
             raise RuntimeError(
-                "Parser API key not configured. Set WORKDOCS_PARSER_API_KEY in .env or config.json"
+                "Parser API key not configured. "
+                "Set WORKDOCS_PARSER_API_KEY in .env or environment variable"
             )
         self.headers = {"Authorization": f"Bearer {self.api_key}"}
 

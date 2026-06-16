@@ -124,7 +124,7 @@ class BaseLLMClient:
                 raise RuntimeError(
                     f"LLM 请求超时 ({timeout}s)。请求大小: text_len={text_len}, "
                     f"images={img_count}。建议: export WORKDOCS_LLM_TIMEOUT={suggested} "
-                    f"或在 config.json 中设置 'llm.timeout'={suggested}"
+                    f"或在 .env 中设置 WORKDOCS_LLM_TIMEOUT={suggested}"
                 ) from e
             except requests.HTTPError as e:
                 last_exc = e
