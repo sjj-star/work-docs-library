@@ -67,7 +67,6 @@ work-docs-library/
 ├── skills/
 │   └── using-workdocs/
 │       └── SKILL.md              # 会话启动时注入的 Agent 使用指南
-├── config.json                   # 用户持久化配置模板（四层优先级）
 ├── pyproject.toml                # Python 项目配置、依赖、ruff/pyright/pytest 设置
 ├── scripts/
 │   ├── mcp_server.py             # MCP stdio server（JSON-RPC，stdout 隔离）
@@ -79,7 +78,7 @@ work-docs-library/
 │   │   ├── entity_extraction_system.txt
 │   │   └── entity_extraction_user.txt
 │   ├── core/                     # 业务逻辑层
-│   │   ├── config.py             # 统一配置中心（.env / 环境变量 / config.json / 默认值）
+│   │   ├── config.py             # 统一配置中心（.env / 环境变量 → 默认值）
 │   │   ├── doc_graph_pipeline.py # ⭐ DocGraphPipeline 主管道（六阶段）
 │   │   ├── knowledge_base_service.py  # 统一服务层封装（DB + VectorIndex + GraphStore + Bridge）
 │   │   ├── batch_clients.py      # BaseBatchClient + BatchClient（通用 OpenAI-compatible Batch API）
@@ -95,7 +94,7 @@ work-docs-library/
 │   │   ├── pdf_parser.py         # PDF 本地解析器（PyMuPDF + TOC 驱动章节识别 + 表格/图片检测）
 │   │   ├── office_parser.py      # DOCX / XLSX 解析器（代码存在，尚未接入 pipeline）
 │   │   └── image_utils.py        # 图片压缩与三分类（彩色/灰度/黑白）
-│   ├── tests/                    # pytest 测试集（400 passed, 2 skipped）
+│   ├── tests/                    # pytest 测试集（408 passed, 2 skipped）
 │   │   ├── conftest.py           # 三重环境隔离（清除 WORKDOCS_ 环境变量、阻止 load_dotenv、临时目录重定向）
 │   │   ├── fixtures/             # 测试 fixture（PDF 页样本、解析输出样本）
 │   │   └── test_*.py             # 各模块测试文件
@@ -143,7 +142,7 @@ cd /path/to/work-docs-library
 
 ### 测试执行
 ```bash
-# 完整测试集（当前状态：400 passed, 2 skipped, 0 failed）
+# 完整测试集（当前状态：408 passed, 2 skipped, 0 failed）
 cd /path/to/work-docs-library
 PYTHONPATH=scripts ./.venv/bin/python -m pytest scripts/tests/ -v
 
@@ -216,7 +215,7 @@ PYTHONPATH=scripts ./.venv/bin/python -m pytest \
   2. 阻止 `load_dotenv` 重新加载 `.env` 文件
   3. 重定向 Config 默认路径到临时目录（DB、FAISS、Graph 均隔离）
 - **回归即修复**：任何导致测试失败的变更必须当场修复
-- **400 个测试用例必须全部通过**（2 个 skipped 为正常：真实文档参数集为空）
+- **408 个测试用例必须全部通过**（2 个 skipped 为正常：真实文档参数集为空）
 
 ### 测试文件清单
 | 测试文件 | 用例数 | 说明 |
@@ -229,7 +228,7 @@ PYTHONPATH=scripts ./.venv/bin/python -m pytest \
 | `test_db.py` | 15 | SQLite 操作、事务管理 |
 | `test_vector_index.py` | 9 | FAISS 索引增删查、持久化 |
 | `test_llm_client.py` | 9 | LLM 客户端 Mock |
-| `test_config_json.py` | 15 | 配置优先级、凭证注入 |
+| `test_config_env.py` | 13 | 环境变量配置优先级、默认值、敏感 key 脱敏 |
 | `test_chapter_parser.py` | 20 | ChapterParser 树形章节解析测试 |
 | `test_image_utils.py` | 13 | 图片压缩工具测试 |
 | `test_graph_store.py` | 77 | NetworkX 图谱存储 CRUD、冲突检测、属性索引、子图、路径搜索、持久化 |
@@ -259,8 +258,7 @@ monkeypatch.setattr(
 
 ### 1. API 密钥管理
 - API Key 存储于 `scripts/.env`（gitignored），**禁止**硬编码到源码或提交到版本控制
-- `config.json` 中的 `api_key` 字段为空字符串模板，实际值由环境变量或 Kimi CLI 运行时注入
-- 新版 `kimi.plugin.json` 不再使用旧 `plugin.json` 的 `inject` 字段；API Key 通过 `.env` 或 `config.json` 配置，由 `Config` 自行读取
+- 新版 `kimi.plugin.json` 不再使用旧 `plugin.json` 的 `inject` 字段；API Key 通过 `.env` 或环境变量配置，由 `Config` 自行读取
 - `Config.to_dict()` 对 `LLM_API_KEY`/`EMBEDDING_API_KEY`/`PARSER_API_KEY` 始终脱敏为 `***`；`tool_config` 忽略用户传入的 `mask_sensitive` 参数，强制返回脱敏配置
 
 ### 2. 数据库安全
@@ -297,7 +295,7 @@ monkeypatch.setattr(
 | `kimi.plugin.json` | ⚠️ 需批准 | Kimi Code 新规范插件 Manifest |
 | `scripts/mcp_server.py` | ⚠️ 需批准 | MCP stdio server，协议层变更影响插件可用性 |
 | `skills/using-workdocs/SKILL.md` | ⚠️ 需批准 | 会话启动 Skill，影响 Agent 使用行为 |
-| `config.json` | ✅ 可改 | 用户持久化配置模板 |
+
 | `README.md` / `AGENTS.md` / `DESIGN.md` | ✅ 可改 | 文档必须随代码同步更新 |
 | `knowledge_base/` | ❌ 禁止 | 运行时生成数据 |
 | `scripts/benchmark/` | ✅ 可改 | 性能基准与诊断脚本 |
@@ -341,7 +339,7 @@ monkeypatch.setattr(
 
 | 代码变更类型 | 必须更新的文档 | 禁止出现的动作 |
 |-------------|---------------|---------------|
-| 修改配置项（增/删/改默认值/改说明） | `README.md`「配置说明」为唯一源头 → 同步到 `config.json` 模板 | 在 `AGENTS.md` 中独立维护配置表格；只更新一份导致另一份过期 |
+| 修改配置项（增/删/改默认值/改说明） | `README.md`「配置说明」为唯一源头 → 同步到 `scripts/.env.example` 模板 | 在 `AGENTS.md` 中独立维护配置表格；只更新一份导致另一份过期 |
 | 修改 Pipeline 阶段或产物路径 | `DESIGN.md` 第 19 章 | 产物路径在三份文档中不一致 |
 | 修改数据模型字段 | `DESIGN.md` 对应数据模型章节 | `AGENTS.md` 的「类型与模型」字段列表与代码 dataclass 不一致 |
 | 修改 Prompt 策略 | `DESIGN.md` 第 22 章（设计意图+变更历史） | 只改 prompt 文件不改 `DESIGN.md` |
@@ -352,7 +350,7 @@ monkeypatch.setattr(
 
 ### 关键约束
 
-1. **配置表唯一源头**：`README.md`「配置说明」是全部活跃配置项的唯一权威表格。`AGENTS.md` 不再维护配置表，改为引用 `README.md`。`config.json` 模板必须与表格同步。
+1. **配置表唯一源头**：`README.md`「配置说明」是全部活跃配置项的唯一权威表格。`AGENTS.md` 不再维护配置表，改为引用 `README.md`。`scripts/.env.example` 模板必须与表格同步。
 2. **测试数字统一引用**：「XX 个测试全部通过」等易变数字，以最近一次 pytest 输出为准。三份文档中出现时应保持一致。
 3. **禁止三份文档独立维护同一张表格**：如 Pipeline 产物映射表、已知限制列表、实体类型清单等，必须只在一份文档中维护，其他文档用索引引用。
 4. **修改后自检**：完成代码修改和文档更新后，运行 `grep -n` 检查三份文档中是否出现同一配置项/路径的不同默认值或不同说明。
@@ -411,7 +409,7 @@ monkeypatch.setattr(
 - ✅ **环境隔离三重机制**：彻底根治 `.env` 污染测试环境的问题
 - ✅ **存储粒度与查询粒度解耦（方案C）**：引入 `content_blocks` 表作为存储粒度，`heading_maps` 表作为查询粒度，batch 数量减少 40-50%
 - ✅ **FAISS ID 偏移**：`_BLOCK_FAISS_OFFSET = 10_000_000` 避免 block db_id 与旧 chunks ID 冲突
-- ✅ **400 个测试全部通过**
+- ✅ **408 个测试全部通过**
 - ✅ **PDF Parser 表格检测增强（Milestone 1-4）**：`find_tables(strategy="lines_strict")`、caption-gated 预筛选、位域图重叠保护、PyMuPDF4LLM fallback、全部 14 个 Magic Number 配置化
 - ✅ **PDF Parser 图片检测增强（Milestone 2）**：`page.get_image_info()` 过滤链、双路径提取
 - ✅ **性能基准测试**：TI (219页) 10.3s/0表格 → 46.2s/68表格；AMBA (585页) 8.7s/0表格 → 93.3s/22表格
@@ -442,6 +440,7 @@ monkeypatch.setattr(
 ### 已完成的非表格项
 
 - ✅ **Kimi Code 新插件规范迁移**：旧 `plugin.json` 替换为 `kimi.plugin.json`；新增 `scripts/mcp_server.py` 暴露 11 个 MCP 工具；`scripts/admin_tools.py` 承载数据改写/管理命令；新增 `skills/using-workdocs/SKILL.md`
+- ✅ **移除 config.json 配置机制**：配置来源统一为 `.env`/环境变量 → 默认值
 
 ### PDF Parser 表格检测已知问题与下一步方向
 

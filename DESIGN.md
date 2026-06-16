@@ -175,18 +175,19 @@
 
 ---
 
-## 8. 配置系统：config.json + .env 双轨设计
+## 8. 配置系统：.env / 环境变量 → 默认值
 
-**选择**：四层优先级配置系统——`.env`（用户手动配置）> 环境变量（Kimi CLI 注入）> `config.json`（工具持久化）> 代码默认值。
+**选择**：两层优先级配置系统——`.env`/环境变量 > 代码默认值。
 
 **原因**：
-- **`.env`**：用户手动配置，优先级最高，适合存放 API Key 等凭证，gitignored，不进入版本控制。用户手动修改的配置应覆盖工具自动注入的值
-- **环境变量**：Kimi CLI 运行时动态注入，优先级第二，支持在不修改文件的情况下临时覆盖 `config.json`
-- **`config.json`**：工具自动持久化，优先级第三，适合存放模型选择、端点地址等不敏感参数；由 `plugin.json` 的 `config_file` 指定路径，Kimi CLI 安装时自动注入凭证
+- 新 Kimi Code 插件规范不再支持旧 `plugin.json` 的 `configFile`/`inject` 字段，Kimi CLI 不再自动管理 `config.json`。
+- 项目没有任何代码写入 `config.json`，它只能作为静态模板存在，维护成本高且容易与 `.env` 混淆。
+- 统一使用 `.env`/环境变量后，配置来源单一，更易于在 CI、容器和插件环境中管理。
 
 **实现**：
-- `_resolve_config(env_name, json_path, default)` 统一解析，优先级逻辑集中在一处（`BigModelParserClient` 的 `_resolve_api_key` 为历史遗留独立实现，未复用 `_resolve_config`，后续建议统一）
-- 数值类型配置（dimension、batch_max_chars 等）在类定义后通过 `_initialize_numeric_configs()` 初始化
+- `_resolve_config(env_name, default)` 统一解析，仅检查环境变量和默认值。
+- `scripts/.env.example` 作为配置模板，与 README.md「配置说明」表格保持同步。
+- 数值类型配置（dimension、batch_max_chars 等）在类定义后通过 `_initialize_numeric_configs()` 初始化。
 
 ---
 

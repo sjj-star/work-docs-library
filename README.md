@@ -137,7 +137,6 @@ work-docs-library/
 │       └── SKILL.md              # 会话启动时注入的 Agent 使用指南
 ├── AGENTS.md                     # Agent 开发指南（架构、策略、代码规范）
 ├── README.md                     # 本文件
-├── config.json                   # 用户持久化配置（API 参数、模型选择等）
 ├── scripts/
 │   ├── mcp_server.py             # MCP stdio server（JSON-RPC，stdout 隔离）
 │   ├── plugin_router.py          # Plugin 工具函数库（被 mcp_server / admin_tools 复用）
@@ -164,7 +163,7 @@ work-docs-library/
 │   │   ├── pdf_parser.py         # PDF 本地解析器（fallback，输出与 BigModel 一致）
 │   │   ├── office_parser.py      # DOCX / XLSX 解析器（代码存在，尚未接入 pipeline）
 │   │   └── image_utils.py        # 图片压缩工具
-│   └── tests/                    # pytest 测试集（400 个用例）
+│   └── tests/                    # pytest 测试集（408 个用例）
 ├── knowledge_base/               # 运行时自动生成
 │   ├── workdocs.db               # SQLite 元数据
 │   ├── faiss.index               # FAISS 向量索引
@@ -212,8 +211,6 @@ pip install -r scripts/requirements.txt
 cp scripts/.env.example scripts/.env
 # 编辑 scripts/.env，填入你的 API Key
 ```
-
-用户持久化配置也可写入 `config.json`（项目根目录），详见 [配置说明](#配置说明)。
 
 ### 注册插件
 
@@ -296,7 +293,7 @@ python scripts/admin_tools.py stage3_submit_batches --params '{"doc_id":"{doc_id
 - **产物格式**: `results.jsonl` 每行是一个 JSON response，`response.body.choices[0].message.content` 是 LLM 提取的 entities/relations/image_descriptions
 - **干预**: 编辑 `results.jsonl`（修正 LLM 提取错误：修改 entity 名称、添加遗漏的关系、修正图片描述）
 - **注意**: `incremental.json` 是机器生成的 hash 校验文件，**不要手动编辑**
-- **模式切换**: 设置 `WORKDOCS_LLM_MODE=chat`（`.env` 中）或 `config.json` 中 `"llm.mode": "chat"` 可切换到同步 Chat API 模式。`.env` 优先级高于 `config.json`。Chat 模式逐条调用同步 API，结果以与 Batch API 完全一致的格式写入 `results.jsonl`，Stage 4 无需任何修改即可复用。单条失败不中断流程，适合调试或 Batch API 不可用时作为回退
+- **模式切换**: 设置 `WORKDOCS_LLM_MODE=chat`（`.env` 中）可切换到同步 Chat API 模式。Chat 模式逐条调用同步 API，结果以与 Batch API 完全一致的格式写入 `results.jsonl`，Stage 4 无需任何修改即可复用。单条失败不中断流程，适合调试或 Batch API 不可用时作为回退
 - **触发下一阶段**: `python scripts/admin_tools.py stage4_ingest_results --params '{"doc_id":"{doc_id}"}'`
 
 #### 阶段4: 解析入库（不含向量化）
@@ -426,92 +423,91 @@ print(f'entities={len(g.get(\"nodes\", []))}, relations={len(g.get(\"edges\", []
 ### 配置优先级架构
 
 ```
-1. 环境变量（.env 文件，如 WORKDOCS_LLM_API_KEY）— 用户手动配置
+1. 环境变量（.env 文件或系统环境变量，如 WORKDOCS_LLM_API_KEY）— 用户手动配置
    ↓
-2. config.json（项目根目录）— 工具自动持久化
-   ↓
-3. 代码硬编码默认值
+2. 代码硬编码默认值
 ```
 
-`config.json` 与 `.env` 为双轨配置系统：
-- **`.env`**：用户手动配置，优先级最高，适合存放 API Key 等凭证，gitignored，不进入版本控制。`.env` 中的值会覆盖 `config.json`
-- **`config.json`**：工具自动持久化，优先级第二，适合存放模型选择、端点地址等不敏感参数
+所有配置均通过 `WORKDOCS_*` 环境变量管理：
+- **`.env`**：用户手动配置，优先级最高，适合存放 API Key 等凭证，gitignored，不进入版本控制。
+- **环境变量**：CI/容器/Kimi Code CLI 运行时注入，可临时覆盖 `.env`。
+- **代码默认值**：当 `.env` 和环境变量均未设置时回退。
 
-> 注意：新版 `kimi.plugin.json` 不再使用旧 `plugin.json` 的 `inject`/`configFile` 字段。API Key 请通过 `.env` 或 `config.json` 配置。
+> 注意：新版 `kimi.plugin.json` 不再使用旧 `plugin.json` 的 `inject`/`configFile` 字段。`config.json` 已移除，请使用 `scripts/.env`。
 
 ### 完整配置参考
 
-| 环境变量 | config.json 路径 | 默认值 | 说明 |
-|---------|-----------------|--------|------|
+| 环境变量 | 默认值 | 说明 |
+|---------|--------|------|
 | **LLM 配置** | | | |
-| `WORKDOCS_LLM_API_KEY` | `llm.api_key` | 空 | Kimi API Key（Batch API 实体提取用） |
-| `WORKDOCS_LLM_BASE_URL` | `llm.endpoint` | `https://api.moonshot.cn/v1` | Kimi Base URL |
-| `WORKDOCS_LLM_MODEL` | `llm.model` | `kimi-k2.5` | 对话模型 |
-| `WORKDOCS_LLM_THINKING_ENABLED` | `llm.thinking_enabled` | `0` | 是否启用 thinking 模式（`1`=`enabled`，`0`=`disabled`）。Kimi K2.6 等模型 thinking 默认开启，**必须显式传递**才能可靠关闭 |
-| `WORKDOCS_LLM_MODE` | `llm.mode` | `batch` | LLM 实体提取模式：`batch`（Batch API，成本为同步的 50%，默认）或 `chat`（同步 Chat API，逐条调用，适合调试或 Batch API 不可用时回退） |
-| `WORKDOCS_LLM_BATCH_ENDPOINT` | `llm.batch_endpoint` | `/v1/chat/completions` | LLM Batch API endpoint |
-| `WORKDOCS_LLM_BATCH_COMPLETION_WINDOW` | `llm.completion_window` | `24h` | Batch 完成窗口（如 `24h`） |
-| `WORKDOCS_LLM_BATCH_MAX_CHARS` | `llm.batch_max_chars` | `10000` | 每个 LLM batch 最大文本字符数（LLM 聚合粒度） |
-| `WORKDOCS_BLOCK_MAX_CHARS` | `block.max_chars` | `6000` | content_blocks 存储切分粒度（向量化粒度），基于 BigModel embedding-3 经验值 |
-| `WORKDOCS_LLM_BATCH_TIMEOUT` | `llm.batch_timeout` | `3600` | LLM Batch API 轮询超时（秒） |
-| `WORKDOCS_LLM_MAX_RETRIES` | `llm.max_retries` | `3` | LLM 同步请求最大重试次数 |
-| `WORKDOCS_LLM_RETRY_BACKOFF` | `llm.retry_backoff` | `2` | LLM 重试退避系数（秒） |
-| `WORKDOCS_LLM_TIMEOUT` | `llm.timeout` | `120` | LLM 同步请求超时（秒） |
+| `WORKDOCS_LLM_API_KEY` | 空 | Kimi API Key（Batch API 实体提取用） |
+| `WORKDOCS_LLM_BASE_URL` | `https://api.moonshot.cn/v1` | Kimi Base URL |
+| `WORKDOCS_LLM_MODEL` | `kimi-k2.5` | 对话模型 |
+| `WORKDOCS_LLM_THINKING_ENABLED` | `0` | 是否启用 thinking 模式（`1`=`enabled`，`0`=`disabled`）。Kimi K2.6 等模型 thinking 默认开启，**必须显式传递**才能可靠关闭 |
+| `WORKDOCS_LLM_MODE` | `batch` | LLM 实体提取模式：`batch`（Batch API，成本为同步的 50%，默认）或 `chat`（同步 Chat API，逐条调用，适合调试或 Batch API 不可用时回退） |
+| `WORKDOCS_LLM_BATCH_ENDPOINT` | `/v1/chat/completions` | LLM Batch API endpoint |
+| `WORKDOCS_LLM_BATCH_COMPLETION_WINDOW` | `24h` | Batch 完成窗口（如 `24h`） |
+| `WORKDOCS_LLM_BATCH_MAX_CHARS` | `10000` | 每个 LLM batch 最大文本字符数（LLM 聚合粒度） |
+| `WORKDOCS_BLOCK_MAX_CHARS` | `6000` | content_blocks 存储切分粒度（向量化粒度），基于 BigModel embedding-3 经验值 |
+| `WORKDOCS_LLM_BATCH_TIMEOUT` | `3600` | LLM Batch API 轮询超时（秒） |
+| `WORKDOCS_LLM_MAX_RETRIES` | `3` | LLM 同步请求最大重试次数 |
+| `WORKDOCS_LLM_RETRY_BACKOFF` | `2` | LLM 重试退避系数（秒） |
+| `WORKDOCS_LLM_TIMEOUT` | `120` | LLM 同步请求超时（秒） |
 | **图片配置** | | | |
-| `WORKDOCS_IMAGE_MAX_SIZE` | `image.max_size` | `1024` | 图片压缩最长边（px） |
-| `WORKDOCS_IMAGE_QUALITY` | `image.quality` | `80` | JPEG 压缩质量 1-100（color 模式默认） |
-| `WORKDOCS_IMAGE_GRAYSCALE_QUALITY` | `image.grayscale_quality` | `75` | JPEG L 模式质量（grayscale 模式默认） |
-| `WORKDOCS_IMAGE_GRAYSCALE_CHROMA_DIST` | `image.grayscale_chroma_dist` | `15.0` | 色度距离阈值（像素值 [0,255]） |
-| `WORKDOCS_IMAGE_GRAYSCALE_LOW_CHROMA_RATIO` | `image.grayscale_low_chroma_ratio` | `0.95` | 低色度像素占比阈值，超过即判定为 grayscale/blackwhite |
-| `WORKDOCS_IMAGE_BLACKWHITE_EDGE_RATIO` | `image.blackwhite_edge_ratio` | `0.90` | 亮度边缘（<20 或 >235）占比阈值，超过且低色度即判定为 blackwhite |
+| `WORKDOCS_IMAGE_MAX_SIZE` | `1024` | 图片压缩最长边（px） |
+| `WORKDOCS_IMAGE_QUALITY` | `80` | JPEG 压缩质量 1-100（color 模式默认） |
+| `WORKDOCS_IMAGE_GRAYSCALE_QUALITY` | `75` | JPEG L 模式质量（grayscale 模式默认） |
+| `WORKDOCS_IMAGE_GRAYSCALE_CHROMA_DIST` | `15.0` | 色度距离阈值（像素值 [0,255]） |
+| `WORKDOCS_IMAGE_GRAYSCALE_LOW_CHROMA_RATIO` | `0.95` | 低色度像素占比阈值，超过即判定为 grayscale/blackwhite |
+| `WORKDOCS_IMAGE_BLACKWHITE_EDGE_RATIO` | `0.90` | 亮度边缘（<20 或 >235）占比阈值，超过且低色度即判定为 blackwhite |
 | **Embedding 配置** | | | |
-| `WORKDOCS_EMBEDDING_API_KEY` | `embedding.api_key` | 空 | BigModel API Key（向量化用） |
-| `WORKDOCS_EMBEDDING_BASE_URL` | `embedding.endpoint` | `https://open.bigmodel.cn/api/paas/v4` | BigModel Base URL |
-| `WORKDOCS_EMBEDDING_MODEL` | `embedding.model` | `embedding-3` | 向量化模型 |
-| `WORKDOCS_EMBEDDING_DIMENSION` | `embedding.dimension` | `1024` | 向量维度 |
-| `WORKDOCS_EMBEDDING_BATCH_ENDPOINT` | `embedding.batch_endpoint` | `/v4/embeddings` | ~~Embedding Batch API endpoint~~（已废弃，Embedding 改为同步单文本 API） |
-| `WORKDOCS_EMBED_BATCH_TIMEOUT` | `embedding.batch_timeout` | `3600` | ~~Embedding Batch API 轮询超时（秒）~~（已废弃） |
-| `WORKDOCS_EMBED_MAX_RETRIES` | `embedding.max_retries` | `3` | Embedding 同步请求最大重试次数 |
-| `WORKDOCS_EMBED_RETRY_BACKOFF` | `embedding.retry_backoff` | `2` | Embedding 重试退避系数（秒） |
-| `WORKDOCS_EMBED_TIMEOUT` | `embedding.timeout` | `120` | Embedding 同步请求超时（秒） |
+| `WORKDOCS_EMBEDDING_API_KEY` | 空 | BigModel API Key（向量化用） |
+| `WORKDOCS_EMBEDDING_BASE_URL` | `https://open.bigmodel.cn/api/paas/v4` | BigModel Base URL |
+| `WORKDOCS_EMBEDDING_MODEL` | `embedding-3` | 向量化模型 |
+| `WORKDOCS_EMBEDDING_DIMENSION` | `1024` | 向量维度 |
+| `WORKDOCS_EMBEDDING_BATCH_ENDPOINT` | `/v4/embeddings` | ~~Embedding Batch API endpoint~~（已废弃，Embedding 改为同步单文本 API） |
+| `WORKDOCS_EMBED_BATCH_TIMEOUT` | `3600` | ~~Embedding Batch API 轮询超时（秒）~~（已废弃） |
+| `WORKDOCS_EMBED_MAX_RETRIES` | `3` | Embedding 同步请求最大重试次数 |
+| `WORKDOCS_EMBED_RETRY_BACKOFF` | `2` | Embedding 重试退避系数（秒） |
+| `WORKDOCS_EMBED_TIMEOUT` | `120` | Embedding 同步请求超时（秒） |
 | **Parser 配置** | | | |
-| `WORKDOCS_PARSER_API_KEY` | `parser.api_key` | 空 | BigModel Expert 解析 API Key（⚠️ 仅用于 PDF 解析，为 BigModel 专有接口） |
-| `WORKDOCS_PARSER_TIMEOUT` | `parser.timeout` | `60` | 解析请求超时（秒） |
-| `WORKDOCS_PARSER_MAX_RETRIES` | `parser.max_retries` | `60` | 解析轮询最大重试次数 |
-| `WORKDOCS_PARSER_POLL_INTERVAL` | `parser.poll_interval` | `3` | 解析轮询间隔（秒） |
-| `WORKDOCS_PARSER_MIN_IMAGE_WIDTH` | `parser.min_image_width` | `100` | 可识别为图的最小宽度（px） |
-| `WORKDOCS_PARSER_MIN_IMAGE_HEIGHT` | `parser.min_image_height` | `100` | 可识别为图的最小高度（px） |
-| `WORKDOCS_PARSER_PAGE_RENDER_DPI` | `parser.page_render_dpi` | `200` | 页面/图片渲染 DPI |
-| `WORKDOCS_PARSER_TABLE_DETECTION_ENABLED` | `parser.table_detection_enabled` | `true` | 是否启用表格检测 |
-| `WORKDOCS_PARSER_TABLE_OVERLAP_THRESHOLD` | `parser.table_overlap_threshold` | `0.5` | 表格与 drawing 重叠判定阈值 |
-| `WORKDOCS_PARSER_TABLE_MIN_ROWS` | `parser.table_min_rows` | `2` | 表格最小行数 |
-| `WORKDOCS_PARSER_TABLE_MIN_COLS` | `parser.table_min_cols` | `2` | 表格最小列数 |
-| `WORKDOCS_PARSER_TABLE_MIN_HEIGHT_PT` | `parser.table_min_height_pt` | `20.0` | 表格最小高度（pt） |
-| `WORKDOCS_PARSER_TABLE_MIN_WIDTH_RATIO` | `parser.table_min_width_ratio` | `0.15` | 表格最小宽度占页面比例 |
-| `WORKDOCS_PARSER_TAB_MERGE_THRESHOLD_PT` | `parser.tab_merge_threshold_pt` | `4.0` | 制表位/列间隙合并阈值（pt） |
-| `WORKDOCS_PARSER_IMAGE_SIZE_LIMIT` | `parser.image_size_limit` | `0.05` | 过小图片面积占比上限 |
-| `WORKDOCS_PARSER_MAX_IMAGES_PER_PAGE` | `parser.max_images_per_page` | `30` | 单页最多渲染图片数 |
-| `WORKDOCS_PARSER_IMAGE_MERGE_Y_THRESHOLD` | `parser.image_merge_y_threshold` | `20.0` | 同一图 cluster 的纵向合并阈值（pt） |
-| `WORKDOCS_PARSER_FIGURE_MIN_SCORE` | `parser.figure_min_score` | `2.0` | 候选 zone 被视为 figure 的最低评分 |
-| `WORKDOCS_PARSER_EDGE_LABEL_MAX_LEN` | `parser.edge_label_max_len` | `30` | 图边缘标注文本最大长度 |
+| `WORKDOCS_PARSER_API_KEY` | 空 | BigModel Expert 解析 API Key（⚠️ 仅用于 PDF 解析，为 BigModel 专有接口） |
+| `WORKDOCS_PARSER_TIMEOUT` | `60` | 解析请求超时（秒） |
+| `WORKDOCS_PARSER_MAX_RETRIES` | `60` | 解析轮询最大重试次数 |
+| `WORKDOCS_PARSER_POLL_INTERVAL` | `3` | 解析轮询间隔（秒） |
+| `WORKDOCS_PARSER_MIN_IMAGE_WIDTH` | `100` | 可识别为图的最小宽度（px） |
+| `WORKDOCS_PARSER_MIN_IMAGE_HEIGHT` | `100` | 可识别为图的最小高度（px） |
+| `WORKDOCS_PARSER_PAGE_RENDER_DPI` | `200` | 页面/图片渲染 DPI |
+| `WORKDOCS_PARSER_TABLE_DETECTION_ENABLED` | `true` | 是否启用表格检测 |
+| `WORKDOCS_PARSER_TABLE_OVERLAP_THRESHOLD` | `0.5` | 表格与 drawing 重叠判定阈值 |
+| `WORKDOCS_PARSER_TABLE_MIN_ROWS` | `2` | 表格最小行数 |
+| `WORKDOCS_PARSER_TABLE_MIN_COLS` | `2` | 表格最小列数 |
+| `WORKDOCS_PARSER_TABLE_MIN_HEIGHT_PT` | `20.0` | 表格最小高度（pt） |
+| `WORKDOCS_PARSER_TABLE_MIN_WIDTH_RATIO` | `0.15` | 表格最小宽度占页面比例 |
+| `WORKDOCS_PARSER_TAB_MERGE_THRESHOLD_PT` | `4.0` | 制表位/列间隙合并阈值（pt） |
+| `WORKDOCS_PARSER_IMAGE_SIZE_LIMIT` | `0.05` | 过小图片面积占比上限 |
+| `WORKDOCS_PARSER_MAX_IMAGES_PER_PAGE` | `30` | 单页最多渲染图片数 |
+| `WORKDOCS_PARSER_IMAGE_MERGE_Y_THRESHOLD` | `20.0` | 同一图 cluster 的纵向合并阈值（pt） |
+| `WORKDOCS_PARSER_FIGURE_MIN_SCORE` | `2.0` | 候选 zone 被视为 figure 的最低评分 |
+| `WORKDOCS_PARSER_EDGE_LABEL_MAX_LEN` | `30` | 图边缘标注文本最大长度 |
 | **Batch 通用配置** | | | |
-| `WORKDOCS_BATCH_POLL_INTERVAL` | `batch.poll_interval` | `10` | Batch 状态轮询间隔（秒） |
-| `WORKDOCS_BATCH_MAX_POLL_RETRIES` | `batch.max_poll_retries` | `360` | Batch 状态轮询最大次数 |
-| `WORKDOCS_BATCH_MAX_FILE_SIZE_MB` | `batch.max_file_size_mb` | `100` | 单个 JSONL 文件大小上限（MB） |
-| `WORKDOCS_BATCH_PARALLEL_WORKERS` | `batch.parallel_workers` | `4` | 并行 batch 提交线程数 |
-| `WORKDOCS_BATCH_TEMP_DIR` | `batch.temp_dir` | `batch_temp` | Batch 临时文件目录 |
-| `WORKDOCS_BATCH_FILE_DOWNLOAD_TEMPLATE` | `batch.download_template` | `{base_url}/files/{file_id}/content` | Batch 结果下载 URL 模板 |
-| `WORKDOCS_PARSE_OUTPUT_DIR` | `pipeline.parse_output_dir` | `parsed` | PDF 解析输出目录 |
-| `WORKDOCS_BATCH_OUTPUT_DIR` | `pipeline.batch_output_dir` | `batch` | Batch 产物输出目录 |
+| `WORKDOCS_BATCH_POLL_INTERVAL` | `10` | Batch 状态轮询间隔（秒） |
+| `WORKDOCS_BATCH_MAX_POLL_RETRIES` | `360` | Batch 状态轮询最大次数 |
+| `WORKDOCS_BATCH_MAX_FILE_SIZE_MB` | `100` | 单个 JSONL 文件大小上限（MB） |
+| `WORKDOCS_BATCH_PARALLEL_WORKERS` | `4` | 并行 batch 提交线程数 |
+| `WORKDOCS_BATCH_TEMP_DIR` | `batch_temp` | Batch 临时文件目录 |
+| `WORKDOCS_BATCH_FILE_DOWNLOAD_TEMPLATE` | `{base_url}/files/{file_id}/content` | Batch 结果下载 URL 模板 |
+| `WORKDOCS_PARSE_OUTPUT_DIR` | `parsed` | PDF 解析输出目录 |
+| `WORKDOCS_BATCH_OUTPUT_DIR` | `batch` | Batch 产物输出目录 |
 | **Plugin 默认值** | | | |
-| `WORKDOCS_PLUGIN_SEARCH_TOP_K` | `plugin.search_top_k` | `5` | 语义搜索默认返回条数 |
-| `WORKDOCS_PLUGIN_QUERY_TOP_K` | `plugin.query_top_k` | `10` | 查询默认返回条数 |
-| `WORKDOCS_PLUGIN_GRAPH_MAX_DEPTH` | `plugin.graph_max_depth` | `3` | 图谱查询默认最大深度 |
-| `WORKDOCS_PLUGIN_SUBGRAPH_DEPTH` | `plugin.subgraph_depth` | `1` | 子图扩展默认深度 |
-| `WORKDOCS_PLUGIN_DEFAULT_LIMIT` | `plugin.default_limit` | `100` | 默认分页限制 |
+| `WORKDOCS_PLUGIN_SEARCH_TOP_K` | `5` | 语义搜索默认返回条数 |
+| `WORKDOCS_PLUGIN_QUERY_TOP_K` | `10` | 查询默认返回条数 |
+| `WORKDOCS_PLUGIN_GRAPH_MAX_DEPTH` | `3` | 图谱查询默认最大深度 |
+| `WORKDOCS_PLUGIN_SUBGRAPH_DEPTH` | `1` | 子图扩展默认深度 |
+| `WORKDOCS_PLUGIN_DEFAULT_LIMIT` | `100` | 默认分页限制 |
 | **Pipeline / Graph** | | | |
-| `WORKDOCS_GRAPH_MAX_PATH_DEPTH` | `graph.max_path_depth` | `6` | 图谱路径搜索最大深度 |
-| `WORKDOCS_GRAPH_OUTPUT_DIR` | `graph.output_dir` | `graphs` | 图谱 JSON 输出目录 |
+| `WORKDOCS_GRAPH_MAX_PATH_DEPTH` | `6` | 图谱路径搜索最大深度 |
+| `WORKDOCS_GRAPH_OUTPUT_DIR` | `graphs` | 图谱 JSON 输出目录 |
 
 ### 超时调节指南
 
@@ -533,15 +529,7 @@ print(f'entities={len(g.get(\"nodes\", []))}, relations={len(g.get(\"edges\", []
 环境变量方式（即时生效，重启后保留需写入 `.env`）：
 ```bash
 export WORKDOCS_LLM_TIMEOUT=300
-```
-
-config.json 方式（持久化）：
-```json
-{
-  "llm": {
-    "timeout": 300
-  }
-}
+# 或写入 scripts/.env
 ```
 
 **建议值参考**：
@@ -580,7 +568,7 @@ config.json 方式（持久化）：
 ### 配置
 | 模块 | 职责 |
 |------|------|
-| `core/config.py` | 统一配置中心，`.env` / 环境变量 / `config.json` / 默认值 四层优先级 |
+| `core/config.py` | 统一配置中心，`.env` / 环境变量 → 默认值 两层优先级 |
 
 ---
 
@@ -713,7 +701,7 @@ cd /path/to/work-docs-library
 PYTHONPATH=scripts ./.venv/bin/python -m pytest scripts/tests/ -v
 ```
 
-**当前状态：400 passed, 2 skipped, 0 failed。**
+**当前状态：408 passed, 2 skipped, 0 failed。**
 
 ### 测试分类与审计
 
@@ -749,7 +737,7 @@ PYTHONPATH=scripts ./.venv/bin/python -m pytest \
 | **模块单元测试** | `test_batch_builder.py` | 14 | 🟡 中 | Batch 文本切分保护（代码块/表格/段落边界） |
 | | `test_batch_clients.py` | 19 | 🟡 中 | Batch API 客户端 JSONL/提交/轮询/超时 |
 | | `test_chapter_parser.py` | 20 | 🟡 中 | 章节树解析、标题层级、代码块保护 |
-| | `test_config_json.py` | 15 | 🟡 中 | 配置优先级（env > json > .env > 默认） |
+| | `test_config_env.py` | 13 | 🟡 中 | 环境变量配置优先级、默认值、敏感 key 脱敏 |
 | | `test_content_blocks.py` | 10 | 🟡 中 | 内容块切分、heading_maps 构建 |
 | | `test_llm_client.py` | 9 | 🟡 中 | Embedding/Chat 客户端、重试退避 |
 | | `test_image_utils.py` | 13 | 🟡 中 | 图片压缩、三分类（彩色/灰度/黑白） |
@@ -761,7 +749,7 @@ PYTHONPATH=scripts ./.venv/bin/python -m pytest \
 
 #### 当前状态
 
-核心测试集已稳定在 **400 个用例**（含 2 个正常 skipped）。诊断脚本已统一移入 `scripts/benchmark/`，不参与常规 CI。
+核心测试集已稳定在 **408 个用例**（含 2 个正常 skipped）。诊断脚本已统一移入 `scripts/benchmark/`，不参与常规 CI。
 
 ### 常用测试文档
 
