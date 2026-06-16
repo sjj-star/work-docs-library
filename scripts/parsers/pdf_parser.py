@@ -330,7 +330,7 @@ class PDFParser:
             # 2. 确定输出目录
             if output_dir is None:
                 file_hash = hashlib.md5(file_path.read_bytes()).hexdigest()
-                output_dir = Config.DB_PATH.parent / "parsed" / file_hash[:16]
+                output_dir = Config.DB_PATH.parent / Config.PARSE_OUTPUT_DIR / file_hash[:16]
             else:
                 output_dir = Path(output_dir)
             img_dir = output_dir / "images"

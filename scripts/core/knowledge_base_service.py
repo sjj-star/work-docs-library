@@ -381,15 +381,13 @@ class KnowledgeBaseService:
             每个结果包含 score 和 chunk 基本信息
             [{"score": float, "chunk": Chunk}, ...]
         """
-        from core.doc_graph_pipeline import _BLOCK_FAISS_OFFSET
-
         embedder = self._get_embedder()
         emb = embedder.embed([str(text)])[0]
         hits = self.vec.search(emb, top_k=top_k)
         results = []
         for db_id, score in hits:
-            if db_id >= _BLOCK_FAISS_OFFSET:
-                block_db_id = db_id - _BLOCK_FAISS_OFFSET
+            if db_id >= Config.BLOCK_FAISS_OFFSET:
+                block_db_id = db_id - Config.BLOCK_FAISS_OFFSET
                 block = self.db.get_block_by_db_id(block_db_id)
                 if block:
                     chunk = Chunk(
@@ -1093,7 +1091,7 @@ class KnowledgeBaseService:
 
     def load_document_graph(self, doc_id: str) -> None:
         """增量加载指定文档的图谱到全局图（兼容旧接口）."""
-        graph_path = Config.DB_PATH.parent / "graphs" / f"{doc_id}.json"
+        graph_path = Config.DB_PATH.parent / Config.GRAPH_OUTPUT_DIR / f"{doc_id}.json"
         if graph_path.exists():
             temp = NetworkXGraphStore()
             temp.load(graph_path)

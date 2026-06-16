@@ -56,7 +56,11 @@ MCP_TOOL_SCHEMAS: dict[str, dict] = {
         "type": "object",
         "properties": {
             "text": {"type": "string", "description": "搜索文本"},
-            "top_k": {"type": "integer", "description": "返回结果数量", "default": 5},
+            "top_k": {
+                "type": "integer",
+                "description": "返回结果数量",
+                "default": Config.PLUGIN_SEARCH_TOP_K,
+            },
             "graph_depth": {
                 "type": "integer",
                 "description": "图谱扩展深度，0=纯语义搜索",
@@ -72,7 +76,11 @@ MCP_TOOL_SCHEMAS: dict[str, dict] = {
             "chapter": {"type": "string", "description": "章节标题子串匹配"},
             "chapter_regex": {"type": "string", "description": "章节标题正则匹配"},
             "concept": {"type": "string", "description": "概念名查询"},
-            "top_k": {"type": "integer", "description": "返回结果数量", "default": 10},
+            "top_k": {
+                "type": "integer",
+                "description": "返回结果数量",
+                "default": Config.PLUGIN_QUERY_TOP_K,
+            },
         },
     },
     "get_content": {
@@ -125,7 +133,11 @@ MCP_TOOL_SCHEMAS: dict[str, dict] = {
             "from_name": {"type": "string", "description": "起点实体名称"},
             "to_type": {"type": "string", "description": "终点实体类型"},
             "to_name": {"type": "string", "description": "终点实体名称"},
-            "max_depth": {"type": "integer", "description": "最大搜索深度", "default": 3},
+            "max_depth": {
+                "type": "integer",
+                "description": "最大搜索深度",
+                "default": Config.PLUGIN_GRAPH_MAX_DEPTH,
+            },
         },
         "required": ["from_type", "from_name", "to_type", "to_name"],
     },
@@ -143,7 +155,11 @@ MCP_TOOL_SCHEMAS: dict[str, dict] = {
         "properties": {
             "entity_type": {"type": "string", "description": "实体类型过滤"},
             "name": {"type": "string", "description": "实体名称过滤"},
-            "limit": {"type": "integer", "description": "最大返回数量", "default": 100},
+            "limit": {
+                "type": "integer",
+                "description": "最大返回数量",
+                "default": Config.PLUGIN_DEFAULT_LIMIT,
+            },
         },
     },
     "config": {

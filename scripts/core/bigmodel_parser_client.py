@@ -31,7 +31,7 @@ class BigModelParserClient:
     def __init__(self, api_key: str | None = None) -> None:
         """初始化 BigModelParserClient."""
         self.api_key = api_key or self._resolve_api_key()
-        self.base_url = "https://open.bigmodel.cn/api/paas/v4"
+        self.base_url = Config.PARSER_BASE_URL
         if not self.api_key:
             raise RuntimeError(
                 "Parser API key not configured. "

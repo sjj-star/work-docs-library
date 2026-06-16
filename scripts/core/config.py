@@ -63,6 +63,10 @@ class Config:
 
     # 文件解析配置
     PARSER_API_KEY: str = _resolve_config("WORKDOCS_PARSER_API_KEY", "")
+    PARSER_BASE_URL: str = _resolve_config(
+        "WORKDOCS_PARSER_BASE_URL",
+        "https://open.bigmodel.cn/api/paas/v4",
+    )
 
     # 嵌入向量维度配置
     EMBEDDING_DIMENSION: int = 0  # 将在下方初始化
@@ -134,6 +138,10 @@ class Config:
         cls.EMBEDDING_DIMENSION = int(
             _resolve_config("WORKDOCS_EMBEDDING_DIMENSION", "1024")
         )
+        # FAISS ID 偏移：避免 block db_id 与旧 chunks ID 在 FAISS 中冲突
+        cls.BLOCK_FAISS_OFFSET = int(
+            _resolve_config("WORKDOCS_BLOCK_FAISS_OFFSET", "10000000")
+        )
         cls.LLM_BATCH_MAX_CHARS = int(
             _resolve_config("WORKDOCS_LLM_BATCH_MAX_CHARS", "10000")
         )
@@ -188,9 +196,6 @@ class Config:
             _resolve_config("WORKDOCS_EMBED_RETRY_BACKOFF", "2")
         )
         cls.EMBED_TIMEOUT = int(_resolve_config("WORKDOCS_EMBED_TIMEOUT", "120"))
-        cls.EMBED_BATCH_TIMEOUT = int(
-            _resolve_config("WORKDOCS_EMBED_BATCH_TIMEOUT", "3600")
-        )
         # LLM 客户端
         cls.LLM_MAX_RETRIES = int(_resolve_config("WORKDOCS_LLM_MAX_RETRIES", "3"))
         cls.LLM_RETRY_BACKOFF = int(
@@ -245,9 +250,6 @@ class Config:
         )
         cls.PARSER_MAX_IMAGES_PER_PAGE = int(
             _resolve_config("WORKDOCS_PARSER_MAX_IMAGES_PER_PAGE", "30")
-        )
-        cls.PARSER_IMAGE_MERGE_Y_THRESHOLD = float(
-            _resolve_config("WORKDOCS_PARSER_IMAGE_MERGE_Y_THRESHOLD", "20.0")
         )
         # GapsFirstScanner 参数（Caption-driven 提取器）
         cls.PARSER_FIGURE_MIN_SCORE = float(

@@ -449,6 +449,7 @@ print(f'entities={len(g.get(\"nodes\", []))}, relations={len(g.get(\"edges\", []
 | `WORKDOCS_LLM_BATCH_COMPLETION_WINDOW` | `24h` | Batch 完成窗口（如 `24h`） |
 | `WORKDOCS_LLM_BATCH_MAX_CHARS` | `10000` | 每个 LLM batch 最大文本字符数（LLM 聚合粒度） |
 | `WORKDOCS_BLOCK_MAX_CHARS` | `6000` | content_blocks 存储切分粒度（向量化粒度），基于 BigModel embedding-3 经验值 |
+| `WORKDOCS_BLOCK_FAISS_OFFSET` | `10000000` | FAISS ID 偏移，避免 block db_id 与旧 chunks ID 冲突 |
 | `WORKDOCS_LLM_BATCH_TIMEOUT` | `3600` | LLM Batch API 轮询超时（秒） |
 | `WORKDOCS_LLM_MAX_RETRIES` | `3` | LLM 同步请求最大重试次数 |
 | `WORKDOCS_LLM_RETRY_BACKOFF` | `2` | LLM 重试退避系数（秒） |
@@ -465,13 +466,12 @@ print(f'entities={len(g.get(\"nodes\", []))}, relations={len(g.get(\"edges\", []
 | `WORKDOCS_EMBEDDING_BASE_URL` | `https://open.bigmodel.cn/api/paas/v4` | BigModel Base URL |
 | `WORKDOCS_EMBEDDING_MODEL` | `embedding-3` | 向量化模型 |
 | `WORKDOCS_EMBEDDING_DIMENSION` | `1024` | 向量维度 |
-| `WORKDOCS_EMBEDDING_BATCH_ENDPOINT` | `/v4/embeddings` | ~~Embedding Batch API endpoint~~（已废弃，Embedding 改为同步单文本 API） |
-| `WORKDOCS_EMBED_BATCH_TIMEOUT` | `3600` | ~~Embedding Batch API 轮询超时（秒）~~（已废弃） |
 | `WORKDOCS_EMBED_MAX_RETRIES` | `3` | Embedding 同步请求最大重试次数 |
 | `WORKDOCS_EMBED_RETRY_BACKOFF` | `2` | Embedding 重试退避系数（秒） |
 | `WORKDOCS_EMBED_TIMEOUT` | `120` | Embedding 同步请求超时（秒） |
 | **Parser 配置** | | | |
 | `WORKDOCS_PARSER_API_KEY` | 空 | BigModel Expert 解析 API Key（⚠️ 仅用于 PDF 解析，为 BigModel 专有接口） |
+| `WORKDOCS_PARSER_BASE_URL` | `https://open.bigmodel.cn/api/paas/v4` | BigModel Expert 解析 Base URL |
 | `WORKDOCS_PARSER_TIMEOUT` | `60` | 解析请求超时（秒） |
 | `WORKDOCS_PARSER_MAX_RETRIES` | `60` | 解析轮询最大重试次数 |
 | `WORKDOCS_PARSER_POLL_INTERVAL` | `3` | 解析轮询间隔（秒） |
@@ -487,7 +487,6 @@ print(f'entities={len(g.get(\"nodes\", []))}, relations={len(g.get(\"edges\", []
 | `WORKDOCS_PARSER_TAB_MERGE_THRESHOLD_PT` | `4.0` | 制表位/列间隙合并阈值（pt） |
 | `WORKDOCS_PARSER_IMAGE_SIZE_LIMIT` | `0.05` | 过小图片面积占比上限 |
 | `WORKDOCS_PARSER_MAX_IMAGES_PER_PAGE` | `30` | 单页最多渲染图片数 |
-| `WORKDOCS_PARSER_IMAGE_MERGE_Y_THRESHOLD` | `20.0` | 同一图 cluster 的纵向合并阈值（pt） |
 | `WORKDOCS_PARSER_FIGURE_MIN_SCORE` | `2.0` | 候选 zone 被视为 figure 的最低评分 |
 | `WORKDOCS_PARSER_EDGE_LABEL_MAX_LEN` | `30` | 图边缘标注文本最大长度 |
 | **Batch 通用配置** | | | |

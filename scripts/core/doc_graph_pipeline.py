@@ -49,7 +49,6 @@ from .vector_index import VectorIndex
 logger = logging.getLogger(__name__)
 
 # FAISS 中 block db_id 的偏移量（避免与 chunk db_id 冲突）
-_BLOCK_FAISS_OFFSET = 10_000_000
 
 # 常见芯片产品型号正则（可扩展）
 _PRODUCT_NAME_PATTERNS = [
@@ -1905,7 +1904,7 @@ class DocGraphPipeline:
                 continue
             if block["metadata"].get("embedding"):
                 continue
-            reembed_pairs.append((block["content"], block["id"] + _BLOCK_FAISS_OFFSET))
+            reembed_pairs.append((block["content"], block["id"] + Config.BLOCK_FAISS_OFFSET))
 
         if not reembed_pairs:
             embed_jsonl_path.write_text("", encoding="utf-8")
@@ -1967,7 +1966,7 @@ class DocGraphPipeline:
             block_db_id = block["id"]
             if emb:
                 sqlite_items.append((block_db_id, emb))
-                faiss_items.append((block_db_id + _BLOCK_FAISS_OFFSET, emb))
+                faiss_items.append((block_db_id + Config.BLOCK_FAISS_OFFSET, emb))
             else:
                 reembed_block_ids.add(block_db_id)
 
@@ -1993,7 +1992,7 @@ class DocGraphPipeline:
                         # custom_id 格式: embed_dbid_{faiss_id}
                         try:
                             faiss_id = int(custom_id.split("_")[-1])
-                            block_db_id = faiss_id - _BLOCK_FAISS_OFFSET
+                            block_db_id = faiss_id - Config.BLOCK_FAISS_OFFSET
                         except (ValueError, IndexError):
                             logger.warning(f"无法从 custom_id 解析 db_id | custom_id={custom_id}")
                             continue
@@ -2151,7 +2150,7 @@ class DocGraphPipeline:
             # 清理旧 blocks 的向量索引（使用偏移 ID）
             old_blocks = self.db.query_blocks_by_doc(old_doc.doc_id)
             if old_blocks:
-                self.vec.remove_doc([b["id"] + _BLOCK_FAISS_OFFSET for b in old_blocks])
+                self.vec.remove_doc([b["id"] + Config.BLOCK_FAISS_OFFSET for b in old_blocks])
             # 清理旧 blocks 和 heading_maps
             self.db.delete_blocks_by_doc(old_doc.doc_id)
             self.db.delete_heading_maps_by_doc(old_doc.doc_id)

@@ -266,7 +266,9 @@ def tool_doc_ingest_results(params: dict) -> dict:
         if results_path_param:
             results_path = _resolve_allowed_path(results_path_param)
         else:
-            results_path = Path(Config.DB_PATH).parent / "batch" / f"{doc_id}_results.jsonl"
+            results_path = (
+                Path(Config.DB_PATH).parent / Config.BATCH_OUTPUT_DIR / f"{doc_id}_results.jsonl"
+            )
 
         result_doc_id = pipe.stage4_ingest_results(
             doc_id=doc_id,
