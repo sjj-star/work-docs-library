@@ -257,15 +257,17 @@ python scripts/admin_tools.py stage1_parse --params '{"file_path":"path/to/docum
 - **输入**: PDF 文件
 - **输出**: `knowledge_base/parsed/{doc_id}/result.md` + `images/`
 - **干预**: 直接编辑 `result.md`（修正文本、调整标题层级、补充内容）
-- **触发下一阶段**: `python scripts/admin_tools.py stage2_build_batches --params '{"doc_id":"{doc_id}"}'`
+- **触发下一阶段**: `python scripts/admin_tools.py stage2_build_jsonl --params '{"doc_id":"{doc_id}"}'`
 - **注意**: 编辑后 content_hash 会变化，阶段3 的增量分析将识别为全部变更
 
 #### 阶段2: 构建 Batch JSONL
 
 ```bash
-python scripts/admin_tools.py stage2_build_batches --params '{"doc_id":"{doc_id}"}'
+python scripts/admin_tools.py stage2_build_jsonl --params '{"doc_id":"{doc_id}"}'
 # 可选在 params 中加入 "max_chars": 10000（每个 batch 最大字符数）
 ```
+
+> `stage2_build_batches` 仍可作为兼容别名使用。
 
 - **输入**: `parsed/{doc_id}/result.md`
 - **输出**: `batch/{doc_id}.jsonl` + `batch/{doc_id}_batch_info.json`
@@ -274,7 +276,7 @@ python scripts/admin_tools.py stage2_build_batches --params '{"doc_id":"{doc_id}
 - **⚠️ 关键限制**:
   - 删除 requests：无需同步修改 `batch_info.json`（代码会安全忽略多余的映射条目）
   - 修改 `custom_id`：无需同步修改 `batch_info.json`（不会报错，但该 request 在增量过滤时可能不会被选中）
-  - **新增 requests：必须在 `batch_info.json` 中同步添加对应的 `custom_id` → `chapter_titles` 映射**，否则 stage4 的 `chapter_map` 无法回填，导致新增实体的 `source_chapter` 为空
+  - **新增 requests：必须在 `batch_info.json` 中同步添加对应的 `custom_id` → `section_title` 映射**，否则 stage4 的 `chapter_map` 无法回填，导致新增实体的 `source_chapter` 为空
   - `extra_body.thinking` 会被 stage3 自动补充（无需手动添加）
 - **触发下一阶段**: `python scripts/admin_tools.py stage3_submit_batches --params '{"doc_id":"{doc_id}"}'`
 
@@ -700,7 +702,7 @@ cd /path/to/work-docs-library
 PYTHONPATH=scripts ./.venv/bin/python -m pytest scripts/tests/ -v
 ```
 
-**当前状态：408 passed, 2 skipped, 0 failed。**
+**当前状态：413 passed, 0 skipped, 0 failed。**
 
 ### 测试分类与审计
 
@@ -725,14 +727,14 @@ PYTHONPATH=scripts ./.venv/bin/python -m pytest \
 | 分类 | 文件 | 用例数 | 价值 | 说明 |
 |------|------|--------|------|------|
 | **核心基础设施** | `test_graph_store.py` | 77 | 🔴 高 | 图谱存储 CRUD、路径搜索、属性索引、持久化 |
-| | `test_vector_index.py` | 9 | 🔴 高 | FAISS 向量索引增删查、持久化、迁移 |
+| | `test_vector_index.py` | 11 | 🔴 高 | FAISS 向量索引增删查、持久化、迁移、快照回滚 |
 | | `test_db.py` | 15 | 🔴 高 | SQLite CRUD、事务、冲突日志、反馈 |
 | | `test_knowledge_base_service.py` | 21 | 🔴 高 | 统一服务层、实体-Chunk 桥接 |
 | | `test_knowledge_base_service_queries.py` | 3 | 🔴 高 | 语义-图谱联合查询（核心卖点） |
 | **Pipeline 集成** | `test_pdf_parser.py` | 71 | 🔴 高 | PDF 解析、图片提取、表格检测、14 个真实页面 fixture |
 | | `test_pipeline_stages.py` | 31 | 🔴 高 | 六阶段 pipeline 拆分、增量更新、fallback |
-| | `test_plugin_router.py` | 45 | 🔴 高 | Plugin 工具路由、参数校验、路径沙箱 |
-| **回归测试** | `test_audit_issues.py` | 8 | 🔴 高 | 8 项生产 bug/审计问题的定向回归（FAISS 重复、深拷贝污染、路径沙箱等） |
+| | `test_plugin_router.py` | 46 | 🔴 高 | Plugin 工具路由、参数校验、路径沙箱 |
+| **回归测试** | `test_audit_issues.py` | 10 | 🔴 高 | 生产 bug/审计问题的定向回归（FAISS 重复、深拷贝污染、路径沙箱、FAISS/SQLite 原子性等） |
 | **模块单元测试** | `test_batch_builder.py` | 14 | 🟡 中 | Batch 文本切分保护（代码块/表格/段落边界） |
 | | `test_batch_clients.py` | 19 | 🟡 中 | Batch API 客户端 JSONL/提交/轮询/超时 |
 | | `test_chapter_parser.py` | 20 | 🟡 中 | 章节树解析、标题层级、代码块保护 |
@@ -744,10 +746,11 @@ PYTHONPATH=scripts ./.venv/bin/python -m pytest \
 | | `test_office_parser.py` | 3 | 🟡 中 | DOCX/XLSX 解析（尚未接入 pipeline） |
 | | `test_borderless_table_extractor.py` | 3 | 🟡 中 | AMBA 风格无边框表格提取 |
 | | `test_table_utils.py` | 4 | 🟡 中 | Markdown 表格规范化 |
+| **接口测试** | `test_mcp_server.py` | 10 | 🟡 中 | MCP Server 工具暴露与调用协议测试 |
 
 #### 当前状态
 
-核心测试集已稳定在 **408 个用例**（含 2 个正常 skipped）。
+核心测试集已稳定在 **413 个用例**（0 skipped）。
 
 ### 常用测试文档
 
@@ -765,15 +768,15 @@ WORKDOCS_PARSER_API_KEY=your-api-key
 
 **API 说明**：
 - 服务类型：`expert`（PDF 专用，保留图片，0.012元/页）
-- 输出格式：ZIP（`result.md` + `images/*.jpg`）
-- 图片命名：`images/{uuid}_{page}_{x}_{y}_{w}_{h}_{index}.jpg`
+- 输出格式：ZIP（`result.md` + `images/*.png`）
+- 图片命名：`images/{uuid}_{page}_{x}_{y}_{w}_{h}_{index}.png`
 - 若 BigModel 失败，自动 fallback 到本地 `PDFParser`，输出格式与 BigModel 完全一致（Markdown + images/）
 
 ---
 
 ## Prompts 提示词文件
 
-`scripts/prompts/` 目录下的文本文件被代码**运行时读取**，无需重启即可生效。修改提示词后，重新执行 `stage2_build_batches` → `stage3_submit_batches` → `stage4_ingest_results` 即可看到效果，无需重启 Kimi CLI。
+`scripts/prompts/` 目录下的文本文件被代码**运行时读取**，无需重启即可生效。修改提示词后，重新执行 `stage2_build_jsonl` → `stage3_submit_batches` → `stage4_ingest_results` 即可看到效果，无需重启 Kimi CLI。
 
 ### `entity_extraction_system.txt` — 实体提取 system 提示词
 
@@ -839,7 +842,7 @@ Prompt 中显式规定格式，确保 LLM 输出统一：
 
 **Prompt 版本化管理流程**：
 1. 修改 `scripts/prompts/entity_extraction_system.txt`
-2. 执行 `python scripts/admin_tools.py stage2_build_batches --params '{"doc_id":"{doc_id}"}'` → `stage3_submit_batches` → `stage4_ingest_results`
+2. 执行 `python scripts/admin_tools.py stage2_build_jsonl --params '{"doc_id":"{doc_id}"}'` → `stage3_submit_batches` → `stage4_ingest_results`
 3. 对比全局节点/边数量变化、具体实体差异
 4. 记录"预期效果 vs 实际效果"，修正 Prompt 表述
 
@@ -866,7 +869,7 @@ Prompt 中显式规定格式，确保 LLM 输出统一：
 7. **NetworkX 内存上限**：全局图为内存存储，数百个文档 × 万页级时可能达到 GB 级。当前单机目标规模可接受，预留 Neo4j 迁移接口
 8. **输入文档约束**：Markdown 图片引用 `![name](images/path.png)` 中的 `name` 将作为 `image_id`，建议填写有意义的名称
 9. **PDF 解析依赖 BigModel 专用 API**：文档提取主路径使用 BigModel 专有 Expert API（`/files/parser/create`），非 OpenAI-compatible，无法直接切换至其他厂商。若 BigModel 不可用，可依赖本地 `PDFParser`（PyMuPDF）作为 fallback，输出格式与 BigModel 完全一致，但解析质量可能略有差异
-10. **本地 PDF Parser 表格检测策略**：Grid 表格使用 `find_tables(strategy="lines_strict")`，对无竖线/弱线条表格检测率极低（AMBA 仅 ~9%），但误检率极低，可保护位域图不被表格化。Horizontal/无边框表格（含 AMBA 零高度线表格）现在统一由 `BorderlessTableExtractor` 处理，不再 fallback 到 `find_tables(strategy="lines")`（该策略在 AMBA 上实测零产出）。PyMuPDF4LLM fallback 对此类无边框表格同样无效（12 页触发 / 0 产出）
+10. **本地 PDF Parser 表格检测策略**：Grid 表格使用 `find_tables(strategy="lines_strict")`，对无竖线/弱线条表格检测率极低（AMBA 仅 ~9%），但误检率极低，可保护位域图不被表格化。Horizontal/无边框表格（含 AMBA 零高度线表格）现在统一由 `BorderlessTableExtractor` 处理，不再 fallback 到 `find_tables(strategy="lines")`（该策略在 AMBA 上实测零产出）
 11. **正文引用句误触发表格检测**：`TABLE_CAPTION_RE` 会匹配 `"Table X.X describes..."` 等正文引用句，导致所在页面触发 `find_tables()` 但无实际表格。AMBA 文档中发生 191 次此类误匹配，是性能空跑的主要来源之一
 12. **跨页续表碎片化**：`find_tables()` 按页独立处理，无法识别 `"Continued from previous page"` 的跨页表格上下文。AMBA 中 93 页跨页续表全部空跑
 13. **跨产品外设变体**：同一个外设/寄存器出现在多个产品手册中时，`doc_properties` 保存每个文档的原始属性快照，全局图的 `properties` 仍为合并后值。查询时通过 `doc_id` 参数获取指定产品的精确属性。产品型号通过启发式正则从文档标题/文件名自动提取

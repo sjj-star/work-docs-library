@@ -186,6 +186,38 @@ class VectorIndex:
         finally:
             self._release_lock()
 
+    def snapshot(self) -> tuple[list[list[float]], list[int]]:
+        """创建当前索引状态的快照（向量 + id_map），用于失败回滚."""
+        self._acquire_lock()
+        try:
+            self._reload()  # 确保基于磁盘最新状态
+            assert self._index is not None
+            vectors = [
+                self._index.reconstruct(fid).tolist()  # type: ignore[reportCallIssue]
+                for fid in range(self._index.ntotal)
+            ]
+            return (vectors, list(self._id_map))
+        finally:
+            self._release_lock()
+
+    def restore(self, snapshot: tuple[list[list[float]], list[int]]) -> None:
+        """从快照重建索引并原子落盘."""
+        vectors, id_map = snapshot
+        self._acquire_lock()
+        try:
+            self._reload()  # 先加载最新状态，防止覆盖并发写入
+            self._index = faiss.IndexFlatIP(self.dim)
+            if vectors:
+                mat = np.array(vectors, dtype=np.float32)
+                faiss.normalize_L2(mat)
+                assert self._index is not None
+                self._index.add(mat)  # type: ignore[reportCallIssue]
+            self._id_map = id_map
+            self._db_ids = set(id_map)
+            self._save()
+        finally:
+            self._release_lock()
+
     def search(self, query_vector: list[float], top_k: int = 5) -> list[tuple[int, float]]:
         """Search 函数."""
         if self._index is None:

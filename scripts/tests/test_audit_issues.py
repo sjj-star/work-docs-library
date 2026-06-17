@@ -11,6 +11,26 @@ from core.knowledge_base_service import KnowledgeBaseService, _EntityRef
 from core.models import Document
 from core.vector_index import VectorIndex
 
+
+class _FakeEmbedder:
+    """用于 Stage 6 测试的 EmbeddingClient 替身."""
+
+    def __init__(self, *args, **kwargs):
+        pass
+
+    def embed_single(self, text: str) -> list[float]:
+        return [1.0, 0.0, 0.0, 0.0]
+
+    def embed(self, texts: list[str]) -> list[list[float]]:
+        return [[1.0, 0.0, 0.0, 0.0] for _ in texts]
+
+    def get_embedding_dimension(self) -> int:
+        return 4
+
+    def close(self) -> None:
+        pass
+
+
 # ---------------------------------------------------------------------------
 # 修复 1：FAISS 重复向量防护
 # ---------------------------------------------------------------------------
@@ -334,3 +354,129 @@ def test_faiss_remove_doc_consistency(tmp_path, monkeypatch):
     # 验证被删除的向量搜不到（或返回的不是被删除的 db_id）
     results = vec.search([0.0, 1.0, 0.0, 0.0], top_k=1)
     assert len(results) == 0 or results[0][0] not in {20, 40}
+
+
+# ---------------------------------------------------------------------------
+# 修复 7：Stage 6 SQLite 失败时应回滚 FAISS
+# ---------------------------------------------------------------------------
+
+
+def test_stage6_sqlite_failure_rolls_back_faiss(tmp_path, monkeypatch):
+    """复现：Stage 6 先写 FAISS 再写 SQLite，SQLite 失败时 FAISS 残留孤儿向量.
+
+    修复后：SQLite 更新失败时，应通过 snapshot/restore 将 FAISS 回滚到之前状态。
+    """
+    import json
+
+    from core.doc_graph_pipeline import DocGraphPipeline
+
+    monkeypatch.setattr(Config, "DB_PATH", tmp_path / "workdocs.db")
+    monkeypatch.setattr(Config, "FAISS_INDEX_PATH", tmp_path / "faiss.index")
+    monkeypatch.setattr(Config, "ID_MAP_PATH", tmp_path / "id_map.json")
+    monkeypatch.setattr(Config, "EMBEDDING_DIMENSION", 4)
+
+    db = KnowledgeDB()
+    db.upsert_document(
+        Document(
+            doc_id="doc1",
+            title="Test Doc",
+            source_path="/tmp/test.pdf",
+            file_type="pdf",
+            total_pages=1,
+            chapters=[],
+            status="processing",
+        )
+    )
+    db.insert_block(doc_id="doc1", block_id="b1", content="hello", seq_index=0, metadata={})
+    db.insert_block(doc_id="doc1", block_id="b2", content="world", seq_index=1, metadata={})
+
+    batch_dir = tmp_path / "batch"
+    batch_dir.mkdir(parents=True, exist_ok=True)
+    embed_jsonl = batch_dir / "doc1_embed.jsonl"
+    embed_jsonl.write_text(
+        json.dumps({"db_id": 1, "text": "hello"}, ensure_ascii=False)
+        + "\n"
+        + json.dumps({"db_id": 2, "text": "world"}, ensure_ascii=False)
+        + "\n",
+        encoding="utf-8",
+    )
+
+    pipe = DocGraphPipeline()
+    monkeypatch.setattr("core.doc_graph_pipeline.EmbeddingClient", _FakeEmbedder)
+
+    original_update = pipe.db.update_blocks_embedded_batch
+    call_count = {"n": 0}
+
+    def failing_update(items):
+        call_count["n"] += 1
+        if call_count["n"] == 1:
+            raise RuntimeError("模拟 SQLite 写入失败")
+        return original_update(items)
+
+    monkeypatch.setattr(pipe.db, "update_blocks_embedded_batch", failing_update)
+
+    with pytest.raises(RuntimeError, match="模拟 SQLite 写入失败"):
+        pipe.stage6_submit_embed_batches("doc1", embed_jsonl)
+
+    # FAISS 应无新增向量
+    vec = VectorIndex(dim=4, index_path=Config.FAISS_INDEX_PATH, id_map_path=Config.ID_MAP_PATH)
+    assert vec._id_map == []
+    assert vec.search([1.0, 0.0, 0.0, 0.0], top_k=1) == []
+
+    # SQLite 中 block 应无 embedding
+    for block_db_id in (1, 2):
+        block = db.get_block_by_db_id(block_db_id)
+        assert block is not None
+        assert "embedding" not in block["metadata"]
+
+
+def test_stage6_faiss_failure_does_not_modify_sqlite(tmp_path, monkeypatch):
+    """复现：FAISS 写入失败时，旧逻辑会错误清除 SQLite 中已存在的 embedding.
+
+    修复后：FAISS 写入失败不应修改 SQLite，因为 SQLite 尚未提交。
+    """
+    import json
+
+    from core.doc_graph_pipeline import DocGraphPipeline
+
+    monkeypatch.setattr(Config, "DB_PATH", tmp_path / "workdocs.db")
+    monkeypatch.setattr(Config, "FAISS_INDEX_PATH", tmp_path / "faiss.index")
+    monkeypatch.setattr(Config, "ID_MAP_PATH", tmp_path / "id_map.json")
+    monkeypatch.setattr(Config, "EMBEDDING_DIMENSION", 4)
+
+    db = KnowledgeDB()
+    db.upsert_document(
+        Document(
+            doc_id="doc1",
+            title="Test Doc",
+            source_path="/tmp/test.pdf",
+            file_type="pdf",
+            total_pages=1,
+            chapters=[],
+            status="processing",
+        )
+    )
+    db.insert_block(doc_id="doc1", block_id="b1", content="hello", seq_index=0, metadata={})
+
+    batch_dir = tmp_path / "batch"
+    batch_dir.mkdir(parents=True, exist_ok=True)
+    embed_jsonl = batch_dir / "doc1_embed.jsonl"
+    embed_jsonl.write_text(
+        json.dumps({"db_id": 1, "text": "hello"}, ensure_ascii=False) + "\n",
+        encoding="utf-8",
+    )
+
+    pipe = DocGraphPipeline()
+    monkeypatch.setattr("core.doc_graph_pipeline.EmbeddingClient", _FakeEmbedder)
+
+    def failing_add_batch(items):
+        raise RuntimeError("模拟 FAISS 写入失败")
+
+    monkeypatch.setattr(pipe.vec, "add_batch", failing_add_batch)
+
+    with pytest.raises(RuntimeError, match="模拟 FAISS 写入失败"):
+        pipe.stage6_submit_embed_batches("doc1", embed_jsonl)
+
+    block = db.get_block_by_db_id(1)
+    assert block is not None
+    assert "embedding" not in block["metadata"]

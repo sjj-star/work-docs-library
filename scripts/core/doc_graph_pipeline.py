@@ -1925,26 +1925,16 @@ class DocGraphPipeline:
                     embedder.close()
 
         # 4. 写入 FAISS（faiss_id）和 SQLite（block_db_id）。先写 FAISS 再写 SQLite，
-        # 避免 SQLite 中已存在 embedding 记录但向量索引缺失。FAISS 失败时仍回滚 SQLite。
-        # TODO: 理想情况应使用两阶段提交，SQLite 失败时也能回滚 FAISS。
+        # 避免 SQLite 中已存在 embedding 记录但向量索引缺失。SQLite 失败时使用快照回滚 FAISS。
         if sqlite_items:
+            snapshot = self.vec.snapshot()
+            self.vec.add_batch(faiss_items)
             try:
-                self.vec.add_batch(faiss_items)
+                self.db.update_blocks_embedded_batch(sqlite_items)
             except Exception as e:
-                logger.error(f"FAISS 添加失败，回滚 SQLite embedding | doc_id={doc_id} | error={e}")
-                for block_db_id, _ in sqlite_items:
-                    block = self.db.get_block_by_db_id(block_db_id)
-                    if block:
-                        meta = dict(block["metadata"])
-                        meta.pop("embedding", None)
-                        with self.db._connect() as conn:
-                            conn.execute(
-                                "UPDATE content_blocks SET metadata = ?, "
-                                "status = 'embedded' WHERE id = ?",
-                                (json.dumps(meta, ensure_ascii=False), block_db_id),
-                            )
+                logger.error(f"SQLite embedding 更新失败，回滚 FAISS | doc_id={doc_id} | error={e}")
+                self.vec.restore(snapshot)
                 raise
-            self.db.update_blocks_embedded_batch(sqlite_items)
 
         # 5. 更新状态为 done
         for block in db_blocks:

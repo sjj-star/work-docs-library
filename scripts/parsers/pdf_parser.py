@@ -595,30 +595,6 @@ class PDFParser:
         return diagram_images
 
     @staticmethod
-    def _build_table_elements_from_uzn(uzn_result) -> list[dict[str, Any]]:
-        """从 UZN 结果构建表格元素列表（兼容 _build_page_markdown 格式）."""
-        table_elements: list[dict[str, Any]] = []
-        for zone in uzn_result.zones:
-            if not zone.table_markdown:
-                continue
-            # 找到 table cluster 的 bbox 作为定位
-            table_bbox = zone.bbox
-            for cluster in zone.clusters:
-                if cluster.cluster_type == "table":
-                    table_bbox = cluster.bbox
-                    break
-            table_elements.append(
-                {
-                    "type": "table",
-                    "y0": table_bbox.y0,
-                    "y1": table_bbox.y1,
-                    "text": zone.table_markdown,
-                    "bbox": table_bbox,
-                }
-            )
-        return table_elements
-
-    @staticmethod
     def _validate_image_links(
         markdown_text: str, image_paths: list[Path], img_dir: Path
     ) -> tuple[str, list[Path]]:

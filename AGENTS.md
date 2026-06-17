@@ -29,7 +29,7 @@
 |------|--------|---------|
 | 语言 | Python | >= 3.11 |
 | 虚拟环境 | uv / venv | — |
-| PDF 解析 | PyMuPDF, PyMuPDF4LLM, pdfplumber, PyPDF2 | >=1.23, >=1.27, >=0.10, >=3.0 |
+| PDF 解析 | PyMuPDF, pdfplumber, PyPDF2 | >=1.23, >=0.10, >=3.0 |
 | 向量检索 | FAISS (CPU), NumPy | >=1.7.4, >=1.24 |
 | 图谱存储 | NetworkX | >=3.0 |
 | 元数据存储 | SQLite (标准库 sqlite3) | — |
@@ -94,7 +94,7 @@ work-docs-library/
 │   │   ├── pdf_parser.py         # PDF 本地解析器（PyMuPDF + TOC 驱动章节识别 + 表格/图片检测）
 │   │   ├── office_parser.py      # DOCX / XLSX 解析器（代码存在，尚未接入 pipeline）
 │   │   └── image_utils.py        # 图片压缩与三分类（彩色/灰度/黑白）
-│   ├── tests/                    # pytest 测试集（408 passed, 2 skipped）
+│   ├── tests/                    # pytest 测试集（413 passed, 0 skipped）
 │   │   ├── conftest.py           # 三重环境隔离（清除 WORKDOCS_ 环境变量、阻止 load_dotenv、临时目录重定向）
 │   │   ├── fixtures/             # 测试 fixture（PDF 页样本、解析输出样本）
 │   │   └── test_*.py             # 各模块测试文件
@@ -209,18 +209,18 @@ PYTHONPATH=scripts ./.venv/bin/python -m pytest \
   2. 阻止 `load_dotenv` 重新加载 `.env` 文件
   3. 重定向 Config 默认路径到临时目录（DB、FAISS、Graph 均隔离）
 - **回归即修复**：任何导致测试失败的变更必须当场修复
-- **408 个测试用例必须全部通过**（2 个 skipped 为正常：真实文档参数集为空）
+- **413 个测试用例必须全部通过**（0 skipped）
 
 ### 测试文件清单
 | 测试文件 | 用例数 | 说明 |
 |----------|--------|------|
-| `test_plugin_router.py` | 45 | Plugin 工具路由、参数解析、路径沙箱 |
+| `test_plugin_router.py` | 46 | Plugin 工具路由、参数解析、路径沙箱 |
 | `test_pdf_parser.py` | 71 | PDF 解析核心测试（含 14 个真实页面 fixture） |
 | `test_borderless_table_extractor.py` | 3 | AMBA 风格无边框表格提取单元测试 |
 | `test_table_utils.py` | 4 | Markdown 表格规范化单元测试 |
 | `test_office_parser.py` | 3 | DOCX / XLSX 解析测试 |
 | `test_db.py` | 15 | SQLite 操作、事务管理 |
-| `test_vector_index.py` | 9 | FAISS 索引增删查、持久化 |
+| `test_vector_index.py` | 11 | FAISS 索引增删查、持久化、快照回滚 |
 | `test_llm_client.py` | 9 | LLM 客户端 Mock |
 | `test_config_env.py` | 13 | 环境变量配置优先级、默认值、敏感 key 脱敏 |
 | `test_chapter_parser.py` | 20 | ChapterParser 树形章节解析测试 |
@@ -234,7 +234,8 @@ PYTHONPATH=scripts ./.venv/bin/python -m pytest \
 | `test_batch_builder.py` | 14 | BatchBuilder 切分保护与空 content 过滤测试 |
 | `test_parsed_docs_jsonl.py` | 2 | 真实文档端到端 JSONL 生成测试 |
 | `test_pipeline_stages.py` | 31 | 六阶段 pipeline 拆分测试 |
-| `test_audit_issues.py` | 8 | 8 项生产 bug/审计问题定向回归测试 |
+| `test_audit_issues.py` | 10 | 生产 bug/审计问题定向回归测试（含 FAISS/SQLite 原子性） |
+| `test_mcp_server.py` | 10 | MCP Server 工具注册与 JSON-RPC 调用测试 |
 
 ### Mock 方法
 使用 `monkeypatch.setattr` 替换客户端类方法：
@@ -402,7 +403,7 @@ monkeypatch.setattr(
 - ✅ **存储粒度与查询粒度解耦（方案C）**：引入 `content_blocks` 表作为存储粒度，`heading_maps` 表作为查询粒度，batch 数量减少 40-50%
 - ✅ **FAISS ID 偏移**：`_BLOCK_FAISS_OFFSET = 10_000_000` 避免 block db_id 与旧 chunks ID 冲突
 - ✅ **408 个测试全部通过**
-- ✅ **PDF Parser 表格检测增强（Milestone 1-4）**：`find_tables(strategy="lines_strict")`、caption-gated 预筛选、位域图重叠保护、PyMuPDF4LLM fallback、全部 14 个 Magic Number 配置化
+- ✅ **PDF Parser 表格检测增强（Milestone 1-4）**：`find_tables(strategy="lines_strict")`、caption-gated 预筛选、位域图重叠保护、全部 14 个 Magic Number 配置化（已移除 PyMuPDF4LLM fallback）
 - ✅ **PDF Parser 图片检测增强（Milestone 2）**：`page.get_image_info()` 过滤链、双路径提取
 - ✅ **性能基准测试**：TI (219页) 10.3s/0表格 → 46.2s/68表格；AMBA (585页) 8.7s/0表格 → 93.3s/22表格
 - ✅ **多进程并行化可行性分析**：4-worker 加速比 TI 2.07x / AMBA 1.61x，但 Amdahl 定律限制整体收益仅 ~1.3x，**否决实施**

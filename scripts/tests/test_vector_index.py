@@ -122,3 +122,50 @@ def test_close_idempotent(make_index):
     vi.close()
     vi.close()  # 第二次调用不应抛异常
     assert vi._lock_fd is None
+
+
+def test_snapshot_and_restore(make_index):
+    """snapshot/restore 应能回滚 FAISS 到之前的状态."""
+    vi = make_index(dim=4)
+    vi.add(10, [1, 0, 0, 0])
+    vi.add(20, [0, 1, 0, 0])
+    vi.add(30, [0, 0, 1, 0])
+
+    snapshot = vi.snapshot()
+    assert snapshot[1] == [10, 20, 30]
+
+    vi.add(40, [0, 0, 0, 1])
+    vi.add(50, [1, 1, 0, 0])
+    results = vi.search([0, 0, 0, 1], top_k=5)
+    ids = [r[0] for r in results]
+    assert 40 in ids
+
+    vi.restore(snapshot)
+    assert vi._id_map == [10, 20, 30]
+    assert vi._db_ids == {10, 20, 30}
+
+    results = vi.search([0, 0, 0, 1], top_k=5)
+    ids = [r[0] for r in results]
+    assert 40 not in ids
+    assert 50 not in ids
+
+    # 验证持久化后也保持一致
+    vi2 = VectorIndex(dim=4, index_path=vi.index_path, id_map_path=vi.id_map_path)
+    assert vi2._id_map == [10, 20, 30]
+    results = vi2.search([0, 0, 0, 1], top_k=5)
+    ids = [r[0] for r in results]
+    assert 40 not in ids
+
+
+def test_restore_empty_snapshot(make_index):
+    """空索引快照应能正确恢复到空状态."""
+    vi = make_index(dim=4)
+    snapshot = vi.snapshot()
+    assert snapshot == ([], [])
+
+    vi.add(1, [1, 0, 0, 0])
+    vi.restore(snapshot)
+
+    assert vi._id_map == []
+    assert vi._db_ids == set()
+    assert vi.search([1, 0, 0, 0], top_k=1) == []

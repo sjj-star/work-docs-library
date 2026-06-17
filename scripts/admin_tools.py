@@ -28,7 +28,8 @@ logger = logging.getLogger("admin_tools")
 _ADMIN_COMMANDS: dict[str, str] = {
     "config": "config",
     "stage1_parse": "doc_parse",
-    "stage2_build_batches": "doc_build_batches",
+    "stage2_build_jsonl": "doc_build_batches",
+    "stage2_build_batches": "doc_build_batches",  # 兼容别名
     "stage3_submit_batches": "doc_submit_batches",
     "stage4_ingest_results": "doc_ingest_results",
     "stage5_build_embed_jsonl": "doc_build_embed_jsonl",

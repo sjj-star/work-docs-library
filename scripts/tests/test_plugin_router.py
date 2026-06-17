@@ -1076,6 +1076,29 @@ def test_tool_config_always_masks_sensitive_keys(monkeypatch):
     assert parser_group["PARSER_API_KEY"] == "***"
 
 
+def test_tool_config_groups_cover_all_active_keys():
+    """tool_config 的分组映射应覆盖 Config 中所有非内部键，避免重要配置落入"其他"."""
+    result = plugin_router.tool_config({})
+    groups = result["config_groups"]
+    grouped_keys = set()
+    for group_name, group_items in groups.items():
+        # 允许"其他"分组只包含内部路径/开发配置
+        if group_name == "其他":
+            continue
+        grouped_keys.update(group_items.keys())
+
+    expected_keys = set(Config.to_dict().keys())
+    # 内部路径配置无需用户感知，可留在"其他"
+    internal_keys = {
+        "DB_PATH",
+        "FAISS_INDEX_PATH",
+        "ID_MAP_PATH",
+        "PROMPT_DIR",
+    }
+    missing = (expected_keys - internal_keys) - grouped_keys
+    assert not missing, f"以下活跃配置未在 tool_config 分组中：{sorted(missing)}"
+
+
 def test_tool_ingest_rejects_unsafe_path():
     """tool_ingest 应拒绝沙箱外的路径."""
     result = plugin_router.tool_ingest({"path": "../../etc/passwd"})
