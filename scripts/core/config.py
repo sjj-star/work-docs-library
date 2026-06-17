@@ -44,13 +44,9 @@ class Config:
 
     # LLM 对话模型配置（总结用）
     LLM_API_KEY: str = _resolve_config("WORKDOCS_LLM_API_KEY", "")
-    LLM_BASE_URL: str = _resolve_config(
-        "WORKDOCS_LLM_BASE_URL", "https://api.moonshot.cn/v1"
-    )
+    LLM_BASE_URL: str = _resolve_config("WORKDOCS_LLM_BASE_URL", "https://api.moonshot.cn/v1")
     LLM_MODEL: str = _resolve_config("WORKDOCS_LLM_MODEL", "kimi-k2.5")
-    LLM_THINKING_ENABLED: bool = (
-        _resolve_config("WORKDOCS_LLM_THINKING_ENABLED", "0") == "1"
-    )
+    LLM_THINKING_ENABLED: bool = _resolve_config("WORKDOCS_LLM_THINKING_ENABLED", "0") == "1"
     LLM_MODE: str = _resolve_config("WORKDOCS_LLM_MODE", "batch")
 
     # Embedding 模型配置（向量化用）- 完全独立
@@ -79,11 +75,9 @@ class Config:
     BLOCK_MAX_CHARS: int = 0  # 将在下方初始化
 
     # --- API Endpoint 配置（服务商无感化） ---
-    LLM_BATCH_ENDPOINT: str = _resolve_config(
-        "WORKDOCS_LLM_BATCH_ENDPOINT", "/v1/chat/completions"
-    )
-    EMBEDDING_BATCH_ENDPOINT: str = _resolve_config(
-        "WORKDOCS_EMBEDDING_BATCH_ENDPOINT",
+    LLM_BATCH_ENDPOINT: str = _resolve_config("WORKDOCS_LLM_BATCH_ENDPOINT", "/v1/chat/completions")
+    EMBEDDING_ENDPOINT: str = _resolve_config(
+        "WORKDOCS_EMBEDDING_ENDPOINT",
         "/v4/embeddings",
     )
     LLM_BATCH_COMPLETION_WINDOW: str = _resolve_config(
@@ -105,7 +99,6 @@ class Config:
     EMBED_MAX_RETRIES: int = 0  # 将在下方初始化
     EMBED_RETRY_BACKOFF: int = 0  # 将在下方初始化
     EMBED_TIMEOUT: int = 0  # 将在下方初始化
-    EMBED_BATCH_TIMEOUT: int = 0  # 将在下方初始化
 
     # --- LLM 客户端参数 ---
     LLM_MAX_RETRIES: int = 0  # 将在下方初始化
@@ -129,32 +122,21 @@ class Config:
     # --- 目录配置 ---
     PARSE_OUTPUT_DIR: str = _resolve_config("WORKDOCS_PARSE_OUTPUT_DIR", "parsed")
     BATCH_OUTPUT_DIR: str = _resolve_config("WORKDOCS_BATCH_OUTPUT_DIR", "batch")
-    BATCH_TEMP_DIR: str = _resolve_config("WORKDOCS_BATCH_TEMP_DIR", "batch_temp")
     GRAPH_OUTPUT_DIR: str = _resolve_config("WORKDOCS_GRAPH_OUTPUT_DIR", "graphs")
 
     @classmethod
     def _initialize_numeric_configs(cls):
         """初始化数值类型的配置（在类定义后调用）."""
-        cls.EMBEDDING_DIMENSION = int(
-            _resolve_config("WORKDOCS_EMBEDDING_DIMENSION", "1024")
-        )
+        cls.EMBEDDING_DIMENSION = int(_resolve_config("WORKDOCS_EMBEDDING_DIMENSION", "1024"))
         # FAISS ID 偏移：避免 block db_id 与旧 chunks ID 在 FAISS 中冲突
-        cls.BLOCK_FAISS_OFFSET = int(
-            _resolve_config("WORKDOCS_BLOCK_FAISS_OFFSET", "10000000")
-        )
-        cls.LLM_BATCH_MAX_CHARS = int(
-            _resolve_config("WORKDOCS_LLM_BATCH_MAX_CHARS", "10000")
-        )
+        cls.BLOCK_FAISS_OFFSET = int(_resolve_config("WORKDOCS_BLOCK_FAISS_OFFSET", "10000000"))
+        cls.LLM_BATCH_MAX_CHARS = int(_resolve_config("WORKDOCS_LLM_BATCH_MAX_CHARS", "10000"))
         cls.BLOCK_MAX_CHARS = int(_resolve_config("WORKDOCS_BLOCK_MAX_CHARS", "6000"))
-        cls.LLM_BATCH_TIMEOUT = int(
-            _resolve_config("WORKDOCS_LLM_BATCH_TIMEOUT", "3600")
-        )
+        cls.LLM_BATCH_TIMEOUT = int(_resolve_config("WORKDOCS_LLM_BATCH_TIMEOUT", "3600"))
         # Image 图片处理配置
         cls.IMAGE_MAX_SIZE = int(_resolve_config("WORKDOCS_IMAGE_MAX_SIZE", "1024"))
         cls.IMAGE_QUALITY = int(_resolve_config("WORKDOCS_IMAGE_QUALITY", "80"))
-        cls.IMAGE_GRAYSCALE_QUALITY = int(
-            _resolve_config("WORKDOCS_IMAGE_GRAYSCALE_QUALITY", "75")
-        )
+        cls.IMAGE_GRAYSCALE_QUALITY = int(_resolve_config("WORKDOCS_IMAGE_GRAYSCALE_QUALITY", "75"))
         cls.IMAGE_GRAYSCALE_CHROMA_DIST = float(
             _resolve_config(
                 "WORKDOCS_IMAGE_GRAYSCALE_CHROMA_DIST",
@@ -175,67 +157,38 @@ class Config:
         )
 
         # Batch 轮询/超时
-        cls.BATCH_POLL_INTERVAL = int(
-            _resolve_config("WORKDOCS_BATCH_POLL_INTERVAL", "10")
-        )
-        cls.BATCH_MAX_POLL_RETRIES = int(
-            _resolve_config("WORKDOCS_BATCH_MAX_POLL_RETRIES", "360")
-        )
-        cls.BATCH_MAX_FILE_SIZE_MB = int(
-            _resolve_config("WORKDOCS_BATCH_MAX_FILE_SIZE_MB", "100")
-        )
-        cls.BATCH_PARALLEL_WORKERS = int(
-            _resolve_config("WORKDOCS_BATCH_PARALLEL_WORKERS", "4")
-        )
+        cls.BATCH_POLL_INTERVAL = int(_resolve_config("WORKDOCS_BATCH_POLL_INTERVAL", "10"))
+        cls.BATCH_MAX_POLL_RETRIES = int(_resolve_config("WORKDOCS_BATCH_MAX_POLL_RETRIES", "360"))
+        cls.BATCH_MAX_FILE_SIZE_MB = int(_resolve_config("WORKDOCS_BATCH_MAX_FILE_SIZE_MB", "100"))
+        cls.BATCH_PARALLEL_WORKERS = int(_resolve_config("WORKDOCS_BATCH_PARALLEL_WORKERS", "4"))
 
         # Embedding 客户端
-        cls.EMBED_MAX_RETRIES = int(
-            _resolve_config("WORKDOCS_EMBED_MAX_RETRIES", "3")
-        )
-        cls.EMBED_RETRY_BACKOFF = int(
-            _resolve_config("WORKDOCS_EMBED_RETRY_BACKOFF", "2")
-        )
+        cls.EMBED_MAX_RETRIES = int(_resolve_config("WORKDOCS_EMBED_MAX_RETRIES", "3"))
+        cls.EMBED_RETRY_BACKOFF = int(_resolve_config("WORKDOCS_EMBED_RETRY_BACKOFF", "2"))
         cls.EMBED_TIMEOUT = int(_resolve_config("WORKDOCS_EMBED_TIMEOUT", "120"))
         # LLM 客户端
         cls.LLM_MAX_RETRIES = int(_resolve_config("WORKDOCS_LLM_MAX_RETRIES", "3"))
-        cls.LLM_RETRY_BACKOFF = int(
-            _resolve_config("WORKDOCS_LLM_RETRY_BACKOFF", "2")
-        )
+        cls.LLM_RETRY_BACKOFF = int(_resolve_config("WORKDOCS_LLM_RETRY_BACKOFF", "2"))
         cls.LLM_TIMEOUT = int(_resolve_config("WORKDOCS_LLM_TIMEOUT", "120"))
         # 文件解析
         cls.PARSER_TIMEOUT = int(_resolve_config("WORKDOCS_PARSER_TIMEOUT", "60"))
-        cls.PARSER_MAX_RETRIES = int(
-            _resolve_config("WORKDOCS_PARSER_MAX_RETRIES", "60")
-        )
-        cls.PARSER_POLL_INTERVAL = int(
-            _resolve_config("WORKDOCS_PARSER_POLL_INTERVAL", "3")
-        )
+        cls.PARSER_MAX_RETRIES = int(_resolve_config("WORKDOCS_PARSER_MAX_RETRIES", "60"))
+        cls.PARSER_POLL_INTERVAL = int(_resolve_config("WORKDOCS_PARSER_POLL_INTERVAL", "3"))
 
         # PDF Parser 参数（Milestone 1-3 配置化）
-        cls.PARSER_MIN_IMAGE_WIDTH = int(
-            _resolve_config("WORKDOCS_PARSER_MIN_IMAGE_WIDTH", "100")
-        )
+        cls.PARSER_MIN_IMAGE_WIDTH = int(_resolve_config("WORKDOCS_PARSER_MIN_IMAGE_WIDTH", "100"))
         cls.PARSER_MIN_IMAGE_HEIGHT = int(
             _resolve_config("WORKDOCS_PARSER_MIN_IMAGE_HEIGHT", "100")
         )
-        cls.PARSER_PAGE_RENDER_DPI = int(
-            _resolve_config("WORKDOCS_PARSER_PAGE_RENDER_DPI", "200")
-        )
+        cls.PARSER_PAGE_RENDER_DPI = int(_resolve_config("WORKDOCS_PARSER_PAGE_RENDER_DPI", "200"))
         cls.PARSER_TABLE_DETECTION_ENABLED = (
-            _resolve_config(
-                "WORKDOCS_PARSER_TABLE_DETECTION_ENABLED", "true"
-            ).lower()
-            == "true"
+            _resolve_config("WORKDOCS_PARSER_TABLE_DETECTION_ENABLED", "true").lower() == "true"
         )
         cls.PARSER_TABLE_OVERLAP_THRESHOLD = float(
             _resolve_config("WORKDOCS_PARSER_TABLE_OVERLAP_THRESHOLD", "0.5")
         )
-        cls.PARSER_TABLE_MIN_ROWS = int(
-            _resolve_config("WORKDOCS_PARSER_TABLE_MIN_ROWS", "2")
-        )
-        cls.PARSER_TABLE_MIN_COLS = int(
-            _resolve_config("WORKDOCS_PARSER_TABLE_MIN_COLS", "2")
-        )
+        cls.PARSER_TABLE_MIN_ROWS = int(_resolve_config("WORKDOCS_PARSER_TABLE_MIN_ROWS", "2"))
+        cls.PARSER_TABLE_MIN_COLS = int(_resolve_config("WORKDOCS_PARSER_TABLE_MIN_COLS", "2"))
         cls.PARSER_TABLE_MIN_HEIGHT_PT = float(
             _resolve_config("WORKDOCS_PARSER_TABLE_MIN_HEIGHT_PT", "20.0")
         )
@@ -259,26 +212,14 @@ class Config:
             _resolve_config("WORKDOCS_PARSER_EDGE_LABEL_MAX_LEN", "30")
         )
         # Plugin 默认值
-        cls.PLUGIN_SEARCH_TOP_K = int(
-            _resolve_config("WORKDOCS_PLUGIN_SEARCH_TOP_K", "5")
-        )
-        cls.PLUGIN_QUERY_TOP_K = int(
-            _resolve_config("WORKDOCS_PLUGIN_QUERY_TOP_K", "10")
-        )
-        cls.PLUGIN_GRAPH_MAX_DEPTH = int(
-            _resolve_config("WORKDOCS_PLUGIN_GRAPH_MAX_DEPTH", "3")
-        )
-        cls.PLUGIN_SUBGRAPH_DEPTH = int(
-            _resolve_config("WORKDOCS_PLUGIN_SUBGRAPH_DEPTH", "1")
-        )
-        cls.PLUGIN_DEFAULT_LIMIT = int(
-            _resolve_config("WORKDOCS_PLUGIN_DEFAULT_LIMIT", "100")
-        )
+        cls.PLUGIN_SEARCH_TOP_K = int(_resolve_config("WORKDOCS_PLUGIN_SEARCH_TOP_K", "5"))
+        cls.PLUGIN_QUERY_TOP_K = int(_resolve_config("WORKDOCS_PLUGIN_QUERY_TOP_K", "10"))
+        cls.PLUGIN_GRAPH_MAX_DEPTH = int(_resolve_config("WORKDOCS_PLUGIN_GRAPH_MAX_DEPTH", "3"))
+        cls.PLUGIN_SUBGRAPH_DEPTH = int(_resolve_config("WORKDOCS_PLUGIN_SUBGRAPH_DEPTH", "1"))
+        cls.PLUGIN_DEFAULT_LIMIT = int(_resolve_config("WORKDOCS_PLUGIN_DEFAULT_LIMIT", "100"))
 
         # Pipeline 业务常量
-        cls.GRAPH_MAX_PATH_DEPTH = int(
-            _resolve_config("WORKDOCS_GRAPH_MAX_PATH_DEPTH", "6")
-        )
+        cls.GRAPH_MAX_PATH_DEPTH = int(_resolve_config("WORKDOCS_GRAPH_MAX_PATH_DEPTH", "6"))
 
     @classmethod
     def to_dict(cls, mask_sensitive: bool = True) -> dict[str, Any]:

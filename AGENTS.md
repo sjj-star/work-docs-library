@@ -98,12 +98,6 @@ work-docs-library/
 │   │   ├── conftest.py           # 三重环境隔离（清除 WORKDOCS_ 环境变量、阻止 load_dotenv、临时目录重定向）
 │   │   ├── fixtures/             # 测试 fixture（PDF 页样本、解析输出样本）
 │   │   └── test_*.py             # 各模块测试文件
-│   └── benchmark/                # 性能基准与诊断脚本（非 pytest 常规用例）
-│       ├── test_mp_find_tables_feasibility.py   # 多进程可行性验证
-│       ├── test_mp_find_tables_perf_detail.py   # 详细性能分析
-│       ├── analyze_doc.py        # 单文档解析诊断
-│       ├── compare_regression.py # 回归对比
-│       └── ...
 ├── knowledge_base/               # 运行时自动生成数据（❌ 禁止手动修改）
 │   ├── workdocs.db               # SQLite
 │   ├── faiss.index / id_map.json # FAISS 向量索引
@@ -241,7 +235,6 @@ PYTHONPATH=scripts ./.venv/bin/python -m pytest \
 | `test_parsed_docs_jsonl.py` | 2 | 真实文档端到端 JSONL 生成测试 |
 | `test_pipeline_stages.py` | 31 | 六阶段 pipeline 拆分测试 |
 | `test_audit_issues.py` | 8 | 8 项生产 bug/审计问题定向回归测试 |
-| `scripts/benchmark/*` | — | 性能基准与诊断脚本（非 pytest 常规用例） |
 
 ### Mock 方法
 使用 `monkeypatch.setattr` 替换客户端类方法：
@@ -298,7 +291,6 @@ monkeypatch.setattr(
 
 | `README.md` / `AGENTS.md` / `DESIGN.md` | ✅ 可改 | 文档必须随代码同步更新 |
 | `knowledge_base/` | ❌ 禁止 | 运行时生成数据 |
-| `scripts/benchmark/` | ✅ 可改 | 性能基准与诊断脚本 |
 
 ---
 

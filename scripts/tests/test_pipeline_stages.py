@@ -1,6 +1,7 @@
-"""DocGraphPipeline 三阶段拆分测试.
+"""DocGraphPipeline 阶段拆分测试.
 
-覆盖 stage1_parse / stage2_build_jsonl / stage3_ingest 以及 _process_one 兼容入口。
+覆盖 stage1_parse / stage2_build_jsonl / stage3_submit_batches / stage4_ingest_results
+/ stage5_build_embed_jsonl / stage6_submit_embed_batches 以及 _process_one 兼容入口。
 所有外部 API 调用均使用 Mock。
 """
 
@@ -162,6 +163,34 @@ def _mock_external_clients(monkeypatch):
     )
 
 
+def _run_ingest_stages(
+    pipe: DocGraphPipeline,
+    file_path: str,
+    doc_id: str,
+    jsonl_path: Path | None = None,
+    force: bool = False,
+) -> str:
+    """运行 Stage 2-6 完成实体提取、向量化与入库."""
+    if jsonl_path is None:
+        jsonl_path, _batches, _requests, _content_blocks, _heading_maps = pipe.stage2_build_jsonl(
+            doc_id
+        )
+    results_path = pipe.stage3_submit_batches(
+        doc_id=doc_id,
+        file_path=file_path,
+        jsonl_path=jsonl_path,
+        force=force,
+    )
+    pipe.stage4_ingest_results(
+        doc_id=doc_id,
+        file_path=file_path,
+        results_path=results_path,
+        force=force,
+    )
+    embed_jsonl_path = pipe.stage5_build_embed_jsonl(doc_id)
+    return pipe.stage6_submit_embed_batches(doc_id, embed_jsonl_path)
+
+
 # ---------------------------------------------------------------------------
 # stage1_parse 测试
 # ---------------------------------------------------------------------------
@@ -256,29 +285,27 @@ def test_stage2_build_jsonl_custom_max_chars(patched_config, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# stage3_ingest 测试
+# Stage 3-6 串联测试
 # ---------------------------------------------------------------------------
 
 
-def test_stage3_ingest_completes_and_persists(patched_config, monkeypatch):
-    """stage3_ingest 应完成实体提取、向量化、入库."""
+def test_stage3_6_completes_and_persists(patched_config, monkeypatch):
+    """Stage 3-6 应完成实体提取、向量化、入库."""
     _mock_external_clients(monkeypatch)
 
     pdf = patched_config / "test.pdf"
     _make_pdf(pdf, ["## Overview\n\nThis is a test document."])
 
     pipe = DocGraphPipeline()
-    doc_id, parsed_dir, text, images = pipe.stage1_parse(str(pdf))
+    doc_id, _parsed_dir, _text, _images = pipe.stage1_parse(str(pdf))
     jsonl_path, _batches, _requests, _content_blocks, _heading_maps = pipe.stage2_build_jsonl(
         doc_id
     )
 
-    result_doc_id = pipe.stage3_ingest(
+    result_doc_id = _run_ingest_stages(
+        pipe=pipe,
         file_path=str(pdf),
         doc_id=doc_id,
-        parsed_output_dir=parsed_dir,
-        extracted_text=text,
-        bigmodel_images=images,
         jsonl_path=jsonl_path,
     )
 
@@ -302,71 +329,63 @@ def test_stage3_ingest_completes_and_persists(patched_config, monkeypatch):
     assert graph_path.exists()
 
 
-def test_stage3_ingest_skips_unchanged(patched_config, monkeypatch):
-    """stage3_ingest 对未变更文档应跳过处理."""
+def test_stage3_6_skips_unchanged(patched_config, monkeypatch):
+    """Stage 3-6 对未变更文档应跳过处理."""
     _mock_external_clients(monkeypatch)
 
     pdf = patched_config / "test.pdf"
     _make_pdf(pdf, ["## Overview\n\nThis is a test document."])
 
     pipe = DocGraphPipeline()
-    doc_id, parsed_dir, text, images = pipe.stage1_parse(str(pdf))
+    doc_id, _parsed_dir, _text, _images = pipe.stage1_parse(str(pdf))
     jsonl_path, _batches, _requests, _content_blocks, _heading_maps = pipe.stage2_build_jsonl(
         doc_id
     )
 
     # 第一次入库
-    pipe.stage3_ingest(
+    _run_ingest_stages(
+        pipe=pipe,
         file_path=str(pdf),
         doc_id=doc_id,
-        parsed_output_dir=parsed_dir,
-        extracted_text=text,
-        bigmodel_images=images,
         jsonl_path=jsonl_path,
     )
 
     # 第二次入库（未变更，应跳过）
-    result_doc_id = pipe.stage3_ingest(
+    result_doc_id = _run_ingest_stages(
+        pipe=pipe,
         file_path=str(pdf),
         doc_id=doc_id,
-        parsed_output_dir=parsed_dir,
-        extracted_text=text,
-        bigmodel_images=images,
         jsonl_path=jsonl_path,
     )
     assert result_doc_id == doc_id
 
 
-def test_stage3_ingest_force_reprocess(patched_config, monkeypatch):
-    """stage3_ingest force=True 应强制重新处理."""
+def test_stage3_6_force_reprocess(patched_config, monkeypatch):
+    """Stage 3-6 force=True 应强制重新处理."""
     _mock_external_clients(monkeypatch)
 
     pdf = patched_config / "test.pdf"
     _make_pdf(pdf, ["## Overview\n\nThis is a test document."])
 
     pipe = DocGraphPipeline()
-    doc_id, parsed_dir, text, images = pipe.stage1_parse(str(pdf))
+    doc_id, _parsed_dir, _text, _images = pipe.stage1_parse(str(pdf))
     jsonl_path, _batches, _requests, _content_blocks, _heading_maps = pipe.stage2_build_jsonl(
         doc_id
     )
 
     # 第一次入库
-    pipe.stage3_ingest(
+    _run_ingest_stages(
+        pipe=pipe,
         file_path=str(pdf),
         doc_id=doc_id,
-        parsed_output_dir=parsed_dir,
-        extracted_text=text,
-        bigmodel_images=images,
         jsonl_path=jsonl_path,
     )
 
     # force 重新处理
-    result_doc_id = pipe.stage3_ingest(
+    result_doc_id = _run_ingest_stages(
+        pipe=pipe,
         file_path=str(pdf),
         doc_id=doc_id,
-        parsed_output_dir=parsed_dir,
-        extracted_text=text,
-        bigmodel_images=images,
         jsonl_path=jsonl_path,
         force=True,
     )
@@ -431,13 +450,11 @@ def test_three_stage_pipeline_end_to_end(patched_config, monkeypatch):
     assert len(batches) > 0
     assert len(requests) > 0
 
-    # Stage 3
-    result_doc_id = pipe.stage3_ingest(
+    # Stage 3-6
+    result_doc_id = _run_ingest_stages(
+        pipe=pipe,
         file_path=str(pdf),
         doc_id=doc_id,
-        parsed_output_dir=parsed_dir,
-        extracted_text=text,
-        bigmodel_images=images,
         jsonl_path=jsonl_path,
     )
     assert result_doc_id == doc_id
@@ -459,7 +476,7 @@ def test_three_stage_pipeline_end_to_end(patched_config, monkeypatch):
 
 
 def test_stage3_incremental_update(patched_config, monkeypatch):
-    """stage3_ingest 应支持章节级增量更新."""
+    """Stage 3-6 应支持章节级增量更新."""
     _mock_external_clients(monkeypatch)
 
     pdf = patched_config / "test.pdf"
@@ -469,18 +486,16 @@ def test_stage3_incremental_update(patched_config, monkeypatch):
     )
 
     pipe = DocGraphPipeline()
-    doc_id, parsed_dir, text, images = pipe.stage1_parse(str(pdf))
+    doc_id, parsed_dir, _text, _images = pipe.stage1_parse(str(pdf))
     jsonl_path, _batches, _requests, _content_blocks, _heading_maps = pipe.stage2_build_jsonl(
         doc_id
     )
 
     # 第一次入库
-    pipe.stage3_ingest(
+    _run_ingest_stages(
+        pipe=pipe,
         file_path=str(pdf),
         doc_id=doc_id,
-        parsed_output_dir=parsed_dir,
-        extracted_text=text,
-        bigmodel_images=images,
         jsonl_path=jsonl_path,
     )
 
@@ -492,19 +507,11 @@ def test_stage3_incremental_update(patched_config, monkeypatch):
     new_text = "## Section A\n\nContent A.\n\n## Section B\n\nModified content B."
     (parsed_dir / "result.md").write_text(new_text, encoding="utf-8")
 
-    # 重新 stage2
-    jsonl_path2, _batches2, _requests2, _content_blocks2, _heading_maps2 = pipe.stage2_build_jsonl(
-        doc_id
-    )
-
     # 第二次入库（force 确保重新处理）
-    pipe.stage3_ingest(
+    _run_ingest_stages(
+        pipe=pipe,
         file_path=str(pdf),
         doc_id=doc_id,
-        parsed_output_dir=parsed_dir,
-        extracted_text=new_text,
-        bigmodel_images=images,
-        jsonl_path=jsonl_path2,
         force=True,
     )
 
@@ -623,7 +630,7 @@ class ArchFakeBatchClient:
         pass
 
 
-def test_stage3_ingest_arch_entities(patched_config, monkeypatch):
+def test_stage3_6_arch_entities(patched_config, monkeypatch):
     """Pipeline 应正确过滤并入库新增的处理器架构实体."""
     _mock_external_clients(monkeypatch)
     # 覆盖 BatchClient 为返回架构实体的版本
@@ -636,17 +643,15 @@ def test_stage3_ingest_arch_entities(patched_config, monkeypatch):
     _make_pdf(pdf, ["## Instruction Set\n\nMAC and ADC_INT description."])
 
     pipe = DocGraphPipeline()
-    doc_id, parsed_dir, text, images = pipe.stage1_parse(str(pdf))
+    doc_id, _parsed_dir, _text, _images = pipe.stage1_parse(str(pdf))
     jsonl_path, _batches, _requests, _content_blocks, _heading_maps = pipe.stage2_build_jsonl(
         doc_id
     )
 
-    result_doc_id = pipe.stage3_ingest(
+    result_doc_id = _run_ingest_stages(
+        pipe=pipe,
         file_path=str(pdf),
         doc_id=doc_id,
-        parsed_output_dir=parsed_dir,
-        extracted_text=text,
-        bigmodel_images=images,
         jsonl_path=jsonl_path,
     )
     assert result_doc_id == doc_id
@@ -677,7 +682,7 @@ def test_stage3_ingest_arch_entities(patched_config, monkeypatch):
     assert "Interrupt" in cached_types
 
 
-def test_stage3_ingest_all_nodes(patched_config, monkeypatch):
+def test_stage3_6_all_nodes(patched_config, monkeypatch):
     """包含 ### 子章节的文档应聚合为 content_blocks，heading_maps 包含所有标题（方案C）."""
     _mock_external_clients(monkeypatch)
 
@@ -767,8 +772,8 @@ def test_merge_image_descriptions_fallback_append(patched_config, monkeypatch):
     assert "[img_002] A chart" in result
 
 
-def test_stage5_single_text_jsonl(patched_config, monkeypatch):
-    """stage5_build_embed_jsonl 应生成单文本 JSONL，custom_id 包含 db_id.
+def test_stage5_sync_queue_jsonl(patched_config, monkeypatch):
+    """stage5_build_embed_jsonl 应生成同步队列 JSONL（db_id + text）.
 
     方案C：从 content_blocks 读取.
     """
@@ -794,21 +799,15 @@ def test_stage5_single_text_jsonl(patched_config, monkeypatch):
 
     embed_jsonl_path = pipe.stage5_build_embed_jsonl("test_doc")
     lines = embed_jsonl_path.read_text(encoding="utf-8").strip().split("\n")
-    requests = [json.loads(line) for line in lines if line.strip()]
+    records = [json.loads(line) for line in lines if line.strip()]
 
-    # 每个 block 对应一个 request
-    assert len(requests) == 2
-    # 验证 custom_id 格式: embed_dbid_{db_id}
-    assert requests[0]["custom_id"].startswith("embed_dbid_")
-    assert requests[1]["custom_id"].startswith("embed_dbid_")
-    # 验证 body.input 为字符串（不是数组）
-    assert isinstance(requests[0]["body"]["input"], str)
-    assert requests[0]["body"]["input"] == "hello world"
-    assert isinstance(requests[1]["body"]["input"], str)
-    assert requests[1]["body"]["input"] == "foo bar"
-    # 验证不生成 embed_map.json
-    embed_map_path = embed_jsonl_path.parent / "test_doc_embed_map.json"
-    assert not embed_map_path.exists()
+    # 每个 block 对应一条记录
+    assert len(records) == 2
+    # 验证字段为 db_id + text
+    assert "db_id" in records[0]
+    assert "text" in records[0]
+    assert records[0]["text"] == "hello world"
+    assert records[1]["text"] == "foo bar"
 
 
 def test_split_for_embedding_paragraph_boundary():
@@ -868,7 +867,7 @@ def test_stage3_chat_mode_writes_batch_format_jsonl(patched_config, monkeypatch,
     results_path = batch_dir / "chat_test_results.jsonl"
 
     # call _submit_via_chat
-    results = pipe._submit_via_chat(requests, results_path)
+    pipe._submit_via_chat(requests, results_path)
 
     # verify result file exists
     assert results_path.exists()
@@ -883,11 +882,20 @@ def test_stage3_chat_mode_writes_batch_format_jsonl(patched_config, monkeypatch,
     assert "body" in result["response"]
     assert "choices" in result["response"]["body"]
 
-    # verify Stage 4 _parse_results can parse correctly
+    # verify Stage 4 extract_from_results_file can parse correctly
     from core.doc_graph_pipeline import EntityExtractor
 
     extractor = EntityExtractor()
-    entities, relations, _ = extractor._parse_results(results, [{}], doc_id="chat_test")
+    batch_info_path = batch_dir / "chat_test_batch_info.json"
+    batch_info_path.write_text(
+        json.dumps([{"custom_id": "batch_0", "section_title": "Chat Test Section"}]),
+        encoding="utf-8",
+    )
+    entities, relations, _ = extractor.extract_from_results_file(
+        results_path=results_path,
+        doc_id="chat_test",
+        chapter_map={"batch_0": "Chat Test Section"},
+    )
     assert len(entities) == 1
     assert entities[0].entity_type == "Register"
     assert entities[0].name == "TBCTL"
@@ -1019,7 +1027,7 @@ def test_stage3_batch_mode_fallback_to_chat(patched_config, monkeypatch, tmp_pat
     )
     batch_info_path = batch_dir / f"{doc_id}_batch_info.json"
     batch_info_path.write_text(
-        json.dumps([{"custom_id": "batch_0", "chapter_titles": ["Section 1"]}]),
+        json.dumps([{"custom_id": "batch_0", "section_title": "Section 1"}]),
         encoding="utf-8",
     )
 
@@ -1102,7 +1110,7 @@ def test_stage3_both_clients_unavailable_skips(patched_config, monkeypatch, tmp_
     )
     batch_info_path = batch_dir / f"{doc_id}_batch_info.json"
     batch_info_path.write_text(
-        json.dumps([{"custom_id": "batch_0", "chapter_titles": ["Section 1"]}]),
+        json.dumps([{"custom_id": "batch_0", "section_title": "Section 1"}]),
         encoding="utf-8",
     )
 
@@ -1204,7 +1212,7 @@ def test_stage3_batch_fallback_writes_file(patched_config, monkeypatch, tmp_path
     )
     batch_info_path = batch_dir / f"{doc_id}_batch_info.json"
     batch_info_path.write_text(
-        json.dumps([{"custom_id": "batch_0", "chapter_titles": ["Section 1"]}]),
+        json.dumps([{"custom_id": "batch_0", "section_title": "Section 1"}]),
         encoding="utf-8",
     )
 
@@ -1378,9 +1386,10 @@ def test_close_releases_llm_chat(patched_config, monkeypatch):
 
 # -- 从 test_entity_extractor.py 合并的 EntityExtractor 测试 --
 
+
 def test_build_batch_requests_replaces_doc_context():
     """_build_batch_requests 应正确替换 {{doc_context}} 占位符."""
-    extractor = EntityExtractor(batch_client=None)
+    extractor = EntityExtractor()
     batches = [[{"title": "GPIO Registers", "content": "GPIO content"}]]
     doc_context = "以下章节来自 文档《TMS320F28379D TRM》，产品型号 TMS320F28379D。\n\n---\n"
 
@@ -1401,7 +1410,7 @@ def test_build_batch_requests_replaces_doc_context():
 
 def test_build_batch_requests_empty_doc_context():
     """doc_context 为空字符串时，占位符应被替换为空，不影响章节内容."""
-    extractor = EntityExtractor(batch_client=None)
+    extractor = EntityExtractor()
     batches = [[{"title": "Clock Domain", "content": "Clock content"}]]
 
     requests = extractor._build_batch_requests(batches, image_base_dir=None, doc_context="")
@@ -1418,7 +1427,7 @@ def test_build_batch_requests_empty_doc_context():
 
 def test_build_batch_requests_multiple_batches():
     """多个 batch 应共享同一份 doc_context."""
-    extractor = EntityExtractor(batch_client=None)
+    extractor = EntityExtractor()
     batches = [
         [{"title": "Ch1", "content": "content1"}],
         [{"title": "Ch2", "content": "content2"}],

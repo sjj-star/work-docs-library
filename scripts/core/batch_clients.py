@@ -5,6 +5,7 @@
 
 import json
 import logging
+import tempfile
 import time
 import uuid
 from abc import ABC, abstractmethod
@@ -162,94 +163,90 @@ class BaseBatchClient(ABC):
         if not requests:
             return []
 
-        # 1. 生成 JSONL 文件
-        jsonl_path = (
-            Path(Config.DB_PATH.parent) / Config.BATCH_TEMP_DIR / f"{uuid.uuid4().hex}.jsonl"
-        )
-        _build_jsonl(requests, jsonl_path)
-
-        # 检查文件大小
-        file_size_mb = jsonl_path.stat().st_size / (1024 * 1024)
-        if file_size_mb > self.MAX_FILE_SIZE_MB:
-            raise RuntimeError(
-                f"JSONL 文件过大 | size={file_size_mb:.1f}MB | max={self.MAX_FILE_SIZE_MB}MB"
-            )
-
         file_id = None
         batch_id = None
-        try:
-            # 2. 上传文件
-            file_id = self._upload_jsonl(jsonl_path)
-            logger.info(f"Batch 文件已上传 | file_id={file_id}")
+        results: list[dict[str, Any]] = []
 
-            # 3. 创建 batch
-            batch_id = self._create_batch(file_id)
-            logger.info(f"Batch 任务已创建 | batch_id={batch_id}")
+        with tempfile.TemporaryDirectory(prefix="workdocs_batch_") as tmp_dir:
+            # 1. 生成 JSONL 文件
+            jsonl_path = Path(tmp_dir) / f"{uuid.uuid4().hex}.jsonl"
+            _build_jsonl(requests, jsonl_path)
 
-            # 4. 轮询等待
-            start_time = time.time()
-            for attempt in range(self.MAX_POLL_RETRIES):
-                status_info = self._get_batch_status(batch_id)
-                status = status_info.get("status", "unknown")
-                counts = status_info.get("request_counts", {})
-                completed = counts.get("completed", 0)
-                total = counts.get("total", len(requests))
-
-                logger.info(
-                    f"Batch 轮询 | batch_id={batch_id} | status={status} | "
-                    f"completed={completed}/{total} | attempt={attempt + 1}"
+            # 检查文件大小
+            file_size_mb = jsonl_path.stat().st_size / (1024 * 1024)
+            if file_size_mb > self.MAX_FILE_SIZE_MB:
+                raise RuntimeError(
+                    f"JSONL 文件过大 | size={file_size_mb:.1f}MB | max={self.MAX_FILE_SIZE_MB}MB"
                 )
 
-                if status == "completed":
-                    break
-                elif status in ("failed", "expired", "cancelled"):
-                    raise RuntimeError(
-                        f"Batch 任务异常终止 | status={status} | batch_id={batch_id}"
-                    )
-
-                if time.time() - start_time > timeout:
-                    raise RuntimeError(
-                        f"Batch 任务轮询超时 | batch_id={batch_id} | timeout={timeout}s"
-                    )
-
-                time.sleep(poll_interval)
-            else:
-                raise RuntimeError(f"Batch 任务轮询次数耗尽 | batch_id={batch_id}")
-
-            # 5. 下载结果
-            output_file_id = status_info.get("output_file_id")
-            error_file_id = status_info.get("error_file_id")
-
-            results = []
-            if output_file_id:
-                output_text = self._download_file(output_file_id)
-                if output_path:
-                    output_path.parent.mkdir(parents=True, exist_ok=True)
-                    with open(output_path, "a", encoding="utf-8") as f:
-                        f.write(output_text)
-                    logger.info(f"Batch 结果已保存 | path={output_path}")
-                results = _parse_jsonl(output_text)
-                logger.info(f"Batch 结果下载完成 | results={len(results)}")
-
-            if error_file_id:
-                error_text = self._download_file(error_file_id)
-                errors = _parse_jsonl(error_text)
-                if errors:
-                    logger.warning(f"Batch 中存在错误请求 | errors={len(errors)}")
-
-            return results
-
-        finally:
-            # 清理临时文件
-            if jsonl_path.exists():
-                jsonl_path.unlink()
-                logger.debug(f"临时 JSONL 文件已删除 | path={jsonl_path}")
-            # 清理服务器文件（可选）
             try:
-                if file_id:
-                    self._delete_file(file_id)
-            except Exception as e:
-                logger.warning(f"删除 batch 输入文件失败 | file_id={file_id} | error={e}")
+                # 2. 上传文件
+                file_id = self._upload_jsonl(jsonl_path)
+                logger.info(f"Batch 文件已上传 | file_id={file_id}")
+
+                # 3. 创建 batch
+                batch_id = self._create_batch(file_id)
+                logger.info(f"Batch 任务已创建 | batch_id={batch_id}")
+
+                # 4. 轮询等待
+                start_time = time.time()
+                for attempt in range(self.MAX_POLL_RETRIES):
+                    status_info = self._get_batch_status(batch_id)
+                    status = status_info.get("status", "unknown")
+                    counts = status_info.get("request_counts", {})
+                    completed = counts.get("completed", 0)
+                    total = counts.get("total", len(requests))
+
+                    logger.info(
+                        f"Batch 轮询 | batch_id={batch_id} | status={status} | "
+                        f"completed={completed}/{total} | attempt={attempt + 1}"
+                    )
+
+                    if status == "completed":
+                        break
+                    elif status in ("failed", "expired", "cancelled"):
+                        raise RuntimeError(
+                            f"Batch 任务异常终止 | status={status} | batch_id={batch_id}"
+                        )
+
+                    if time.time() - start_time > timeout:
+                        raise RuntimeError(
+                            f"Batch 任务轮询超时 | batch_id={batch_id} | timeout={timeout}s"
+                        )
+
+                    time.sleep(poll_interval)
+                else:
+                    raise RuntimeError(f"Batch 任务轮询次数耗尽 | batch_id={batch_id}")
+
+                # 5. 下载结果
+                output_file_id = status_info.get("output_file_id")
+                error_file_id = status_info.get("error_file_id")
+
+                if output_file_id:
+                    output_text = self._download_file(output_file_id)
+                    if output_path:
+                        output_path.parent.mkdir(parents=True, exist_ok=True)
+                        with open(output_path, "a", encoding="utf-8") as f:
+                            f.write(output_text)
+                        logger.info(f"Batch 结果已保存 | path={output_path}")
+                    results = _parse_jsonl(output_text)
+                    logger.info(f"Batch 结果下载完成 | results={len(results)}")
+
+                if error_file_id:
+                    error_text = self._download_file(error_file_id)
+                    errors = _parse_jsonl(error_text)
+                    if errors:
+                        logger.warning(f"Batch 中存在错误请求 | errors={len(errors)}")
+
+            finally:
+                # 清理服务器文件（可选）
+                try:
+                    if file_id:
+                        self._delete_file(file_id)
+                except Exception as e:
+                    logger.warning(f"删除 batch 输入文件失败 | file_id={file_id} | error={e}")
+
+        return results
 
     def submit_parallel_batches(
         self,

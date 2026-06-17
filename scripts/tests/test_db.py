@@ -198,6 +198,7 @@ def test_feedback(db):
 
 # -- 从 test_models.py 合并的模型默认值测试 --
 
+
 def test_chapter_to_dict():
     """Chapter.to_dict() 应正确序列化."""
     ch = Chapter(title="Intro", start_page=1, end_page=5, level=1)

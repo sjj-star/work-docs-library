@@ -697,11 +697,10 @@ class BatchBuilder:
 
 
 class EntityExtractor:
-    """基于 LLM Batch API 的文档实体和关系提取器."""
+    """LLM 文档实体和关系提取器."""
 
-    def __init__(self, batch_client=None):
+    def __init__(self):
         """初始化 EntityExtractor."""
-        self.batch_client = batch_client
         self._system_prompt = self._load_prompt("entity_extraction_system")
         self._user_template = self._load_prompt("entity_extraction_user")
 
@@ -827,8 +826,9 @@ class EntityExtractor:
 
         return content, image_meta
 
-    def _build_batch_requests(self, batches, image_base_dir, doc_context=""):
-        requests = []
+    def _build_chat_requests(self, batches, image_base_dir, doc_context=""):
+        """构建 Chat-native request bodies（无 Batch envelope）."""
+        chat_requests: list[dict[str, Any]] = []
         # 将 user template 按 {{chapters}} 拆分为前缀/后缀，避免章节内容重复
         template = self._user_template
         if "{{chapters}}" in template:
@@ -866,85 +866,22 @@ class EntityExtractor:
             # Kimi K2.6 等模型 thinking 默认开启，必须显式传递以可控
             thinking_type = "enabled" if Config.LLM_THINKING_ENABLED else "disabled"
             body["extra_body"] = {"thinking": {"type": thinking_type}}
-            requests.append(
-                {
-                    "custom_id": f"batch_{i}",
-                    "method": "POST",
-                    "url": Config.LLM_BATCH_ENDPOINT,
-                    "body": body,
-                }
-            )
+            chat_requests.append({"custom_id": f"batch_{i}", "body": body})
             logger.info(f"Batch {i} 构建完成 | images={len(image_meta)}")
-        return requests
+        return chat_requests
 
-    def extract_from_batches(self, batches, image_base_dir=None, doc_id="", doc_context=""):
-        """从 batches 构建 requests 并提交 Batch API 提取实体."""
-        if not self.batch_client or not batches:
-            return [], [], []
-        image_base_dir = image_base_dir or Path()
-        requests = self._build_batch_requests(batches, image_base_dir, doc_context)
-        return self.extract_from_requests(requests, batches, doc_id)
-
-    def extract_from_requests(self, requests, batches, doc_id=""):
-        """从已构建的 requests 列表提交 Batch API 提取实体（不重新构建 requests）.
-
-        注意：此方法保留向后兼容，新代码推荐使用 extract_from_results_file.
-        """
-        if not self.batch_client or not requests:
-            return [], [], []
-
-        logger.info(f"提交 Batch 请求 | requests={len(requests)}")
-        try:
-            results = self.batch_client.submit_parallel_batches(requests)
-        except Exception as e:
-            logger.error(f"Batch 请求失败 | error={e}")
-            raise
-
-        return self._parse_results(results, batches, doc_id)
-
-    def _parse_results(self, results, batches, doc_id=""):
-        """从 Batch API 返回的 results 解析实体/关系/图片描述."""
-        all_entities, all_relations, all_image_descriptions = [], [], []
-        for i, result in enumerate(results):
-            body = result.get("response", {}).get("body", {})
-            choices = body.get("choices", [])
-            if not choices:
-                continue
-            content = choices[0].get("message", {}).get("content", "")
-            data = self._safe_parse_json(content)
-            if not data:
-                continue
-            batch = batches[i] if i < len(batches) else []
-            chapter_title = batch[0]["title"] if batch else ""
-            for e in data.get("entities", []):
-                if e.get("type") in ALL_NODE_TYPES and e.get("name"):
-                    all_entities.append(
-                        GraphEntity(
-                            entity_type=e["type"],
-                            name=e["name"],
-                            properties=e.get("properties", {}),
-                            source_doc_ids={doc_id},
-                            source_chapter=chapter_title,
-                        )
-                    )
-            for r in data.get("relationships", []):
-                if r.get("type") in ALL_REL_TYPES:
-                    all_relations.append(
-                        GraphRelation(
-                            rel_type=r["type"],
-                            from_name=r.get("from", ""),
-                            to_name=r.get("to", ""),
-                            from_type=r.get("from_type", ""),
-                            to_type=r.get("to_type", ""),
-                            properties=r.get("properties", {}),
-                            source_doc_ids={doc_id},
-                        )
-                    )
-            for img_desc in data.get("image_descriptions", []):
-                all_image_descriptions.append(img_desc)
-
-        logger.info(f"实体提取完成 | entities={len(all_entities)} | relations={len(all_relations)}")
-        return all_entities, all_relations, all_image_descriptions
+    def _build_batch_requests(self, batches, image_base_dir, doc_context=""):
+        """构建 LLM Batch API envelope requests（含 method/url/body）."""
+        chat_requests = self._build_chat_requests(batches, image_base_dir, doc_context)
+        return [
+            {
+                "custom_id": req["custom_id"],
+                "method": "POST",
+                "url": Config.LLM_BATCH_ENDPOINT,
+                "body": req["body"],
+            }
+            for req in chat_requests
+        ]
 
     def extract_from_results_file(
         self,
@@ -1084,9 +1021,6 @@ class DocGraphPipeline:
             except RuntimeError as e:
                 logger.error(f"LLM ChatClient 初始化失败: {e}")
 
-        # Embedding 已改为同步 API，不再使用 BatchClient
-        self.embed_batch = None
-
         # 解析器（仅 PDF，Office 文件暂时不支持）
         self.parsers = {
             ".pdf": PDFParser(),
@@ -1094,8 +1028,7 @@ class DocGraphPipeline:
 
         # 子组件
         self.chapter_parser = ChapterParser()
-        self.entity_extractor = EntityExtractor(self.llm_batch)
-        self.embedding_batch_client = None
+        self.entity_extractor = EntityExtractor()
 
     def scan(self, path: str) -> list[str]:
         """扫描文件."""
@@ -1425,9 +1358,7 @@ class DocGraphPipeline:
                 changed_titles = {ch["title"] for ch in changed + added}
                 changed_custom_ids: set[str] = set()
                 for info in batch_info:
-                    titles = set(info.get("chapter_titles", []))
-                    if not titles:
-                        titles = {info.get("section_title", "")}
+                    titles = {info.get("section_title", "")}
                     if titles & changed_titles:
                         changed_custom_ids.add(info.get("custom_id", ""))
                 requests = [
@@ -1507,11 +1438,18 @@ class DocGraphPipeline:
             if doc_context_parts:
                 doc_context = "以下章节来自 " + "，".join(doc_context_parts) + "。\n\n---\n"
 
-            requests = self.entity_extractor._build_batch_requests(
-                batches=batches,
-                image_base_dir=parsed_output_dir,
-                doc_context=doc_context,
-            )
+            if Config.LLM_MODE == "chat":
+                requests = self.entity_extractor._build_chat_requests(
+                    batches=batches,
+                    image_base_dir=parsed_output_dir,
+                    doc_context=doc_context,
+                )
+            else:
+                requests = self.entity_extractor._build_batch_requests(
+                    batches=batches,
+                    image_base_dir=parsed_output_dir,
+                    doc_context=doc_context,
+                )
 
         # 删除旧结果文件（如果存在）
         if results_path.exists():
@@ -1560,7 +1498,7 @@ class DocGraphPipeline:
         写入格式与 Batch API 返回格式完全一致：
         {"custom_id": "...", "response": {"status_code": 200, "body": {"choices": [...]}}}
 
-        保证 Stage 4 的 _parse_results 和 extract_from_results_file 可以零修改复用。
+        保证 Stage 4 的 extract_from_results_file 可以零修改复用。
         """
         assert self.llm_chat is not None, "ChatClient 未初始化"
         total = len(requests)
@@ -1732,10 +1670,7 @@ class DocGraphPipeline:
             if batch_info_path.exists():
                 batch_info = json.loads(batch_info_path.read_text(encoding="utf-8"))
                 for info in batch_info:
-                    titles = info.get("chapter_titles", [])
-                    if not titles:
-                        titles = [info.get("section_title", "")]
-                    chapter_map[info.get("custom_id", "")] = titles[0] if titles else ""
+                    chapter_map[info.get("custom_id", "")] = info.get("section_title", "")
 
             ents, rels, img_descs = self.entity_extractor.extract_from_results_file(
                 results_path=results_path,
@@ -1887,7 +1822,7 @@ class DocGraphPipeline:
         return doc_id
 
     def stage5_build_embed_jsonl(self, doc_id: str) -> Path:
-        """阶段5: 从 SQLite content_blocks 构建 Embedding Batch JSONL（本地，不调用 API）.
+        """阶段5: 从 SQLite content_blocks 构建 Embedding 同步队列 JSONL（本地，不调用 API）.
 
         Returns:
             embed_jsonl_path: `knowledge_base/batch/{doc_id}_embed.jsonl`
@@ -1897,41 +1832,30 @@ class DocGraphPipeline:
         embed_jsonl_path = batch_dir / f"{doc_id}_embed.jsonl"
 
         db_blocks = self.db.query_blocks_by_doc(doc_id)
-        reembed_pairs: list[tuple[str, int]] = []
+        reembed_pairs: list[tuple[int, str]] = []
 
         for block in db_blocks:
             if not block["content"].strip():
                 continue
             if block["metadata"].get("embedding"):
                 continue
-            reembed_pairs.append((block["content"], block["id"] + Config.BLOCK_FAISS_OFFSET))
+            reembed_pairs.append((block["id"], block["content"]))
 
         if not reembed_pairs:
             embed_jsonl_path.write_text("", encoding="utf-8")
             logger.info(f"所有 block 已有 embedding，生成空 JSONL | path={embed_jsonl_path}")
             return embed_jsonl_path
 
-        # 构建 requests，每个 request 包含单个文本，custom_id 直接编码 db_id
-        requests: list[dict[str, Any]] = []
-        for text, db_id in reembed_pairs:
-            requests.append(
-                {
-                    "custom_id": f"embed_dbid_{db_id}",
-                    "method": "POST",
-                    "url": Config.EMBEDDING_BATCH_ENDPOINT,
-                    "body": {
-                        "model": Config.EMBEDDING_MODEL,
-                        "input": text,
-                    },
-                }
-            )
+        # 同步队列：每行 {"db_id": <block_db_id>, "text": <content>}
+        records: list[dict[str, Any]] = [
+            {"db_id": db_id, "text": text} for db_id, text in reembed_pairs
+        ]
 
         from core.batch_clients import _build_jsonl
 
-        _build_jsonl(requests, embed_jsonl_path)
+        _build_jsonl(records, embed_jsonl_path)
         logger.info(
-            f"Embedding JSONL 已生成 | path={embed_jsonl_path} | "
-            f"blocks={len(reembed_pairs)} | requests={len(requests)}"
+            f"Embedding JSONL 已生成 | path={embed_jsonl_path} | blocks={len(reembed_pairs)}"
         )
         return embed_jsonl_path
 
@@ -1940,11 +1864,11 @@ class DocGraphPipeline:
         doc_id: str,
         embed_jsonl_path: Path | None = None,
     ) -> str:
-        """阶段6: 提交 Embedding Batch API 并解析结果入库.
+        """阶段6: 同步调用 Embedding API 并解析结果入库.
 
         Args:
             doc_id: 文档 ID
-            embed_jsonl_path: Embedding JSONL 路径，默认从 batch 目录读取
+            embed_jsonl_path: Embedding 同步队列 JSONL 路径，默认从 batch 目录读取
 
         Returns:
             doc_id
@@ -1982,24 +1906,18 @@ class DocGraphPipeline:
         else:
             from core.batch_clients import _parse_jsonl
 
-            requests = _parse_jsonl(embed_jsonl_path.read_text(encoding="utf-8"))
-            if requests:
-                logger.info(f"同步 Embedding | requests={len(requests)} | doc_id={doc_id}")
+            records = _parse_jsonl(embed_jsonl_path.read_text(encoding="utf-8"))
+            if records:
+                logger.info(f"同步 Embedding | records={len(records)} | doc_id={doc_id}")
                 embedder = EmbeddingClient()
                 try:
-                    for req in requests:
-                        custom_id = req.get("custom_id", "")
-                        # custom_id 格式: embed_dbid_{faiss_id}
-                        try:
-                            faiss_id = int(custom_id.split("_")[-1])
-                            block_db_id = faiss_id - Config.BLOCK_FAISS_OFFSET
-                        except (ValueError, IndexError):
-                            logger.warning(f"无法从 custom_id 解析 db_id | custom_id={custom_id}")
+                    for rec in records:
+                        block_db_id = rec.get("db_id")
+                        text = rec.get("text", "")
+                        if block_db_id is None or not text:
+                            logger.warning(f"Embedding JSONL 记录格式异常 | rec={rec}")
                             continue
-                        text = req.get("body", {}).get("input", "")
-                        if not text:
-                            logger.warning(f"JSONL request 中 input 为空 | custom_id={custom_id}")
-                            continue
+                        faiss_id = block_db_id + Config.BLOCK_FAISS_OFFSET
                         emb = embedder.embed_single(text)
                         sqlite_items.append((block_db_id, emb))
                         faiss_items.append((faiss_id, emb))
@@ -2033,36 +1951,6 @@ class DocGraphPipeline:
             self.db.update_block_status(block["id"], "done")
 
         return doc_id
-
-    def stage3_ingest(
-        self,
-        file_path: str,
-        doc_id: str,
-        parsed_output_dir: Path,
-        extracted_text: str,
-        bigmodel_images: list[Path],
-        jsonl_path: Path | None = None,
-        force: bool = False,
-    ) -> str:
-        """阶段3: JSONL → API → 实体提取 → 向量化 → 入库.
-
-        已废弃：内部委托给 stage3_submit_batches + stage4_ingest_results。
-        保留此方法以保证向后兼容。
-        """
-        results_path = self.stage3_submit_batches(
-            doc_id=doc_id,
-            file_path=file_path,
-            jsonl_path=jsonl_path,
-            force=force,
-        )
-        self.stage4_ingest_results(
-            doc_id=doc_id,
-            file_path=file_path,
-            results_path=results_path,
-            force=force,
-        )
-        embed_jsonl_path = self.stage5_build_embed_jsonl(doc_id)
-        return self.stage6_submit_embed_batches(doc_id, embed_jsonl_path)
 
     def _process_one(
         self,

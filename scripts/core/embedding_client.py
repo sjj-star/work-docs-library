@@ -40,8 +40,8 @@ class EmbeddingClient:
                 "Embedding API key not configured. Set WORKDOCS_EMBEDDING_API_KEY in .env"
             )
 
-        # 设置 API endpoint（由 base_url + EMBEDDING_BATCH_ENDPOINT 决定，不做服务商推断）
-        self.embed_url = f"{self.base_url}{Config.EMBEDDING_BATCH_ENDPOINT}"
+        # 设置 API endpoint（由 base_url + EMBEDDING_ENDPOINT 决定，不做服务商推断）
+        self.embed_url = f"{self.base_url}{Config.EMBEDDING_ENDPOINT}"
 
         self._session = requests.Session()
 

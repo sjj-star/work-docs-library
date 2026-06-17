@@ -28,7 +28,7 @@
 当 Batch API 不可用（如服务商未开通、排队过长）或需要快速调试时，可通过 `WORKDOCS_LLM_MODE=chat` 切换到同步 Chat API 模式：
 
 - **持久化格式一致**：Chat 模式逐条读取 Stage 2 生成的 `batch/{doc_id}.jsonl`，解析 `req["body"]` 后调用同步 Chat API，将结果以与 Batch API 完全一致的格式写入 `batch/{doc_id}_results.jsonl`（`{"custom_id": "...", "response": {"status_code": 200, "body": {...}}}`）
-- **Stage 4 零修改复用**：由于 `results.jsonl` 格式完全一致，`stage4_ingest_results` 和 `EntityExtractor._parse_results()` 无需任何修改即可解析 Chat 模式的输出
+- **Stage 4 零修改复用**：由于 `results.jsonl` 格式完全一致，`stage4_ingest_results` 和 `EntityExtractor.extract_from_results_file()` 无需任何修改即可解析 Chat 模式的输出
 - **单条失败不中断**：某条请求失败时记录 `status_code: 500`，继续处理后续请求，避免整批失败
 - **成本提醒**：Chat 模式价格为 Batch 的 2 倍，仅建议用于调试或 Batch API 不可用的回退场景
 
@@ -669,8 +669,6 @@ graph_query(entity_type="Product", name="TMS320F28379D")
 - **失败可重试**：stage4 入库失败（如数据库锁定）时，无需重新调用 Batch API（避免重复付费和排队），直接重试 stage4 即可；同理 stage6 向量化失败仅需重试 stage6
 - **结果可编辑**：用户可手动修改 `batch/{doc_id}.jsonl` 后重新执行 stage3（增量过滤仍会生效），或修改 `results.jsonl` 后重新执行 stage4，修正 LLM 提取错误而无需重新调 API
 - **向量化解耦**：stage4 完成后 content_blocks 状态为 `embedded`，知识图谱已可查询；stage5/stage6 独立执行向量化，不阻塞图谱使用
-- **向后兼容**：`stage3_ingest()` 保留原签名，内部委托给 `stage3_submit_batches` + `stage4_ingest_results` + `stage5_build_embed_jsonl` + `stage6_submit_embed_batches`，现有调用方无需修改
-
 **中间产物清单**：
 
 | 阶段 | 产物 | 路径 | 说明 |

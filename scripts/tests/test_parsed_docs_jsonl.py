@@ -67,7 +67,7 @@ class TestParsedDocsToJsonl:
                 )
 
         # 4. EntityExtractor 构建 requests
-        extractor = EntityExtractor(batch_client=None)
+        extractor = EntityExtractor()
         doc_context = _build_doc_context(tree)
         requests = extractor._build_batch_requests(
             batches, image_base_dir=image_dir, doc_context=doc_context

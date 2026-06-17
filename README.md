@@ -466,6 +466,7 @@ print(f'entities={len(g.get(\"nodes\", []))}, relations={len(g.get(\"edges\", []
 | `WORKDOCS_EMBEDDING_BASE_URL` | `https://open.bigmodel.cn/api/paas/v4` | BigModel Base URL |
 | `WORKDOCS_EMBEDDING_MODEL` | `embedding-3` | 向量化模型 |
 | `WORKDOCS_EMBEDDING_DIMENSION` | `1024` | 向量维度 |
+| `WORKDOCS_EMBEDDING_ENDPOINT` | `/v4/embeddings` | Embedding API endpoint（相对路径） |
 | `WORKDOCS_EMBED_MAX_RETRIES` | `3` | Embedding 同步请求最大重试次数 |
 | `WORKDOCS_EMBED_RETRY_BACKOFF` | `2` | Embedding 重试退避系数（秒） |
 | `WORKDOCS_EMBED_TIMEOUT` | `120` | Embedding 同步请求超时（秒） |
@@ -494,7 +495,6 @@ print(f'entities={len(g.get(\"nodes\", []))}, relations={len(g.get(\"edges\", []
 | `WORKDOCS_BATCH_MAX_POLL_RETRIES` | `360` | Batch 状态轮询最大次数 |
 | `WORKDOCS_BATCH_MAX_FILE_SIZE_MB` | `100` | 单个 JSONL 文件大小上限（MB） |
 | `WORKDOCS_BATCH_PARALLEL_WORKERS` | `4` | 并行 batch 提交线程数 |
-| `WORKDOCS_BATCH_TEMP_DIR` | `batch_temp` | Batch 临时文件目录 |
 | `WORKDOCS_BATCH_FILE_DOWNLOAD_TEMPLATE` | `{base_url}/files/{file_id}/content` | Batch 结果下载 URL 模板 |
 | `WORKDOCS_PARSE_OUTPUT_DIR` | `parsed` | PDF 解析输出目录 |
 | `WORKDOCS_BATCH_OUTPUT_DIR` | `batch` | Batch 产物输出目录 |
@@ -744,11 +744,10 @@ PYTHONPATH=scripts ./.venv/bin/python -m pytest \
 | | `test_office_parser.py` | 3 | 🟡 中 | DOCX/XLSX 解析（尚未接入 pipeline） |
 | | `test_borderless_table_extractor.py` | 3 | 🟡 中 | AMBA 风格无边框表格提取 |
 | | `test_table_utils.py` | 4 | 🟡 中 | Markdown 表格规范化 |
-| **诊断/实验脚本** | `scripts/benchmark/*` | — | ⚪ 诊断 | 性能基准与诊断脚本（非 pytest 常规用例） |
 
 #### 当前状态
 
-核心测试集已稳定在 **408 个用例**（含 2 个正常 skipped）。诊断脚本已统一移入 `scripts/benchmark/`，不参与常规 CI。
+核心测试集已稳定在 **408 个用例**（含 2 个正常 skipped）。
 
 ### 常用测试文档
 
