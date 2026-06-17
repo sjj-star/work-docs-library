@@ -77,15 +77,15 @@ flowchart TB
 
     subgraph Stage5["阶段5: 构建 Embedding JSONL"]
         S5A["SQLite content_blocks\n(status=embedded)"] --> S5B["查询无 embedding 的 blocks"]
-        S5B --> S5D["每个 block 生成单文本 request\ncustom_id 编码 db_id + offset"]
+        S5B --> S5D["每个 block 生成单文本记录\n{db_id, text}"]
         S5D --> S5E["{doc_id}_embed.jsonl"]
     end
 
     subgraph Stage6["阶段6: 同步 Embedding 向量化"]
         S6A["{doc_id}_embed.jsonl"] --> S6B["同步 Embedding API\n(BigModel embedding-3)"]
         S6B --> S6E["解析 embeddings"]
-        S6E --> S6F["update_blocks_embedded_batch()\nSQLite metadata.embedding"]
-        S6F --> S6G["FAISS IndexFlatIP\nadd_batch() (db_id + offset)"]
+        S6E --> S6F["FAISS 事务\nadd_with_ids(block_db_id)"]
+        S6F --> S6G["update_blocks_embedded_batch()\nSQLite metadata.embedding"]
         S6G --> S6H["content_block status: done"]
     end
 
@@ -112,8 +112,8 @@ flowchart TB
 2. **阶段2（构建 LLM Batch）**：`ChapterParser.parse_tree()` 将 Markdown 解析为树形章节结构（`#` 文档标题，`##` 章节，`###+` 子章节）。`_collect_section_content()` 按 `##` section 递归聚合自身 content + 所有子孙 content（保留 Markdown 层级）。`_build_content_blocks_and_maps()` 使用 `_split_for_embedding()` 按 `BLOCK_MAX_CHARS`（默认 6000）将聚合内容切分为**向量化粒度**的 content_blocks（段落→句子→字符硬切分兜底，保护代码块/表格）。同时构建 `heading_maps`（`##`/`###`/`####` 都映射到同一 section 的 block 集合）。`BatchBuilder.build_batches()` **按 `section_title` 聚合**多个 content_blocks 为 LLM batch request，保持 LLM 大粒度提取；聚合后若超过 `LLM_BATCH_MAX_CHARS` 再按段落边界切分。`EntityExtractor` 流式解析图片引用，按原文顺序构建 multimodal content，生成 `{doc_id}.jsonl` + `{doc_id}_batch_info.json`
 3. **阶段3（提交 LLM Batch）**：**优先读取** `batch/{doc_id}.jsonl`（支持用户编辑后重新提交），结合 `batch/{doc_id}_batch_info.json` 做增量过滤，仅对变更/新增章节的 requests 提交 Batch API。超大 JSONL 自动按 100MB 拆分并行提交。结果保存为 `{doc_id}_results.jsonl`，增量摘要保存为 `{doc_id}_incremental.json` 供阶段4校验一致性
 4. **阶段4（解析入库，不含向量化）**：从 `results.jsonl` 解析 `entities`/`relationships`/`image_descriptions`，复用未变 section 的缓存实体/关系。`GraphStore`（NetworkX）构建图谱，**同名同类型实体自动去重合并**，每个文档保存独立子图 `graphs/{doc_id}.json`。同时保存每个文档的原始属性快照到 `doc_properties[doc_id]`，支持按文档精确查询。提取产品型号建立 `Product --[HAS_MODULE]--> Module` 关系。content_blocks 和 heading_maps 写入 SQLite，content_block 状态设为 `embedded`；每个 block 的 `metadata.extracted_entities` 缓存该 block 中提及的实体引用，作为后续跨粒度桥接索引的唯一数据源
-5. **阶段5（构建 Embedding JSONL）**：从 SQLite 查询状态为 `embedded` 且暂无 `metadata.embedding` 的 content_blocks，每个 block 生成一个单文本 request（`custom_id` 编码 `db_id + _BLOCK_FAISS_OFFSET`），生成 `{doc_id}_embed.jsonl`
-6. **阶段6（同步 Embedding 向量化）**：读取 `{doc_id}_embed.jsonl`，逐条调用同步 Embedding API（默认 BigModel `embedding-3`），解析 `custom_id` 还原 block `db_id`（减去 `_BLOCK_FAISS_OFFSET`），结果写入 SQLite `metadata.embedding` + FAISS `IndexFlatIP`（block db_id 加偏移存入），content_block 状态更新为 `done`
+5. **阶段5（构建 Embedding JSONL）**：从 SQLite 查询状态为 `embedded` 且暂无 `metadata.embedding` 的 content_blocks，每个 block 生成一条 `{db_id, text}` 记录，生成 `{doc_id}_embed.jsonl`
+6. **阶段6（同步 Embedding 向量化）**：读取 `{doc_id}_embed.jsonl`，逐条调用同步 Embedding API（默认 BigModel `embedding-3`），在 FAISS 事务内用 `block_db_id` 作为存储 ID 写入 `IndexIDMap2`，事务提交后再写入 SQLite `metadata.embedding`，content_block 状态更新为 `done`。FAISS 与 SQLite 通过事务保证双写一致性
 7. **跨粒度桥接索引**：`KnowledgeBaseService` 内部维护 `_EntityChunkBridge`，在 `__init__` 时从所有 content_blocks 的 `metadata.extracted_entities` 全量构建 `block_db_id ↔ (entity_type, entity_name)` 双向映射。`ingest_document` / `reprocess_document` 完成后自动同步。提供 O(1) 的正向查询（block→entities）和反向查询（entity→blocks），打通向量空间与图谱空间
 8. **全局图谱重建**：`KnowledgeBaseService.ingest_document()` 完成后**全量重建**全局图 `graphs/global.json`（`clear()` + 遍历所有子图重新加载），确保无幽灵残留，实现**跨文档知识互通**
 
@@ -163,11 +163,10 @@ work-docs-library/
 │   │   ├── pdf_parser.py         # PDF 本地解析器（fallback，输出与 BigModel 一致）
 │   │   ├── office_parser.py      # DOCX / XLSX 解析器（代码存在，尚未接入 pipeline）
 │   │   └── image_utils.py        # 图片压缩工具
-│   └── tests/                    # pytest 测试集（408 个用例）
+│   └── tests/                    # pytest 测试集（418 个用例）
 ├── knowledge_base/               # 运行时自动生成
 │   ├── workdocs.db               # SQLite 元数据
-│   ├── faiss.index               # FAISS 向量索引
-│   ├── id_map.json               # FAISS ID 映射
+│   ├── faiss.index               # FAISS 向量索引（IndexIDMap2，直接存储 block_db_id）
 │   ├── parsed/<doc_id>/          # Stage1 解析输出（result.md + images/）
 │   ├── batch/                    # Stage2/3/5/6 中间产物（*.jsonl, *_info.json）
 │   └── graphs/                   # Stage4 子图快照（{doc_id}.json, global.json）
@@ -322,11 +321,11 @@ python scripts/admin_tools.py stage5_build_embed_jsonl --params '{"doc_id":"{doc
 
 - **输入**: SQLite content_blocks（状态 `embedded` 且暂无 `metadata.embedding`）
 - **输出**: `batch/{doc_id}_embed.jsonl`
-- **分组逻辑**: 每个需要向量化的 block 生成一个独立 request，`custom_id` 编码 `db_id + _BLOCK_FAISS_OFFSET`（格式 `embed_block_{db_id + offset}`），`body.input` 为单字符串
-- **产物格式**: `embed.jsonl` 每行 body.input 是单个字符串（block content）
+- **分组逻辑**: 每个需要向量化的 block 生成一条 `{db_id, text}` 记录
+- **产物格式**: `embed.jsonl` 每行是 `{"db_id": <int>, "text": <str>}`
 - **干预**: 编辑 `embed.jsonl`（删除不想向量化的 blocks）
 - **⚠️ 关键限制**:
-  - 删除行：可直接删除，不影响其他行（每个 request 独立）
+  - 删除行：可直接删除，不影响其他行（每个 block 独立）
   - 新增行：不建议新增（新 block 需先有 db_id）
 - **触发下一阶段**: `python scripts/admin_tools.py stage6_submit_embed_batches --params '{"doc_id":"{doc_id}"}'`
 
@@ -339,7 +338,7 @@ python scripts/admin_tools.py stage6_submit_embed_batches --params '{"doc_id":"{
 
 - **输入**: `batch/{doc_id}_embed.jsonl`
 - **输出**: SQLite `metadata.embedding` + FAISS 向量索引
-- **处理逻辑**: 读取 JSONL 逐条调用同步 Embedding API（`EmbeddingClient.embed_single()`），从 `custom_id` 解析 `db_id`（减去 `_BLOCK_FAISS_OFFSET`），结果直接入库
+- **处理逻辑**: 读取 JSONL 逐条调用同步 Embedding API（`EmbeddingClient.embed_single()`），在 FAISS 事务内用 `block_db_id` 作为存储 ID 写入 `IndexIDMap2`；事务提交后再批量写入 SQLite `metadata.embedding`。SQLite 失败时自动回滚 FAISS
 - **干预**: 无（此阶段纯 API 调用与结果入库）
 - **content_block 状态**: `embedded` → `done`
 
@@ -451,7 +450,7 @@ print(f'entities={len(g.get(\"nodes\", []))}, relations={len(g.get(\"edges\", []
 | `WORKDOCS_LLM_BATCH_COMPLETION_WINDOW` | `24h` | Batch 完成窗口（如 `24h`） |
 | `WORKDOCS_LLM_BATCH_MAX_CHARS` | `10000` | 每个 LLM batch 最大文本字符数（LLM 聚合粒度） |
 | `WORKDOCS_BLOCK_MAX_CHARS` | `6000` | content_blocks 存储切分粒度（向量化粒度），基于 BigModel embedding-3 经验值 |
-| `WORKDOCS_BLOCK_FAISS_OFFSET` | `10000000` | FAISS ID 偏移，避免 block db_id 与旧 chunks ID 冲突 |
+| `WORKDOCS_BLOCK_FAISS_OFFSET` | `0` | 旧格式迁移时减去的历史偏移；新格式不再使用 |
 | `WORKDOCS_LLM_BATCH_TIMEOUT` | `3600` | LLM Batch API 轮询超时（秒） |
 | `WORKDOCS_LLM_MAX_RETRIES` | `3` | LLM 同步请求最大重试次数 |
 | `WORKDOCS_LLM_RETRY_BACKOFF` | `2` | LLM 重试退避系数（秒） |
@@ -595,7 +594,7 @@ export WORKDOCS_LLM_TIMEOUT=300
 #### `content_blocks` — 内容块（方案C：存储粒度）
 | 字段 | 说明 |
 |------|------|
-| `id` (PK, AUTOINCREMENT) | SQLite 自增 ID，FAISS 索引用它（加 `_BLOCK_FAISS_OFFSET` 偏移） |
+| `id` (PK, AUTOINCREMENT) | SQLite 自增 ID，FAISS `IndexIDMap2` 直接用它作为存储 ID |
 | `doc_id` (FK) | 所属文档 |
 | `block_id` | 逻辑 ID（如 `b_0`） |
 | `content` | 文本内容（按 `##` section 聚合后切分） |
@@ -622,7 +621,7 @@ export WORKDOCS_LLM_TIMEOUT=300
 | 存储 | 职责 | 持久化 | 原子性 |
 |------|------|--------|--------|
 | **SQLite** | 文档元数据、content_blocks、heading_maps | `workdocs.db` | 单连接事务（自动 commit） |
-| **FAISS** | 向量索引（语义搜索） | `faiss.index` + `id_map.json` | 文件级原子写入（临时文件 + rename）+ `fcntl` 进程锁 |
+| **FAISS** | 向量索引（语义搜索） | `faiss.index`（IndexIDMap2） | 事务内文件级原子写入（临时文件 + rename）+ `fcntl` 进程锁 |
 | **NetworkX** | 全局知识图谱（实体+关系） | `{doc_id}.json`（子图）+ `global.json`（全局图） | 内存操作 + 文件原子写入 |
 | **Bridge** | block ↔ 实体 双向索引 | 纯内存（重启从 SQLite 重建） | 内存级 |
 
@@ -651,8 +650,9 @@ pending ────────────────────────
                                 stage5: 构建 embed.jsonl       │
                                 stage6: 同步 Embedding API     │
                                                                │
-                    update_blocks_embedded_batch()             │
-                    vec.add_batch() (db_id + offset)           │
+                    vec.transaction()                          │
+                    ├─ vec.add_with_ids(block_db_id)           │
+                    └─ update_blocks_embedded_batch()          │
                                                                ↓
                                                             done
 ```
@@ -663,8 +663,8 @@ pending ────────────────────────
 
 | 方向 | 关联机制 | 一致性保证 |
 |------|---------|-----------|
-| SQLite block → FAISS | `block.id`（db_id）+ `_BLOCK_FAISS_OFFSET` → `_id_map[faiss_id]` | FAISS 已加 `fcntl` 进程锁，修改前 `_reload()` 磁盘最新状态；SQLite + FAISS 仍非分布式事务，但单进程内已防并发覆盖 |
-| FAISS → SQLite | `_id_map[faiss_id]` → `db.get_block_by_db_id(db_id)` | 搜索时回查 SQLite 获取最新内容 |
+| SQLite block → FAISS | `block.id`（db_id）→ `IndexIDMap2` 存储 ID | FAISS 事务持有 `fcntl` 进程锁跨越 add 与 SQLite commit；SQLite 失败时 `remove_ids` 回滚 FAISS |
+| FAISS → SQLite | `IndexIDMap2.search()` 直接返回 `block_db_id` → `db.get_block_by_db_id(db_id)` | 搜索时回查 SQLite 获取最新内容 |
 | SQLite block → Graph | `block.metadata["extracted_entities"]` | 实体提取时写入 block metadata，作为 Bridge 索引的数据源 |
 | Graph → SQLite block | `_EntityChunkBridge._reverse[EntityRef]` | ingest/reprocess 完成后 `_sync_bridge_for_doc()` 增量同步 |
 | Graph 子图 → 全局图 | `ingest_document()` 增量合并；`reprocess_document()` 先移除旧贡献再合并 | `_save_global_graph()` 原子持久化到 `global.json`。崩溃后可从子图 `rebuild_global_graph()` 重建。 |
@@ -673,12 +673,12 @@ pending ────────────────────────
 
 #### SQLite ↔ FAISS 一致性（stage6）
 
-`stage6_submit_embed_batches` 中执行两步操作：
+`stage6_submit_embed_batches` 在 `VectorIndex` 事务内执行两步操作：
 
-1. `self.db.update_blocks_embedded_batch(all_items)` — 将 embedding 写入 SQLite `metadata`
-2. `self.vec.add_batch(all_items)` — 将向量写入 FAISS 索引
+1. `self.vec.add_batch(all_items)` — 将向量写入 FAISS `IndexIDMap2`，存储 ID 直接使用 `block_db_id`
+2. `self.db.update_blocks_embedded_batch(all_items)` — 将 embedding 写入 SQLite `metadata`
 
-**已修复**：第二步被包裹在 `try/except` 中。若 FAISS 写入失败（如磁盘满），自动回滚第一步——清除 SQLite 中这些 blocks 的 `metadata.embedding`，恢复 `status` 为 `embedded`。下次 stage6 会重新向量化这些 blocks。
+**已修复**：事务持有 `fcntl.flock` 进程锁跨越上述两步。若 SQLite 写入失败，自动调用 `remove_ids` 回滚 FAISS 中本次新增的向量；若 FAISS 写入失败，由于 SQLite 尚未提交，不会留下不一致记录。下次 stage6 会重新向量化这些 blocks。
 
 此外，FAISS `add_batch()` / `remove_doc()` 均通过 `fcntl.flock` 加进程级排他锁，修改前调用 `_reload()` 加载磁盘最新状态，防止多进程并发覆盖。
 
@@ -687,7 +687,7 @@ pending ────────────────────────
 | 场景 | 行为 | 恢复方法 |
 |------|------|----------|
 | 进程崩溃在 stage4 与 stage6 之间 | content_blocks 状态为 `embedded`，FAISS 中无对应向量 | `python scripts/admin_tools.py stage6_submit_embed_batches --params '{"doc_id":"{doc_id}"}'` |
-| FAISS 索引文件损坏 | 加载时抛出 `RuntimeError` | 删除 `faiss.index` + `id_map.json`，重新处理所有文档 |
+| FAISS 索引文件损坏 | 加载时抛出 `RuntimeError` | 删除 `faiss.index`（旧 `id_map.json` 已不再使用），重新处理所有文档 |
 | 全局图异常（节点<10 但文档>0） | 启动时检测到全局图不完整 | 自动触发 `rebuild_global_graph()` 重建；手动执行 `python scripts/admin_tools.py rebuild_global_graph` 亦可 |
 | 子图 `{doc_id}.json` 缺失但 SQLite 存在 | 全局图缺少该文档实体 | `python scripts/admin_tools.py reprocess --params '{"doc_id":"{doc_id}"}'` |
 
@@ -702,7 +702,7 @@ cd /path/to/work-docs-library
 PYTHONPATH=scripts ./.venv/bin/python -m pytest scripts/tests/ -v
 ```
 
-**当前状态：413 passed, 0 skipped, 0 failed。**
+**当前状态：418 passed, 0 skipped, 0 failed。**
 
 ### 测试分类与审计
 
@@ -727,14 +727,14 @@ PYTHONPATH=scripts ./.venv/bin/python -m pytest \
 | 分类 | 文件 | 用例数 | 价值 | 说明 |
 |------|------|--------|------|------|
 | **核心基础设施** | `test_graph_store.py` | 77 | 🔴 高 | 图谱存储 CRUD、路径搜索、属性索引、持久化 |
-| | `test_vector_index.py` | 11 | 🔴 高 | FAISS 向量索引增删查、持久化、迁移、快照回滚 |
+| | `test_vector_index.py` | 16 | 🔴 高 | FAISS IndexIDMap2 增删查、事务、迁移 |
 | | `test_db.py` | 15 | 🔴 高 | SQLite CRUD、事务、冲突日志、反馈 |
 | | `test_knowledge_base_service.py` | 21 | 🔴 高 | 统一服务层、实体-Chunk 桥接 |
 | | `test_knowledge_base_service_queries.py` | 3 | 🔴 高 | 语义-图谱联合查询（核心卖点） |
 | **Pipeline 集成** | `test_pdf_parser.py` | 71 | 🔴 高 | PDF 解析、图片提取、表格检测、14 个真实页面 fixture |
 | | `test_pipeline_stages.py` | 31 | 🔴 高 | 六阶段 pipeline 拆分、增量更新、fallback |
 | | `test_plugin_router.py` | 46 | 🔴 高 | Plugin 工具路由、参数校验、路径沙箱 |
-| **回归测试** | `test_audit_issues.py` | 10 | 🔴 高 | 生产 bug/审计问题的定向回归（FAISS 重复、深拷贝污染、路径沙箱、FAISS/SQLite 原子性等） |
+| **回归测试** | `test_audit_issues.py` | 10 | 🔴 高 | 生产 bug/审计问题的定向回归（FAISS 重复、深拷贝污染、路径沙箱、FAISS/SQLite 事务一致性等） |
 | **模块单元测试** | `test_batch_builder.py` | 14 | 🟡 中 | Batch 文本切分保护（代码块/表格/段落边界） |
 | | `test_batch_clients.py` | 19 | 🟡 中 | Batch API 客户端 JSONL/提交/轮询/超时 |
 | | `test_chapter_parser.py` | 20 | 🟡 中 | 章节树解析、标题层级、代码块保护 |
@@ -750,7 +750,7 @@ PYTHONPATH=scripts ./.venv/bin/python -m pytest \
 
 #### 当前状态
 
-核心测试集已稳定在 **413 个用例**（0 skipped）。
+核心测试集已稳定在 **418 个用例**（0 skipped）。
 
 ### 常用测试文档
 

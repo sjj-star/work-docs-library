@@ -1,7 +1,11 @@
 """test_vector_index 模块."""
 
+import json
+
+import faiss
 import numpy as np
 import pytest
+from core.config import Config
 from core.vector_index import VectorIndex
 
 
@@ -17,10 +21,16 @@ def make_index(tmp_path):
     return _make
 
 
+def _norm_vec(vec):
+    arr = np.array([vec], dtype=np.float32)
+    faiss.normalize_L2(arr)
+    return arr[0].tolist()
+
+
 def test_add_and_search(make_index):
-    """Test add and search."""
+    """Test add and search with block_db_id as stored id."""
     vi = make_index(dim=4)
-    vec = [1.0, 0.0, 0.0, 0.0]
+    vec = _norm_vec([1.0, 0.0, 0.0, 0.0])
     vi.add(100, vec)
     results = vi.search(vec, top_k=1)
     assert len(results) == 1
@@ -34,73 +44,203 @@ def test_search_empty_index(make_index):
     assert vi.search([1, 0, 0, 0], top_k=5) == []
 
 
-def test_remove_doc(make_index):
-    """Test remove doc."""
+def test_add_batch_and_search(make_index):
+    """批量添加后搜索应返回正确 block_db_id."""
     vi = make_index(dim=4)
-    vi.add(1, [1, 0, 0, 0])
-    vi.add(2, [0, 1, 0, 0])
+    vi.add_batch(
+        [
+            (10, _norm_vec([1, 0, 0, 0])),
+            (20, _norm_vec([0, 1, 0, 0])),
+            (30, _norm_vec([0, 0, 1, 0])),
+        ]
+    )
+    results = vi.search(_norm_vec([0, 1, 0, 0]), top_k=1)
+    assert results[0][0] == 20
+
+
+def test_remove_doc(make_index):
+    """Test remove doc by block_db_id."""
+    vi = make_index(dim=4)
+    vi.add(1, _norm_vec([1, 0, 0, 0]))
+    vi.add(2, _norm_vec([0, 1, 0, 0]))
     vi.remove_doc([1])
-    results = vi.search([1, 0, 0, 0], top_k=2)
+    results = vi.search(_norm_vec([1, 0, 0, 0]), top_k=2)
     ids = [r[0] for r in results]
     assert 1 not in ids
     assert 2 in ids
 
 
+def test_remove_doc_nonexistent(make_index):
+    """删除不存在的 ID 不报错."""
+    vi = make_index(dim=4)
+    vi.add(1, _norm_vec([1, 0, 0, 0]))
+    vi.remove_doc([999])
+    results = vi.search(_norm_vec([1, 0, 0, 0]), top_k=1)
+    assert results[0][0] == 1
+
+
 def test_dimension_mismatch_error(make_index):
     """维度不匹配时应抛出错误，不允许自动重建."""
     vi = make_index(dim=4)
-    vi.add(1, [1, 0, 0, 0])
-    # 添加不同维度的向量应抛出 RuntimeError
+    vi.add(1, _norm_vec([1, 0, 0, 0]))
     with pytest.raises(RuntimeError, match="Cannot add vector with 6 dimensions"):
         vi.add(2, [1, 0, 0, 0, 0, 0])
 
 
 def test_persistence(make_index, tmp_path):
-    """Test persistence."""
+    """Test persistence of IndexIDMap2."""
     vi = make_index(dim=4)
-    vi.add(42, [0, 0, 0, 1])
+    vi.add(42, _norm_vec([0, 0, 0, 1]))
     # Create new instance pointing to same files
     vi2 = VectorIndex(dim=4, index_path=vi.index_path, id_map_path=vi.id_map_path)
-    results = vi2.search([0, 0, 0, 1], top_k=1)
+    results = vi2.search(_norm_vec([0, 0, 0, 1]), top_k=1)
     assert len(results) == 1
     assert results[0][0] == 42
 
 
-def test_load_migrates_old_dict_id_map(make_index, tmp_path):
-    """Old id_map format was a dict {chunk_db_id: faiss_id}; ensure it migrates to list."""
-    import json
-
-    import faiss
-
+def test_transaction_commit(make_index):
+    """事务提交后数据应持久化."""
     vi = make_index(dim=4)
-    # Build a small faiss index manually
-    index = faiss.IndexFlatIP(4)
-    vec = np.array([[1, 0, 0, 0], [0, 1, 0, 0]], dtype=np.float32)
-    faiss.normalize_L2(vec)
-    index.add(vec)  # type: ignore[arg-type]
-    faiss.write_index(index, str(vi.index_path))
-    # Write old-style dict id_map: {db_id -> faiss_internal_id}
-    old_map = {100: 0, 200: 1}
-    vi.id_map_path.write_text(json.dumps(old_map), encoding="utf-8")
-    # Reload
+    with vi.transaction():
+        vi.add_batch(
+            [
+                (10, _norm_vec([1, 0, 0, 0])),
+                (20, _norm_vec([0, 1, 0, 0])),
+            ]
+        )
+
+    results = vi.search(_norm_vec([1, 0, 0, 0]), top_k=1)
+    assert results[0][0] == 10
+
+    # 重启后仍应存在
     vi2 = VectorIndex(dim=4, index_path=vi.index_path, id_map_path=vi.id_map_path)
-    assert isinstance(vi2._id_map, list)
-    assert vi2._id_map[0] == 100
-    assert vi2._id_map[1] == 200
-    # Search should return correct db ids
-    results = vi2.search([1, 0, 0, 0], top_k=2)
-    ids = [r[0] for r in results]
-    assert 100 in ids
-    assert 200 in ids
+    results = vi2.search(_norm_vec([0, 1, 0, 0]), top_k=1)
+    assert results[0][0] == 20
+
+
+def test_transaction_rollback(make_index):
+    """事务回滚后数据应恢复到事务前状态."""
+    vi = make_index(dim=4)
+    vi.add(10, _norm_vec([1, 0, 0, 0]))
+
+    with pytest.raises(RuntimeError, match="强制回滚"):
+        with vi.transaction():
+            vi.add_batch(
+                [
+                    (20, _norm_vec([0, 1, 0, 0])),
+                    (30, _norm_vec([0, 0, 1, 0])),
+                ]
+            )
+            raise RuntimeError("强制回滚")
+
+    assert vi._db_ids == {10}
+    results = vi.search(_norm_vec([0, 1, 0, 0]), top_k=5)
+    ids = {r[0] for r in results}
+    assert 20 not in ids
+    assert 30 not in ids
+
+    # 持久化后也一致
+    vi2 = VectorIndex(dim=4, index_path=vi.index_path, id_map_path=vi.id_map_path)
+    assert vi2._db_ids == {10}
+
+
+def test_transaction_rollback_partial_duplicates(make_index):
+    """事务中部分 ID 已存在，回滚只删除实际新增的向量."""
+    vi = make_index(dim=4)
+    vi.add(10, _norm_vec([1, 0, 0, 0]))
+
+    with pytest.raises(RuntimeError):
+        with vi.transaction():
+            vi.add_batch(
+                [
+                    (10, _norm_vec([1, 0, 0, 0])),  # 重复
+                    (20, _norm_vec([0, 1, 0, 0])),
+                    (30, _norm_vec([0, 0, 1, 0])),
+                ]
+            )
+            raise RuntimeError("回滚")
+
+    assert vi._db_ids == {10}
+    results = vi.search(_norm_vec([1, 0, 0, 0]), top_k=1)
+    assert results[0][0] == 10
+
+
+def test_transaction_add_batch_exception(make_index):
+    """add_batch 异常后 rollback 不应破坏已有索引."""
+    vi = make_index(dim=4)
+    vi.add(10, _norm_vec([1, 0, 0, 0]))
+
+    def bad_normalize(*args, **kwargs):
+        raise RuntimeError("normalize 失败")
+
+    with pytest.raises(RuntimeError, match="normalize 失败"):
+        with vi.transaction():
+            import faiss as _faiss
+
+            original = _faiss.normalize_L2
+            _faiss.normalize_L2 = bad_normalize
+            try:
+                vi.add_batch([(20, _norm_vec([0, 1, 0, 0]))])
+            finally:
+                _faiss.normalize_L2 = original
+
+    assert vi._db_ids == {10}
+
+
+def test_migrate_old_flat_index_with_list_id_map(make_index, tmp_path, monkeypatch):
+    """旧格式 IndexFlatIP + list id_map.json 应迁移为 IndexIDMap2."""
+    index_path = tmp_path / "index.faiss"
+    id_map_path = tmp_path / "id_map.json"
+
+    # 构建旧格式索引
+    flat = faiss.IndexFlatIP(4)
+    vecs = np.array([[1, 0, 0, 0], [0, 1, 0, 0]], dtype=np.float32)
+    faiss.normalize_L2(vecs)
+    flat.add(vecs)
+    faiss.write_index(flat, str(index_path))
+    # list 格式：内部 id -> stored_id，这里 stored_id 带 1000 万偏移
+    monkeypatch.setattr(Config, "BLOCK_FAISS_OFFSET", 10000000)
+    id_map_path.write_text(json.dumps([10000010, 10000020]), encoding="utf-8")
+
+    vi = VectorIndex(dim=4, index_path=index_path, id_map_path=id_map_path)
+    assert hasattr(vi._index, "id_map")
+    assert vi._db_ids == {10, 20}
+
+    # 搜索应直接返回 block_db_id（已减去偏移）
+    results = vi.search(_norm_vec([1, 0, 0, 0]), top_k=1)
+    assert results[0][0] == 10
+
+    # 旧 id_map 应被备份
+    assert not id_map_path.exists()
+    assert (tmp_path / "id_map.json.bak").exists()
+
+
+def test_migrate_old_flat_index_with_dict_id_map(make_index, tmp_path, monkeypatch):
+    """旧格式 IndexFlatIP + dict id_map.json 应迁移为 IndexIDMap2."""
+    index_path = tmp_path / "index.faiss"
+    id_map_path = tmp_path / "id_map.json"
+
+    flat = faiss.IndexFlatIP(4)
+    vecs = np.array([[1, 0, 0, 0], [0, 1, 0, 0]], dtype=np.float32)
+    faiss.normalize_L2(vecs)
+    flat.add(vecs)
+    faiss.write_index(flat, str(index_path))
+    # dict 格式：{stored_id: internal_id}
+    monkeypatch.setattr(Config, "BLOCK_FAISS_OFFSET", 0)
+    id_map_path.write_text(json.dumps({"100": 0, "200": 1}), encoding="utf-8")
+
+    vi = VectorIndex(dim=4, index_path=index_path, id_map_path=id_map_path)
+    assert vi._db_ids == {100, 200}
+
+    results = vi.search(_norm_vec([0, 1, 0, 0]), top_k=1)
+    assert results[0][0] == 200
 
 
 def test_close_releases_lock_fd(make_index):
     """close() 应释放文件锁并关闭文件描述符."""
     vi = make_index(dim=4)
-    # add() 内部 try/finally 会自动释放锁，所以 add() 后 _lock_fd 应为 None
-    vi.add(1, [1, 0, 0, 0])
+    vi.add(1, _norm_vec([1, 0, 0, 0]))
     assert vi._lock_fd is None
-    # 手动获取锁后验证 close() 能正确释放
     vi._acquire_lock()
     assert vi._lock_fd is not None
     vi.close()
@@ -111,7 +251,7 @@ def test_repeated_create_close_no_fd_leak(make_index):
     """重复创建和关闭 VectorIndex 不应导致 fd 泄漏."""
     for _ in range(5):
         vi = make_index(dim=4)
-        vi.add(1, [1, 0, 0, 0])
+        vi.add(1, _norm_vec([1, 0, 0, 0]))
         vi.close()
         assert vi._lock_fd is None
 
@@ -120,52 +260,5 @@ def test_close_idempotent(make_index):
     """多次调用 close() 不应报错."""
     vi = make_index(dim=4)
     vi.close()
-    vi.close()  # 第二次调用不应抛异常
+    vi.close()
     assert vi._lock_fd is None
-
-
-def test_snapshot_and_restore(make_index):
-    """snapshot/restore 应能回滚 FAISS 到之前的状态."""
-    vi = make_index(dim=4)
-    vi.add(10, [1, 0, 0, 0])
-    vi.add(20, [0, 1, 0, 0])
-    vi.add(30, [0, 0, 1, 0])
-
-    snapshot = vi.snapshot()
-    assert snapshot[1] == [10, 20, 30]
-
-    vi.add(40, [0, 0, 0, 1])
-    vi.add(50, [1, 1, 0, 0])
-    results = vi.search([0, 0, 0, 1], top_k=5)
-    ids = [r[0] for r in results]
-    assert 40 in ids
-
-    vi.restore(snapshot)
-    assert vi._id_map == [10, 20, 30]
-    assert vi._db_ids == {10, 20, 30}
-
-    results = vi.search([0, 0, 0, 1], top_k=5)
-    ids = [r[0] for r in results]
-    assert 40 not in ids
-    assert 50 not in ids
-
-    # 验证持久化后也保持一致
-    vi2 = VectorIndex(dim=4, index_path=vi.index_path, id_map_path=vi.id_map_path)
-    assert vi2._id_map == [10, 20, 30]
-    results = vi2.search([0, 0, 0, 1], top_k=5)
-    ids = [r[0] for r in results]
-    assert 40 not in ids
-
-
-def test_restore_empty_snapshot(make_index):
-    """空索引快照应能正确恢复到空状态."""
-    vi = make_index(dim=4)
-    snapshot = vi.snapshot()
-    assert snapshot == ([], [])
-
-    vi.add(1, [1, 0, 0, 0])
-    vi.restore(snapshot)
-
-    assert vi._id_map == []
-    assert vi._db_ids == set()
-    assert vi.search([1, 0, 0, 0], top_k=1) == []

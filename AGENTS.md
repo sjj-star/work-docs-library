@@ -43,7 +43,7 @@
 | 存储 | 职责 | 持久化文件 | 原子性保证 |
 |------|------|-----------|-----------|
 | **SQLite** | 文档元数据、content_blocks、heading_maps | `knowledge_base/workdocs.db` | 单连接事务 |
-| **FAISS** | 向量索引（语义搜索） | `knowledge_base/faiss.index` + `id_map.json` | `fcntl` 进程锁 + 临时文件 rename |
+| **FAISS** | 向量索引（语义搜索） | `knowledge_base/faiss.index`（IndexIDMap2） | `fcntl` 进程锁 + 事务 + 临时文件 rename |
 | **NetworkX** | 全局知识图谱（实体+关系） | `knowledge_base/graphs/{doc_id}.json` + `global.json` | 内存操作 + 文件原子写入 |
 | **Bridge** | block ↔ 实体 双向索引 | 纯内存（重启从 SQLite 重建） | 内存级 |
 
@@ -94,13 +94,13 @@ work-docs-library/
 │   │   ├── pdf_parser.py         # PDF 本地解析器（PyMuPDF + TOC 驱动章节识别 + 表格/图片检测）
 │   │   ├── office_parser.py      # DOCX / XLSX 解析器（代码存在，尚未接入 pipeline）
 │   │   └── image_utils.py        # 图片压缩与三分类（彩色/灰度/黑白）
-│   ├── tests/                    # pytest 测试集（413 passed, 0 skipped）
+│   ├── tests/                    # pytest 测试集（418 passed, 0 skipped）
 │   │   ├── conftest.py           # 三重环境隔离（清除 WORKDOCS_ 环境变量、阻止 load_dotenv、临时目录重定向）
 │   │   ├── fixtures/             # 测试 fixture（PDF 页样本、解析输出样本）
 │   │   └── test_*.py             # 各模块测试文件
 ├── knowledge_base/               # 运行时自动生成数据（❌ 禁止手动修改）
 │   ├── workdocs.db               # SQLite
-│   ├── faiss.index / id_map.json # FAISS 向量索引
+│   ├── faiss.index               # FAISS 向量索引（IndexIDMap2，直接存储 block_db_id）
 │   ├── parsed/<doc_id>/          # Stage1 解析输出
 │   ├── batch/                    # Stage2/3/5/6 中间产物
 │   └── graphs/                   # Stage4 子图快照 + global.json
@@ -136,7 +136,7 @@ cd /path/to/work-docs-library
 
 ### 测试执行
 ```bash
-# 完整测试集（当前状态：408 passed, 2 skipped, 0 failed）
+# 完整测试集（当前状态：418 passed, 0 skipped, 0 failed）
 cd /path/to/work-docs-library
 PYTHONPATH=scripts ./.venv/bin/python -m pytest scripts/tests/ -v
 
@@ -209,7 +209,7 @@ PYTHONPATH=scripts ./.venv/bin/python -m pytest \
   2. 阻止 `load_dotenv` 重新加载 `.env` 文件
   3. 重定向 Config 默认路径到临时目录（DB、FAISS、Graph 均隔离）
 - **回归即修复**：任何导致测试失败的变更必须当场修复
-- **413 个测试用例必须全部通过**（0 skipped）
+- **418 个测试用例必须全部通过**（0 skipped）
 
 ### 测试文件清单
 | 测试文件 | 用例数 | 说明 |
@@ -220,7 +220,7 @@ PYTHONPATH=scripts ./.venv/bin/python -m pytest \
 | `test_table_utils.py` | 4 | Markdown 表格规范化单元测试 |
 | `test_office_parser.py` | 3 | DOCX / XLSX 解析测试 |
 | `test_db.py` | 15 | SQLite 操作、事务管理 |
-| `test_vector_index.py` | 11 | FAISS 索引增删查、持久化、快照回滚 |
+| `test_vector_index.py` | 16 | FAISS IndexIDMap2 增删查、事务、迁移 |
 | `test_llm_client.py` | 9 | LLM 客户端 Mock |
 | `test_config_env.py` | 13 | 环境变量配置优先级、默认值、敏感 key 脱敏 |
 | `test_chapter_parser.py` | 20 | ChapterParser 树形章节解析测试 |
@@ -401,8 +401,8 @@ monkeypatch.setattr(
 - ✅ **Embedding 同步单文本 API**
 - ✅ **环境隔离三重机制**：彻底根治 `.env` 污染测试环境的问题
 - ✅ **存储粒度与查询粒度解耦（方案C）**：引入 `content_blocks` 表作为存储粒度，`heading_maps` 表作为查询粒度，batch 数量减少 40-50%
-- ✅ **FAISS ID 偏移**：`_BLOCK_FAISS_OFFSET = 10_000_000` 避免 block db_id 与旧 chunks ID 冲突
-- ✅ **408 个测试全部通过**
+- ✅ **FAISS 索引重构为 IndexIDMap2**：直接使用 block_db_id 作为存储 ID，移除 `_BLOCK_FAISS_OFFSET` 与手动 `_id_map`
+- ✅ **418 个测试全部通过**
 - ✅ **PDF Parser 表格检测增强（Milestone 1-4）**：`find_tables(strategy="lines_strict")`、caption-gated 预筛选、位域图重叠保护、全部 14 个 Magic Number 配置化（已移除 PyMuPDF4LLM fallback）
 - ✅ **PDF Parser 图片检测增强（Milestone 2）**：`page.get_image_info()` 过滤链、双路径提取
 - ✅ **性能基准测试**：TI (219页) 10.3s/0表格 → 46.2s/68表格；AMBA (585页) 8.7s/0表格 → 93.3s/22表格

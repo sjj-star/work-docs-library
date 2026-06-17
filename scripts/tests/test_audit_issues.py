@@ -320,9 +320,9 @@ def test_ingest_partial_merge_rollback(tmp_path, monkeypatch):
 
 
 def test_faiss_remove_doc_consistency(tmp_path, monkeypatch):
-    """验证：remove_doc 重建后，搜索仍能正确返回剩余向量.
+    """验证：remove_doc 删除指定 ID 后，搜索仍能正确返回剩余向量.
 
-    这是一个回归测试，确保 remove_doc 的重建逻辑没有 bug。
+    这是一个回归测试，确保 IndexIDMap2 的 remove_ids 逻辑没有 bug。
     """
     monkeypatch.setattr(Config, "FAISS_INDEX_PATH", tmp_path / "faiss.index")
     monkeypatch.setattr(Config, "ID_MAP_PATH", tmp_path / "id_map.json")
@@ -364,7 +364,7 @@ def test_faiss_remove_doc_consistency(tmp_path, monkeypatch):
 def test_stage6_sqlite_failure_rolls_back_faiss(tmp_path, monkeypatch):
     """复现：Stage 6 先写 FAISS 再写 SQLite，SQLite 失败时 FAISS 残留孤儿向量.
 
-    修复后：SQLite 更新失败时，应通过 snapshot/restore 将 FAISS 回滚到之前状态。
+    修复后：SQLite 更新失败时，应通过事务回滚 FAISS。
     """
     import json
 
@@ -420,7 +420,7 @@ def test_stage6_sqlite_failure_rolls_back_faiss(tmp_path, monkeypatch):
 
     # FAISS 应无新增向量
     vec = VectorIndex(dim=4, index_path=Config.FAISS_INDEX_PATH, id_map_path=Config.ID_MAP_PATH)
-    assert vec._id_map == []
+    assert vec._db_ids == set()
     assert vec.search([1.0, 0.0, 0.0, 0.0], top_k=1) == []
 
     # SQLite 中 block 应无 embedding
@@ -431,7 +431,7 @@ def test_stage6_sqlite_failure_rolls_back_faiss(tmp_path, monkeypatch):
 
 
 def test_stage6_faiss_failure_does_not_modify_sqlite(tmp_path, monkeypatch):
-    """复现：FAISS 写入失败时，旧逻辑会错误清除 SQLite 中已存在的 embedding.
+    """复现：FAISS 写入失败时不应修改 SQLite.
 
     修复后：FAISS 写入失败不应修改 SQLite，因为 SQLite 尚未提交。
     """

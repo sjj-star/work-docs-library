@@ -385,11 +385,9 @@ class KnowledgeBaseService:
         emb = embedder.embed([str(text)])[0]
         hits = self.vec.search(emb, top_k=top_k)
         results = []
-        for db_id, score in hits:
-            if db_id >= Config.BLOCK_FAISS_OFFSET:
-                block_db_id = db_id - Config.BLOCK_FAISS_OFFSET
-                block = self.db.get_block_by_db_id(block_db_id)
-                if block:
+        for block_db_id, score in hits:
+            block = self.db.get_block_by_db_id(block_db_id)
+            if block:
                     chunk = Chunk(
                         id=block["id"],
                         doc_id=block["doc_id"],

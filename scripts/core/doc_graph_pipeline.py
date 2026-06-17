@@ -1880,7 +1880,7 @@ class DocGraphPipeline:
         # 1. 收集复用 embedding
         db_blocks = self.db.query_blocks_by_doc(doc_id)
 
-        # 1. 收集复用 embedding（统一使用 block_db_id，无偏移）
+        # 1. 收集复用 embedding（FAISS 直接存储 block_db_id，无偏移）
         sqlite_items: list[tuple[int, list[float]]] = []
         faiss_items: list[tuple[int, list[float]]] = []
         reembed_block_ids: set[int] = set()
@@ -1890,7 +1890,7 @@ class DocGraphPipeline:
             block_db_id = block["id"]
             if emb:
                 sqlite_items.append((block_db_id, emb))
-                faiss_items.append((block_db_id + Config.BLOCK_FAISS_OFFSET, emb))
+                faiss_items.append((block_db_id, emb))
             else:
                 reembed_block_ids.add(block_db_id)
 
@@ -1917,24 +1917,25 @@ class DocGraphPipeline:
                         if block_db_id is None or not text:
                             logger.warning(f"Embedding JSONL 记录格式异常 | rec={rec}")
                             continue
-                        faiss_id = block_db_id + Config.BLOCK_FAISS_OFFSET
                         emb = embedder.embed_single(text)
                         sqlite_items.append((block_db_id, emb))
-                        faiss_items.append((faiss_id, emb))
+                        faiss_items.append((block_db_id, emb))
                 finally:
                     embedder.close()
 
-        # 4. 写入 FAISS（faiss_id）和 SQLite（block_db_id）。先写 FAISS 再写 SQLite，
-        # 避免 SQLite 中已存在 embedding 记录但向量索引缺失。SQLite 失败时使用快照回滚 FAISS。
+        # 4. 写入 FAISS（block_db_id）和 SQLite（block_db_id）。先写 FAISS 再写 SQLite，
+        # 避免 SQLite 中已存在 embedding 记录但向量索引缺失。SQLite 失败时通过事务回滚 FAISS。
         if sqlite_items:
-            snapshot = self.vec.snapshot()
-            self.vec.add_batch(faiss_items)
+            self.vec.begin_transaction()
             try:
+                self.vec.add_batch(faiss_items)
                 self.db.update_blocks_embedded_batch(sqlite_items)
             except Exception as e:
                 logger.error(f"SQLite embedding 更新失败，回滚 FAISS | doc_id={doc_id} | error={e}")
-                self.vec.restore(snapshot)
+                self.vec.rollback()
                 raise
+            else:
+                self.vec.commit()
 
         # 5. 更新状态为 done
         for block in db_blocks:
@@ -2025,10 +2026,10 @@ class DocGraphPipeline:
         # 1. 清理旧数据
         old_doc = self.db.get_document_by_path(file_path)
         if old_doc:
-            # 清理旧 blocks 的向量索引（使用偏移 ID）
+            # 清理旧 blocks 的向量索引（FAISS 直接存储 block_db_id）
             old_blocks = self.db.query_blocks_by_doc(old_doc.doc_id)
             if old_blocks:
-                self.vec.remove_doc([b["id"] + Config.BLOCK_FAISS_OFFSET for b in old_blocks])
+                self.vec.remove_doc([b["id"] for b in old_blocks])
             # 清理旧 blocks 和 heading_maps
             self.db.delete_blocks_by_doc(old_doc.doc_id)
             self.db.delete_heading_maps_by_doc(old_doc.doc_id)

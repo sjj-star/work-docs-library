@@ -93,21 +93,23 @@
 
 ---
 
-## 4. 为什么 FAISS IndexFlatIP？
+## 4. 为什么 FAISS IndexIDMap2 + IndexFlatIP？
 
-**选择**：使用 `faiss.IndexFlatIP`（内积索引），并在插入/查询时对向量做 L2 归一化。
+**选择**：底层使用 `faiss.IndexFlatIP`（内积索引）做精确搜索，外层包装 `faiss.IndexIDMap2`，直接以 `block_db_id` 作为存储 ID。插入/查询时对向量做 L2 归一化。
 
 **原因**：
 - **数学等效**：对向量做 L2 归一化后，内积（Inner Product）等价于余弦相似度：
   ```
   cosine_similarity(a, b) = dot(a, b) / (||a|| * ||b||) = dot(a/||a||, b/||b||)
   ```
+- **ID 直接映射**：`IndexIDMap2` 原生支持自定义 ID，无需手动维护 `_id_map` 文件，也无需 `_BLOCK_FAISS_OFFSET` 偏移，查询直接返回 `block_db_id`
 - **简单可靠**：IndexFlatIP 是精确搜索，无近似误差；对于当前数据规模（数千到数万条），查询性能完全可接受
 - **无需训练**：IndexFlatIP 是无参索引，无需像 IVF 或 HNSW 那样训练聚类参数
 
 **权衡**：
 - 时间复杂度 O(n)，数据量增长到百万级时需迁移到 IVF/HNSW
 - 内存占用为原始向量的精确存储，无压缩
+- 回滚时依赖 `IndexIDMap2.remove_ids` 删除本次新增 ID，避免了 O(N) 重建索引，但仍是 C++ 内部操作
 
 ---
 
@@ -394,7 +396,7 @@ Sub-block 继承父 section 的属性，但有自己的 `db_id`：
 |------|----------|------|
 | `content` | **独立** | 拆分后的片段内容 |
 | `block_id` | **独立** | `b_N` 格式 |
-| `db_id` | **独立** | SQLite 自增主键，FAISS 索引用它（加 `_BLOCK_FAISS_OFFSET` 偏移） |
+| `db_id` | **独立** | SQLite 自增主键，FAISS `IndexIDMap2` 直接用它作为存储 ID |
 | `section_title` | 继承 | 与父 section 相同 |
 | `content_hash` | 继承 | 父 section 的 hash（用于增量更新比对） |
 | `extracted_entities` | 继承 | 父 section 缓存的实体引用 |
@@ -407,7 +409,7 @@ Sub-block 继承父 section 的属性，但有自己的 `db_id`：
 - 每个 block（包括 sub-block）独立向量化
 - block 在 SQLite、FAISS、`_EntityChunkBridge` 中都是**一等公民**
 - 不存在"一个 block 对应多个向量"或"多个 block 合并为一个向量"的情况
-- `_BLOCK_FAISS_OFFSET` 确保 block db_id 在 FAISS 中唯一（偏移后不与旧 chunks ID 冲突）
+- FAISS `IndexIDMap2` 直接以 `block_db_id` 作为存储 ID，无需偏移即可保证与旧 chunks ID 的语义隔离（旧索引已废弃或迁移时会重建）
 
 ### `LLM_BATCH_MAX_CHARS` 与 `BLOCK_MAX_CHARS` 的分工
 
@@ -423,7 +425,7 @@ Sub-block 继承父 section 的属性，但有自己的 `db_id`：
 
 ---
 
-## 16. Heading Map 查询粒度与 FAISS ID 偏移
+## 16. Heading Map 查询粒度与 FAISS ID 设计
 
 ### heading_maps 的查询语义
 
@@ -440,26 +442,31 @@ Sub-block 继承父 section 的属性，但有自己的 `db_id`：
 - `##`/`###`/`####` 共享同一 block 集合，保证查询时不遗漏子章节内容
 - `heading_level` 和 `parent_heading` 字段保留层级关系，支持递归子标题查询
 
-### FAISS ID 偏移（`_BLOCK_FAISS_OFFSET = 10_000_000`）
+### FAISS ID 设计（`IndexIDMap2` 直接存储 `block_db_id`）
 
-content_blocks 表的 `db_id` 从 1 开始自增。旧架构中兼容层 chunks 表也使用自增 ID，两者共享 FAISS 索引时可能冲突。
+content_blocks 表的 `db_id` 从 1 开始自增。`VectorIndex` 底层使用 `faiss.IndexIDMap2(faiss.IndexFlatIP(dim))`，插入时直接使用 `block_db_id` 作为 FAISS 存储 ID。
 
 ```python
-# stage6 入库：block db_id 存入 FAISS 时加偏移
-faiss_id = block_db_id + _BLOCK_FAISS_OFFSET  # db_id=1 → faiss_id=10000001
+# stage6 入库：block db_id 直接作为 FAISS 存储 ID
+faiss_id = block_db_id  # db_id=1 → faiss_id=1
 
-# semantic_search 查询：减去偏移还原 block db_id
-if faiss_id >= _BLOCK_FAISS_OFFSET:
-    block_db_id = faiss_id - _BLOCK_FAISS_OFFSET
+# semantic_search 查询：IndexIDMap2 直接返回 block_db_id
+block_db_id = faiss_id
 ```
 
 **原因**：
-- 若不加偏移，block db_id=1 和旧 chunk db_id=1 在 FAISS 中可能指向同一向量，造成数据污染
-- 偏移量 10_000_000 足够大，可覆盖任何合理的 db_id 范围
+- 新架构中旧 `chunks` 表已不再使用，FAISS 索引独立服务于 `content_blocks`，不会再出现 block 与 chunk ID 冲突
+- `IndexIDMap2` 原生支持自定义 ID，查询时直接返回存储 ID，无需在 Python 层做偏移转换，也无需额外维护 `id_map.json`
+
+**事务与回滚**：
+- `VectorIndex.transaction()` / `begin_transaction()` 在写入前获取 `fcntl` 进程锁，并记录本次新增 ID 列表
+- FAISS `add_with_ids` 与 SQLite `update_blocks_embedded_batch` 在同一锁保护下顺序执行
+- 若 SQLite 写入失败，调用 `IndexIDMap2.remove_ids` 删除本次新增 ID 后释放锁，避免 FAISS 与 SQLite 状态不一致
+- 提交时先 `index.write_index` 到临时文件再 `rename`，保证文件级原子性
 
 **权衡**：
-- 偏移增加了 `semantic_search` 和 `stage6` 的复杂度，需解析 `custom_id` 还原 block_db_id
-- 未来清理旧 FAISS 索引后，可考虑是否保留偏移
+- 早期使用 `_BLOCK_FAISS_OFFSET = 10_000_000` 是为了兼容共存于同一 FAISS 文件的旧 chunks。旧格式迁移后该偏移仅作为历史配置保留，默认值为 `0`
+- `IndexIDMap2.remove_ids` 是 FAISS 内部操作，回滚性能优于旧的快照/重建方式
 
 ---
 

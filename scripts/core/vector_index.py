@@ -5,6 +5,7 @@ import json
 import logging
 import os
 from pathlib import Path
+from types import TracebackType
 
 import faiss
 import numpy as np
@@ -14,13 +15,47 @@ from .config import Config
 logger = logging.getLogger(__name__)
 
 
+def _index_id_map_to_set(index: faiss.Index) -> set[int]:
+    """从 IndexIDMap2 的 id_map 中读取所有存储 ID."""
+    raw_id_map = getattr(index, "id_map", None)
+    if raw_id_map is None:
+        return set()
+    size = raw_id_map.size()
+    return {int(raw_id_map.at(i)) for i in range(size)}
+
+
+class _VectorIndexTransaction:
+    """VectorIndex 事务上下文管理器."""
+
+    def __init__(self, vec: "VectorIndex") -> None:
+        self._vec = vec
+
+    def __enter__(self) -> "VectorIndex":
+        self._vec.begin_transaction()
+        return self._vec
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_val: BaseException | None,
+        exc_tb: TracebackType | None,
+    ) -> None:
+        if exc_type is None:
+            self._vec.commit()
+        else:
+            self._vec.rollback()
+
+
 class VectorIndex:
-    """VectorIndex 类."""
+    """VectorIndex 类.
+
+    底层使用 faiss.IndexIDMap2，直接以 block_db_id 作为存储 ID，
+    无需 BLOCK_FAISS_OFFSET 和手动 _id_map。
+    """
 
     def __init__(
         self, dim: int, index_path: Path | None = None, id_map_path: Path | None = None
     ) -> None:
-        # dim 为必需参数，由调用方传入（通常为 EmbeddingClient 探测到的实际维度）
         """初始化 VectorIndex."""
         self.dim = dim
         self.index_path = index_path or Config.FAISS_INDEX_PATH
@@ -28,9 +63,14 @@ class VectorIndex:
         self._lock_path = self.index_path.with_suffix(".lock")
         self._lock_fd: int | None = None
         self._index: faiss.Index | None = None
-        self._id_map: list[int] = []  # faiss internal id -> block db id
         self._db_ids: set[int] = set()  # 已索引的 block_db_id 集合（防重复）
+        self._in_transaction: bool = False
+        self._txn_added_ids: list[int] = []
         self._load()
+
+    def _new_index(self) -> faiss.Index:
+        """创建新的空 IndexIDMap2 索引."""
+        return faiss.IndexIDMap2(faiss.IndexFlatIP(self.dim))
 
     def _acquire_lock(self) -> None:
         """获取进程级排他文件锁（防止并发写覆盖）."""
@@ -51,33 +91,67 @@ class VectorIndex:
         """关闭 VectorIndex，释放文件锁和文件描述符."""
         self._release_lock()
 
-    def _reload(self) -> None:
-        """重新加载磁盘上的最新状态（调用方必须已持有锁）."""
-        if Path(self.index_path).exists():
-            self._index = faiss.read_index(str(self.index_path))
+    def _migrate_old_format(
+        self, flat_index: faiss.Index, id_map_data: list[int] | dict[str, int]
+    ) -> faiss.Index:
+        """将旧的 IndexFlatIP + id_map 格式迁移到 IndexIDMap2.
+
+        迁移时会减去 BLOCK_FAISS_OFFSET（如果存储 ID 带偏移），
+        使新索引统一使用 block_db_id 作为存储 ID。
+        """
+        logger.info("VectorIndex 检测到旧格式，开始迁移到 IndexIDMap2")
+        new_index = self._new_index()
+        offset = int(Config.BLOCK_FAISS_OFFSET or 0)
+
+        if isinstance(id_map_data, dict):
+            # 旧 dict 格式 {stored_id: internal_id}，需要反转
+            id_map_list: list[int | None] = [None] * (max(id_map_data.values()) + 1)
+            for stored_id, fid in id_map_data.items():
+                id_map_list[int(fid)] = int(stored_id)
         else:
-            self._index = faiss.IndexFlatIP(self.dim)
-        if Path(self.id_map_path).exists():
-            with open(self.id_map_path, encoding="utf-8") as f:
-                loaded = json.load(f)
-            if isinstance(loaded, dict):
-                max_fid = max(loaded.values()) if loaded else -1
-                self._id_map = [0] * (max_fid + 1)
-                for db_id, fid in loaded.items():
-                    self._id_map[int(fid)] = int(db_id)
-            else:
-                self._id_map = list(loaded)
-        else:
-            self._id_map = []
-        self._db_ids = set(self._id_map)
+            id_map_list = list(id_map_data)
+
+        assert new_index is not None
+        vectors = []
+        ids = []
+        for fid, stored_id in enumerate(id_map_list):
+            if stored_id is None:
+                continue
+            stored_id = int(stored_id)
+            if offset and stored_id >= offset:
+                stored_id -= offset
+            if stored_id in self._db_ids:
+                logger.warning(f"迁移时遇到重复 ID，跳过 | db_id={stored_id}")
+                continue
+            vec = flat_index.reconstruct(fid)  # type: ignore[reportCallIssue]
+            vec = np.array([vec], dtype=np.float32)
+            faiss.normalize_L2(vec)
+            vectors.append(vec)
+            ids.append(stored_id)
+            self._db_ids.add(stored_id)
+
+        if vectors:
+            all_vecs = np.vstack(vectors)
+            all_ids = np.array(ids, dtype=np.int64)
+            new_index.add_with_ids(all_vecs, all_ids)  # type: ignore[reportCallIssue]
+
+        # 原子保存新格式，并备份旧 id_map
+        self._index = new_index
+        self._save()
+        if self.id_map_path.exists():
+            backup_path = self.id_map_path.with_suffix(".json.bak")
+            os.replace(str(self.id_map_path), str(backup_path))
+            logger.info(f"旧 id_map 已备份到 {backup_path}")
+        return new_index
 
     def _load(self) -> None:
+        """加载索引，自动检测并迁移旧格式."""
+        has_old_id_map = Path(self.id_map_path).exists()
+
         if Path(self.index_path).exists():
             index = faiss.read_index(str(self.index_path))
-            self._index = index
             actual_dim = index.d
             if actual_dim != self.dim:
-                # 严格错误：维度不匹配时直接失败，不允许自动调整
                 raise RuntimeError(
                     f"VectorIndex dimension mismatch: existing index has {actual_dim} "
                     f"dimensions, but the embedding model produces {self.dim} dimensions. "
@@ -90,133 +164,157 @@ class VectorIndex:
                     f"  3. Switch back to a model that produces {actual_dim} dimensions"
                 )
         else:
-            self._index = faiss.IndexFlatIP(self.dim)
-        if Path(self.id_map_path).exists():
+            index = self._new_index()
+
+        if has_old_id_map:
+            # 旧格式：IndexFlatIP + id_map.json
             with open(self.id_map_path, encoding="utf-8") as f:
                 loaded = json.load(f)
-            if isinstance(loaded, dict):
-                # Backward-compatible: old format was {chunk_db_id: faiss_id}
-                max_fid = max(loaded.values()) if loaded else -1
-                self._id_map = [0] * (max_fid + 1)
-                for db_id, fid in loaded.items():
-                    self._id_map[int(fid)] = int(db_id)
-                logger.info("VectorIndex migrated old dict-style id_map to list format")
-            else:
-                self._id_map = loaded
+            index = self._migrate_old_format(index, loaded)
         else:
-            self._id_map = []
-        self._db_ids = set(self._id_map)
+            # 新格式：直接是 IndexIDMap2
+            if not hasattr(index, "id_map"):
+                # 异常情况：存在 index 文件但不是 IndexIDMap2，且无 id_map.json
+                logger.warning(
+                    "VectorIndex 加载到非 IndexIDMap2 索引且不存在 id_map.json，"
+                    "将重置为空索引"
+                )
+                index = self._new_index()
+            self._db_ids = _index_id_map_to_set(index)
+
+        self._index = index
+
+    def _reload(self) -> None:
+        """重新加载磁盘上的最新状态（调用方必须已持有锁）."""
+        # 事务期间不应 reload，否则可能丢失事务内的未保存变更
+        if self._in_transaction:
+            return
+        self._load()
 
     def _save(self) -> None:
-        """原子保存 FAISS 索引和 id_map（临时文件 + rename）。."""
+        """原子保存 FAISS 索引（临时文件 + rename）."""
         assert self._index is not None
-        # 原子写入索引
         tmp_index = self.index_path.with_suffix(".faiss.tmp")
         faiss.write_index(self._index, str(tmp_index))
         os.replace(str(tmp_index), str(self.index_path))
-
-        # 原子写入 id_map
-        tmp_map = self.id_map_path.with_suffix(".json.tmp")
-        with open(tmp_map, "w", encoding="utf-8") as f:
-            json.dump(self._id_map, f, ensure_ascii=False)
-        os.replace(str(tmp_map), str(self.id_map_path))
 
     def add(self, chunk_db_id: int, vector: list[float]) -> None:
         """Add 函数."""
         self.add_batch([(chunk_db_id, vector)])
 
-    def add_batch(self, items: list[tuple]) -> None:
+    def _validate_vectors(self, vectors: list[np.ndarray]) -> np.ndarray:
+        """校验向量维度并归一化."""
+        assert self._index is not None
+        all_vecs = np.vstack(vectors)
+        actual_dim = all_vecs.shape[1]
+        if self._index.d != actual_dim:
+            raise RuntimeError(
+                f"Cannot add vector with {actual_dim} dimensions "
+                f"to index with {self._index.d} dimensions."
+            )
+        faiss.normalize_L2(all_vecs)
+        return all_vecs
+
+    def _add_batch_locked(self, items: list[tuple[int, list[float]]]) -> None:
+        """在已持有锁的情况下执行批量添加."""
+        if not items:
+            return
+        assert self._index is not None
+
+        ids = []
+        vectors = []
+        for chunk_db_id, vector in items:
+            if chunk_db_id in self._db_ids:
+                logger.warning(f"跳过重复向量 | db_id={chunk_db_id}")
+                continue
+            vec = np.array([vector], dtype=np.float32)
+            vectors.append(vec)
+            ids.append(chunk_db_id)
+
+        if not vectors:
+            return
+
+        all_vecs = self._validate_vectors(vectors)
+        all_ids = np.array(ids, dtype=np.int64)
+        self._index.add_with_ids(all_vecs, all_ids)  # type: ignore[reportCallIssue]
+        self._db_ids.update(ids)
+        if self._in_transaction:
+            self._txn_added_ids.extend(ids)
+        else:
+            self._save()
+
+    def add_batch(self, items: list[tuple[int, list[float]]]) -> None:
         """批量添加向量，只在最后统一持久化."""
         if self._index is None:
             raise RuntimeError("Index not initialized")
         if not items:
             return
-        self._acquire_lock()
-        try:
-            self._reload()  # 确保基于最新状态操作
-            ids = []
-            vectors = []
-            for chunk_db_id, vector in items:
-                if chunk_db_id in self._db_ids:
-                    logger.warning(f"跳过重复向量 | db_id={chunk_db_id}")
-                    continue
-                vec = np.array([vector], dtype=np.float32)
-                actual_dim = vec.shape[1]
-                if self._index.d != actual_dim:
-                    raise RuntimeError(
-                        f"Cannot add vector with {actual_dim} dimensions "
-                        f"to index with {self._index.d} dimensions."
-                    )
-                faiss.normalize_L2(vec)
-                vectors.append(vec)
-                ids.append(chunk_db_id)
-            if vectors:
-                all_vecs = np.vstack(vectors)
-                self._index.add(all_vecs)  # type: ignore[reportCallIssue]
-                self._id_map.extend(ids)
-                self._db_ids.update(ids)
-                self._save()
-        finally:
-            self._release_lock()
+
+        if self._in_transaction:
+            self._add_batch_locked(items)
+        else:
+            self._acquire_lock()
+            try:
+                self._reload()
+                self._add_batch_locked(items)
+            finally:
+                self._release_lock()
 
     def remove_doc(self, chunk_db_ids: list[int]) -> None:
-        """remove_doc 函数."""
+        """根据 block_db_id 列表删除向量."""
         if self._index is None:
             raise RuntimeError("Index not initialized")
         if not chunk_db_ids:
             return
-        self._acquire_lock()
-        try:
-            self._reload()  # 确保基于最新状态操作
-            ids_to_remove = set(chunk_db_ids)
-            new_map = []
-            vectors = []
-            for fid, db_id in enumerate(self._id_map):
-                if db_id not in ids_to_remove:
-                    new_map.append(db_id)
-                    vectors.append(self._index.reconstruct(fid))  # type: ignore[reportCallIssue]
-            self._index = faiss.IndexFlatIP(self.dim)
-            if vectors:
-                mat = np.array(vectors, dtype=np.float32)
-                faiss.normalize_L2(mat)
-                self._index.add(mat)  # type: ignore[reportCallIssue]
-            self._id_map = new_map
-            self._db_ids = set(new_map)
-            self._save()
-        finally:
-            self._release_lock()
 
-    def snapshot(self) -> tuple[list[list[float]], list[int]]:
-        """创建当前索引状态的快照（向量 + id_map），用于失败回滚."""
         self._acquire_lock()
         try:
-            self._reload()  # 确保基于磁盘最新状态
+            self._reload()
             assert self._index is not None
-            vectors = [
-                self._index.reconstruct(fid).tolist()  # type: ignore[reportCallIssue]
-                for fid in range(self._index.ntotal)
-            ]
-            return (vectors, list(self._id_map))
-        finally:
-            self._release_lock()
-
-    def restore(self, snapshot: tuple[list[list[float]], list[int]]) -> None:
-        """从快照重建索引并原子落盘."""
-        vectors, id_map = snapshot
-        self._acquire_lock()
-        try:
-            self._reload()  # 先加载最新状态，防止覆盖并发写入
-            self._index = faiss.IndexFlatIP(self.dim)
-            if vectors:
-                mat = np.array(vectors, dtype=np.float32)
-                faiss.normalize_L2(mat)
-                assert self._index is not None
-                self._index.add(mat)  # type: ignore[reportCallIssue]
-            self._id_map = id_map
-            self._db_ids = set(id_map)
+            ids_to_remove = np.array(list(set(chunk_db_ids)), dtype=np.int64)
+            if ids_to_remove.size == 0:
+                return
+            self._index.remove_ids(ids_to_remove)  # type: ignore[reportCallIssue]
+            self._db_ids.difference_update(ids_to_remove.tolist())
             self._save()
         finally:
             self._release_lock()
+
+    def begin_transaction(self) -> None:
+        """开始一个 FAISS 写入事务."""
+        if self._in_transaction:
+            raise RuntimeError("VectorIndex 事务不支持嵌套")
+        self._acquire_lock()
+        self._reload()
+        self._in_transaction = True
+        self._txn_added_ids = []
+
+    def commit(self) -> None:
+        """提交事务并释放锁."""
+        if not self._in_transaction:
+            raise RuntimeError("当前未在事务中")
+        self._save()
+        self._in_transaction = False
+        self._txn_added_ids = []
+        self._release_lock()
+
+    def rollback(self) -> None:
+        """回滚事务：删除本次新增的向量并释放锁."""
+        if not self._in_transaction:
+            raise RuntimeError("当前未在事务中")
+        assert self._index is not None
+        if self._txn_added_ids:
+            ids = np.array(list(set(self._txn_added_ids)), dtype=np.int64)
+            self._index.remove_ids(ids)  # type: ignore[reportCallIssue]
+            self._db_ids.difference_update(self._txn_added_ids)
+            self._save()
+        self._in_transaction = False
+        self._txn_added_ids = []
+        self._release_lock()
+
+    def transaction(self) -> _VectorIndexTransaction:
+        """返回事务上下文管理器."""
+        return _VectorIndexTransaction(self)
 
     def search(self, query_vector: list[float], top_k: int = 5) -> list[tuple[int, float]]:
         """Search 函数."""
@@ -229,7 +327,7 @@ class VectorIndex:
         scores, indices = self._index.search(vec, top_k)  # type: ignore[reportCallIssue]
         results = []
         for score, idx in zip(scores[0], indices[0]):
-            if idx < 0 or idx >= len(self._id_map):
+            if idx < 0:
                 continue
-            results.append((self._id_map[int(idx)], float(score)))
+            results.append((int(idx), float(score)))
         return results
