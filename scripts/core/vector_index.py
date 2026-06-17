@@ -1,7 +1,6 @@
 """vector_index 模块."""
 
 import fcntl
-import json
 import logging
 import os
 from pathlib import Path
@@ -49,17 +48,13 @@ class _VectorIndexTransaction:
 class VectorIndex:
     """VectorIndex 类.
 
-    底层使用 faiss.IndexIDMap2，直接以 block_db_id 作为存储 ID，
-    无需 BLOCK_FAISS_OFFSET 和手动 _id_map。
+    底层使用 faiss.IndexIDMap2，直接以 block_db_id 作为存储 ID。
     """
 
-    def __init__(
-        self, dim: int, index_path: Path | None = None, id_map_path: Path | None = None
-    ) -> None:
+    def __init__(self, dim: int, index_path: Path | None = None) -> None:
         """初始化 VectorIndex."""
         self.dim = dim
         self.index_path = index_path or Config.FAISS_INDEX_PATH
-        self.id_map_path = id_map_path or Config.ID_MAP_PATH
         self._lock_path = self.index_path.with_suffix(".lock")
         self._lock_fd: int | None = None
         self._index: faiss.Index | None = None
@@ -91,63 +86,8 @@ class VectorIndex:
         """关闭 VectorIndex，释放文件锁和文件描述符."""
         self._release_lock()
 
-    def _migrate_old_format(
-        self, flat_index: faiss.Index, id_map_data: list[int] | dict[str, int]
-    ) -> faiss.Index:
-        """将旧的 IndexFlatIP + id_map 格式迁移到 IndexIDMap2.
-
-        迁移时会减去 BLOCK_FAISS_OFFSET（如果存储 ID 带偏移），
-        使新索引统一使用 block_db_id 作为存储 ID。
-        """
-        logger.info("VectorIndex 检测到旧格式，开始迁移到 IndexIDMap2")
-        new_index = self._new_index()
-        offset = int(Config.BLOCK_FAISS_OFFSET or 0)
-
-        if isinstance(id_map_data, dict):
-            # 旧 dict 格式 {stored_id: internal_id}，需要反转
-            id_map_list: list[int | None] = [None] * (max(id_map_data.values()) + 1)
-            for stored_id, fid in id_map_data.items():
-                id_map_list[int(fid)] = int(stored_id)
-        else:
-            id_map_list = list(id_map_data)
-
-        assert new_index is not None
-        vectors = []
-        ids = []
-        for fid, stored_id in enumerate(id_map_list):
-            if stored_id is None:
-                continue
-            stored_id = int(stored_id)
-            if offset and stored_id >= offset:
-                stored_id -= offset
-            if stored_id in self._db_ids:
-                logger.warning(f"迁移时遇到重复 ID，跳过 | db_id={stored_id}")
-                continue
-            vec = flat_index.reconstruct(fid)  # type: ignore[reportCallIssue]
-            vec = np.array([vec], dtype=np.float32)
-            faiss.normalize_L2(vec)
-            vectors.append(vec)
-            ids.append(stored_id)
-            self._db_ids.add(stored_id)
-
-        if vectors:
-            all_vecs = np.vstack(vectors)
-            all_ids = np.array(ids, dtype=np.int64)
-            new_index.add_with_ids(all_vecs, all_ids)  # type: ignore[reportCallIssue]
-
-        # 原子保存新格式，并备份旧 id_map
-        self._index = new_index
-        self._save()
-        if self.id_map_path.exists():
-            backup_path = self.id_map_path.with_suffix(".json.bak")
-            os.replace(str(self.id_map_path), str(backup_path))
-            logger.info(f"旧 id_map 已备份到 {backup_path}")
-        return new_index
-
     def _load(self) -> None:
-        """加载索引，自动检测并迁移旧格式."""
-        has_old_id_map = Path(self.id_map_path).exists()
-
+        """加载索引."""
         if Path(self.index_path).exists():
             index = faiss.read_index(str(self.index_path))
             actual_dim = index.d
@@ -163,25 +103,15 @@ class VectorIndex:
                     f"and re-ingest all documents\n"
                     f"  3. Switch back to a model that produces {actual_dim} dimensions"
                 )
+            if not hasattr(index, "id_map"):
+                raise RuntimeError(
+                    f"Existing FAISS index at {self.index_path} is not IndexIDMap2. "
+                    "Delete it and re-ingest all documents."
+                )
         else:
             index = self._new_index()
 
-        if has_old_id_map:
-            # 旧格式：IndexFlatIP + id_map.json
-            with open(self.id_map_path, encoding="utf-8") as f:
-                loaded = json.load(f)
-            index = self._migrate_old_format(index, loaded)
-        else:
-            # 新格式：直接是 IndexIDMap2
-            if not hasattr(index, "id_map"):
-                # 异常情况：存在 index 文件但不是 IndexIDMap2，且无 id_map.json
-                logger.warning(
-                    "VectorIndex 加载到非 IndexIDMap2 索引且不存在 id_map.json，"
-                    "将重置为空索引"
-                )
-                index = self._new_index()
-            self._db_ids = _index_id_map_to_set(index)
-
+        self._db_ids = _index_id_map_to_set(index)
         self._index = index
 
     def _reload(self) -> None:

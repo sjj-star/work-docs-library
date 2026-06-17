@@ -52,9 +52,7 @@ class TestParsedDocsToJsonl:
         assert len(tree) > 0, "parse_tree 应返回至少一个 root"
 
         # 2. 构建 content_blocks 并构建 Batch（方案C）
-        content_blocks, _heading_maps = _build_content_blocks_and_maps(
-            tree, max_chars=Config.LLM_BATCH_MAX_CHARS
-        )
+        content_blocks, _heading_maps = _build_content_blocks_and_maps(tree)
         batches = BatchBuilder.build_batches(content_blocks, max_chars=Config.LLM_BATCH_MAX_CHARS)
         assert len(batches) > 0, "应生成至少一个 batch"
 

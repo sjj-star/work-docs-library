@@ -138,22 +138,6 @@ class KnowledgeBaseService:
             except Exception as e:
                 logger.warning(f"加载全局图谱失败 | error={e}")
 
-        # 兼容：如果没有 global.json，逐个加载文档子图
-        graphs_dir = Config.DB_PATH.parent / Config.GRAPH_OUTPUT_DIR
-        if not graphs_dir.exists():
-            return
-        for path in sorted(graphs_dir.glob("*.json")):
-            if path.name == "global.json":
-                continue
-            try:
-                temp = NetworkXGraphStore()
-                temp.load(path)
-                self._merge_graph(temp)
-            except Exception as e:
-                logger.warning(f"加载图谱失败 | path={path} | error={e}")
-        if self.graph.stats()["nodes"] > 0:
-            logger.info(f"已从文档子图构建全局图谱 | {self.graph.stats()}")
-
     def _merge_graph(self, other: NetworkXGraphStore) -> None:
         """将另一个图谱合并到全局图（同名同类型实体自动去重，属性合并）."""
         for entity in other.all_entities():
@@ -1086,17 +1070,6 @@ class KnowledgeBaseService:
     ) -> list[dict]:
         """查询反馈."""
         return self.db.query_feedback(entity_type, entity_name, limit)
-
-    def load_document_graph(self, doc_id: str) -> None:
-        """增量加载指定文档的图谱到全局图（兼容旧接口）."""
-        graph_path = Config.DB_PATH.parent / Config.GRAPH_OUTPUT_DIR / f"{doc_id}.json"
-        if graph_path.exists():
-            temp = NetworkXGraphStore()
-            temp.load(graph_path)
-            self._merge_graph(temp)
-            logger.info(f"已加载文档图谱 | doc_id={doc_id} | {self.graph.stats()}")
-        else:
-            logger.warning(f"文档图谱不存在 | doc_id={doc_id} | path={graph_path}")
 
     # ------------------------------------------------------------------
     # 内部辅助

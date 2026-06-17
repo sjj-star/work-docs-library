@@ -289,14 +289,13 @@ def _collect_section_content(node: ChapterNode) -> str:
 
 def _build_content_blocks_and_maps(
     tree_chapters: list[ChapterNode],
-    max_chars: int,
 ) -> tuple[list[dict], list[dict]]:
     """构建内容块和标题映射.
 
     对每个 ## 节点：
     1. 聚合自身 + 所有子孙 content（保留 Markdown 层级）
     2. 如果是第一个 section 且 root 有 content，将 root content 作为 preface
-    3. 按 BLOCK_MAX_CHARS 切分为向量化粒度 blocks
+    3. 按 Config.BLOCK_MAX_CHARS 切分为向量化粒度 blocks
     4. 记录每个 block 的 seq_index
 
     heading_maps：##/###/#### 都映射到该 section 的所有 block_ids.
@@ -304,7 +303,6 @@ def _build_content_blocks_and_maps(
 
     Args:
         tree_chapters: 章节树
-        max_chars: 保留参数（兼容旧调用），实际使用 Config.BLOCK_MAX_CHARS
     """
     content_blocks: list[dict] = []
     heading_maps: list[dict] = []
@@ -1139,11 +1137,11 @@ class DocGraphPipeline:
         logger.info(f"章节解析完成 | roots={len(tree_chapters)}")
 
         # 构建 content_blocks 和 heading_maps（方案C）
-        max_chars = max_chars or Config.LLM_BATCH_MAX_CHARS
-        content_blocks, heading_maps = _build_content_blocks_and_maps(tree_chapters, max_chars)
+        content_blocks, heading_maps = _build_content_blocks_and_maps(tree_chapters)
         logger.info(f"内容块构建完成 | blocks={len(content_blocks)} | headings={len(heading_maps)}")
 
         # 构建 batch
+        max_chars = max_chars or Config.LLM_BATCH_MAX_CHARS
         batches = BatchBuilder.build_batches(content_blocks, max_chars) if content_blocks else []
         logger.info(f"Batch 构建完成 | batches={len(batches)}")
 

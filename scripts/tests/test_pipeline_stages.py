@@ -34,7 +34,6 @@ def patched_config(monkeypatch, tmp_path):
     kb.mkdir()
     monkeypatch.setattr(Config, "DB_PATH", kb / "workdocs.db")
     monkeypatch.setattr(Config, "FAISS_INDEX_PATH", kb / "faiss.index")
-    monkeypatch.setattr(Config, "ID_MAP_PATH", kb / "id_map.json")
     monkeypatch.setattr(Config, "GRAPH_OUTPUT_DIR", "graphs")
     monkeypatch.setattr(Config, "EMBEDDING_DIMENSION", 4)
     monkeypatch.setattr(Config, "LLM_BATCH_MAX_CHARS", 500)

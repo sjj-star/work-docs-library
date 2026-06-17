@@ -465,7 +465,7 @@ block_db_id = faiss_id
 - 提交时先 `index.write_index` 到临时文件再 `rename`，保证文件级原子性
 
 **权衡**：
-- 早期使用 `_BLOCK_FAISS_OFFSET = 10_000_000` 是为了兼容共存于同一 FAISS 文件的旧 chunks。旧格式迁移后该偏移仅作为历史配置保留，默认值为 `0`
+- 早期使用 `_BLOCK_FAISS_OFFSET = 10_000_000` 是为了兼容共存于同一 FAISS 文件的旧 chunks；该偏移及旧格式迁移代码已移除，新代码直接使用 `block_db_id`
 - `IndexIDMap2.remove_ids` 是 FAISS 内部操作，回滚性能优于旧的快照/重建方式
 
 ---

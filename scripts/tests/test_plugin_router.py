@@ -33,7 +33,6 @@ def patched_config(monkeypatch, tmp_path):
     kb.mkdir()
     monkeypatch.setattr(Config, "DB_PATH", kb / "workdocs.db")
     monkeypatch.setattr(Config, "FAISS_INDEX_PATH", kb / "faiss.index")
-    monkeypatch.setattr(Config, "ID_MAP_PATH", kb / "id_map.json")
     monkeypatch.setattr(Config, "EMBEDDING_DIMENSION", 4)
     monkeypatch.setattr(Config, "EMBEDDING_BASE_URL", "https://api.openai.com/v1")
     monkeypatch.setattr(Config, "LLM_BASE_URL", "https://api.openai.com/v1")
@@ -508,9 +507,7 @@ def graph_service(monkeypatch, tmp_path):
 
     monkeypatch.setattr(Config, "GRAPH_OUTPUT_DIR", str(tmp_path / "graphs"))
     db = KnowledgeDB(db_path=tmp_path / "test.db")
-    vec = VectorIndex(
-        dim=4, index_path=tmp_path / "faiss.index", id_map_path=tmp_path / "id_map.json"
-    )
+    vec = VectorIndex(dim=4, index_path=tmp_path / "faiss.index")
     svc = KnowledgeBaseService(
         db=db,
         vec=vec,
@@ -1092,7 +1089,6 @@ def test_tool_config_groups_cover_all_active_keys():
     internal_keys = {
         "DB_PATH",
         "FAISS_INDEX_PATH",
-        "ID_MAP_PATH",
         "PROMPT_DIR",
     }
     missing = (expected_keys - internal_keys) - grouped_keys

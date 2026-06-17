@@ -10,7 +10,6 @@ def _make_service(tmp_path, monkeypatch):
     """创建测试用的 KnowledgeBaseService 实例."""
     monkeypatch.setattr(Config, "DB_PATH", tmp_path / "test.db")
     monkeypatch.setattr(Config, "FAISS_INDEX_PATH", tmp_path / "faiss.index")
-    monkeypatch.setattr(Config, "ID_MAP_PATH", tmp_path / "id_map.json")
     return KnowledgeBaseService()
 
 

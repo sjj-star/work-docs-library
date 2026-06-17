@@ -1,11 +1,8 @@
 """test_vector_index 模块."""
 
-import json
-
 import faiss
 import numpy as np
 import pytest
-from core.config import Config
 from core.vector_index import VectorIndex
 
 
@@ -15,8 +12,7 @@ def make_index(tmp_path):
 
     def _make(dim=4):
         ip = tmp_path / f"index_{dim}.faiss"
-        mp = tmp_path / f"map_{dim}.json"
-        return VectorIndex(dim=dim, index_path=ip, id_map_path=mp)
+        return VectorIndex(dim=dim, index_path=ip)
 
     return _make
 
@@ -92,7 +88,7 @@ def test_persistence(make_index, tmp_path):
     vi = make_index(dim=4)
     vi.add(42, _norm_vec([0, 0, 0, 1]))
     # Create new instance pointing to same files
-    vi2 = VectorIndex(dim=4, index_path=vi.index_path, id_map_path=vi.id_map_path)
+    vi2 = VectorIndex(dim=4, index_path=vi.index_path)
     results = vi2.search(_norm_vec([0, 0, 0, 1]), top_k=1)
     assert len(results) == 1
     assert results[0][0] == 42
@@ -113,7 +109,7 @@ def test_transaction_commit(make_index):
     assert results[0][0] == 10
 
     # 重启后仍应存在
-    vi2 = VectorIndex(dim=4, index_path=vi.index_path, id_map_path=vi.id_map_path)
+    vi2 = VectorIndex(dim=4, index_path=vi.index_path)
     results = vi2.search(_norm_vec([0, 1, 0, 0]), top_k=1)
     assert results[0][0] == 20
 
@@ -140,7 +136,7 @@ def test_transaction_rollback(make_index):
     assert 30 not in ids
 
     # 持久化后也一致
-    vi2 = VectorIndex(dim=4, index_path=vi.index_path, id_map_path=vi.id_map_path)
+    vi2 = VectorIndex(dim=4, index_path=vi.index_path)
     assert vi2._db_ids == {10}
 
 
@@ -185,55 +181,6 @@ def test_transaction_add_batch_exception(make_index):
                 _faiss.normalize_L2 = original
 
     assert vi._db_ids == {10}
-
-
-def test_migrate_old_flat_index_with_list_id_map(make_index, tmp_path, monkeypatch):
-    """旧格式 IndexFlatIP + list id_map.json 应迁移为 IndexIDMap2."""
-    index_path = tmp_path / "index.faiss"
-    id_map_path = tmp_path / "id_map.json"
-
-    # 构建旧格式索引
-    flat = faiss.IndexFlatIP(4)
-    vecs = np.array([[1, 0, 0, 0], [0, 1, 0, 0]], dtype=np.float32)
-    faiss.normalize_L2(vecs)
-    flat.add(vecs)
-    faiss.write_index(flat, str(index_path))
-    # list 格式：内部 id -> stored_id，这里 stored_id 带 1000 万偏移
-    monkeypatch.setattr(Config, "BLOCK_FAISS_OFFSET", 10000000)
-    id_map_path.write_text(json.dumps([10000010, 10000020]), encoding="utf-8")
-
-    vi = VectorIndex(dim=4, index_path=index_path, id_map_path=id_map_path)
-    assert hasattr(vi._index, "id_map")
-    assert vi._db_ids == {10, 20}
-
-    # 搜索应直接返回 block_db_id（已减去偏移）
-    results = vi.search(_norm_vec([1, 0, 0, 0]), top_k=1)
-    assert results[0][0] == 10
-
-    # 旧 id_map 应被备份
-    assert not id_map_path.exists()
-    assert (tmp_path / "id_map.json.bak").exists()
-
-
-def test_migrate_old_flat_index_with_dict_id_map(make_index, tmp_path, monkeypatch):
-    """旧格式 IndexFlatIP + dict id_map.json 应迁移为 IndexIDMap2."""
-    index_path = tmp_path / "index.faiss"
-    id_map_path = tmp_path / "id_map.json"
-
-    flat = faiss.IndexFlatIP(4)
-    vecs = np.array([[1, 0, 0, 0], [0, 1, 0, 0]], dtype=np.float32)
-    faiss.normalize_L2(vecs)
-    flat.add(vecs)
-    faiss.write_index(flat, str(index_path))
-    # dict 格式：{stored_id: internal_id}
-    monkeypatch.setattr(Config, "BLOCK_FAISS_OFFSET", 0)
-    id_map_path.write_text(json.dumps({"100": 0, "200": 1}), encoding="utf-8")
-
-    vi = VectorIndex(dim=4, index_path=index_path, id_map_path=id_map_path)
-    assert vi._db_ids == {100, 200}
-
-    results = vi.search(_norm_vec([0, 1, 0, 0]), top_k=1)
-    assert results[0][0] == 200
 
 
 def test_close_releases_lock_fd(make_index):

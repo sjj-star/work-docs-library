@@ -12,9 +12,6 @@ from .models import Chapter, Document
 
 logger = logging.getLogger(__name__)
 
-SCHEMA_VERSION = "3"
-
-
 class KnowledgeDB:
     """KnowledgeDB 类."""
 
@@ -22,7 +19,6 @@ class KnowledgeDB:
         """初始化 KnowledgeDB."""
         self.db_path = str(db_path or Config.DB_PATH)
         self._init_tables()
-        self._check_schema_version()
 
     @contextmanager
     def _connect(self) -> Generator[sqlite3.Connection, None, None]:
@@ -36,10 +32,6 @@ class KnowledgeDB:
 
     def _init_tables(self) -> None:
         sql = """
-        CREATE TABLE IF NOT EXISTS _schema_meta (
-            key TEXT PRIMARY KEY,
-            value TEXT
-        );
         CREATE TABLE IF NOT EXISTS documents (
             doc_id TEXT PRIMARY KEY,
             title TEXT,
@@ -107,27 +99,6 @@ class KnowledgeDB:
         """
         with self._connect() as conn:
             conn.executescript(sql)
-            conn.execute(
-                "INSERT OR REPLACE INTO _schema_meta (key, value) VALUES (?, ?)",
-                ("version", SCHEMA_VERSION),
-            )
-
-    def _check_schema_version(self) -> None:
-        """检测 schema 版本，旧版本提示重建."""
-        try:
-            with self._connect() as conn:
-                row = conn.execute(
-                    "SELECT value FROM _schema_meta WHERE key = ?", ("version",)
-                ).fetchone()
-            current = row["value"] if row else None
-        except sqlite3.OperationalError:
-            current = None
-
-        if current != SCHEMA_VERSION:
-            logger.warning(
-                f"数据库 schema 版本过旧（v{current or 'unknown'}），"
-                f"建议执行 reprocess 重建以清理无用列。当前仍可正常运行。"
-            )
 
     def upsert_document(self, doc: Document) -> None:
         """upsert_document 函数."""

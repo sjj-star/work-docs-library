@@ -449,13 +449,10 @@ class PDFParser:
         if not table_elements:
             return text_blocks
 
-        # 兼容未提供 bbox 的历史调用：用 y0/y1 + 全页宽度兜底
         table_bboxes: list[fitz.Rect] = []
         for te in table_elements:
-            bbox = te.get("bbox")
-            if bbox is None:
-                bbox = fitz.Rect(0, te.get("y0", 0), 1e9, te.get("y1", 0))
-            elif not isinstance(bbox, fitz.Rect):
+            bbox = te["bbox"]
+            if not isinstance(bbox, fitz.Rect):
                 bbox = fitz.Rect(bbox)
             table_bboxes.append(bbox)
 

@@ -1132,7 +1132,13 @@ def test_build_page_markdown_with_tables():
         {"type": "text", "y0": 200, "y1": 220, "text": "Paragraph after table"},
     ]
     table_elements = [
-        {"type": "table", "y0": 100, "y1": 150, "text": "|A|B|\n|---|---|\n|1|2|"},
+        {
+            "type": "table",
+            "y0": 100,
+            "y1": 150,
+            "text": "|A|B|\n|---|---|\n|1|2|",
+            "bbox": fitz.Rect(0, 100, 500, 150),
+        },
     ]
     raster_images = []
     diagram_images = []

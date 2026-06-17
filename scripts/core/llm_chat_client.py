@@ -59,8 +59,6 @@ class BaseLLMClient:
 
         # 完全由 base_url 决定，不做服务商推断
         self.chat_url = f"{self.base_url}/chat/completions"
-        # embed_url 保留以兼容 LLMClient 多重继承
-        self.embed_url = f"{self.base_url}/embeddings"
 
         # 使用线程本地存储，确保多线程并发时每个线程有独立的 Session
         self._local = threading.local()

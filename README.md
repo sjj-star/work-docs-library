@@ -140,7 +140,6 @@ work-docs-library/
 ├── scripts/
 │   ├── mcp_server.py             # MCP stdio server（JSON-RPC，stdout 隔离）
 │   ├── plugin_router.py          # Plugin 工具函数库（被 mcp_server / admin_tools 复用）
-│   ├── requirements.txt
 │   ├── .env.example              # 环境变量模板
 │   ├── .env                      # 实际环境变量（gitignored）
 │   ├── prompts/                  # LLM 提示词文件（运行时读取，无需重启）
@@ -163,7 +162,7 @@ work-docs-library/
 │   │   ├── pdf_parser.py         # PDF 本地解析器（fallback，输出与 BigModel 一致）
 │   │   ├── office_parser.py      # DOCX / XLSX 解析器（代码存在，尚未接入 pipeline）
 │   │   └── image_utils.py        # 图片压缩工具
-│   └── tests/                    # pytest 测试集（418 个用例）
+│   └── tests/                    # pytest 测试集（416 个用例）
 ├── knowledge_base/               # 运行时自动生成
 │   ├── workdocs.db               # SQLite 元数据
 │   ├── faiss.index               # FAISS 向量索引（IndexIDMap2，直接存储 block_db_id）
@@ -197,9 +196,6 @@ uv sync
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -e .
-
-# 方式三：手动安装依赖（向后兼容）
-pip install -r scripts/requirements.txt
 ```
 
 ### 配置
@@ -450,7 +446,6 @@ print(f'entities={len(g.get(\"nodes\", []))}, relations={len(g.get(\"edges\", []
 | `WORKDOCS_LLM_BATCH_COMPLETION_WINDOW` | `24h` | Batch 完成窗口（如 `24h`） |
 | `WORKDOCS_LLM_BATCH_MAX_CHARS` | `10000` | 每个 LLM batch 最大文本字符数（LLM 聚合粒度） |
 | `WORKDOCS_BLOCK_MAX_CHARS` | `6000` | content_blocks 存储切分粒度（向量化粒度），基于 BigModel embedding-3 经验值 |
-| `WORKDOCS_BLOCK_FAISS_OFFSET` | `0` | 旧格式迁移时减去的历史偏移；新格式不再使用 |
 | `WORKDOCS_LLM_BATCH_TIMEOUT` | `3600` | LLM Batch API 轮询超时（秒） |
 | `WORKDOCS_LLM_MAX_RETRIES` | `3` | LLM 同步请求最大重试次数 |
 | `WORKDOCS_LLM_RETRY_BACKOFF` | `2` | LLM 重试退避系数（秒） |
@@ -687,7 +682,7 @@ pending ────────────────────────
 | 场景 | 行为 | 恢复方法 |
 |------|------|----------|
 | 进程崩溃在 stage4 与 stage6 之间 | content_blocks 状态为 `embedded`，FAISS 中无对应向量 | `python scripts/admin_tools.py stage6_submit_embed_batches --params '{"doc_id":"{doc_id}"}'` |
-| FAISS 索引文件损坏 | 加载时抛出 `RuntimeError` | 删除 `faiss.index`（旧 `id_map.json` 已不再使用），重新处理所有文档 |
+| FAISS 索引文件损坏或非 IndexIDMap2 | 加载时抛出 `RuntimeError` | 删除 `faiss.index`，重新处理所有文档 |
 | 全局图异常（节点<10 但文档>0） | 启动时检测到全局图不完整 | 自动触发 `rebuild_global_graph()` 重建；手动执行 `python scripts/admin_tools.py rebuild_global_graph` 亦可 |
 | 子图 `{doc_id}.json` 缺失但 SQLite 存在 | 全局图缺少该文档实体 | `python scripts/admin_tools.py reprocess --params '{"doc_id":"{doc_id}"}'` |
 
@@ -702,7 +697,7 @@ cd /path/to/work-docs-library
 PYTHONPATH=scripts ./.venv/bin/python -m pytest scripts/tests/ -v
 ```
 
-**当前状态：418 passed, 0 skipped, 0 failed。**
+**当前状态：416 passed, 0 skipped, 0 failed。**
 
 ### 测试分类与审计
 
@@ -750,7 +745,7 @@ PYTHONPATH=scripts ./.venv/bin/python -m pytest \
 
 #### 当前状态
 
-核心测试集已稳定在 **418 个用例**（0 skipped）。
+核心测试集已稳定在 **416 个用例**（0 skipped）。
 
 ### 常用测试文档
 

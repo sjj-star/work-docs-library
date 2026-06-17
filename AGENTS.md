@@ -72,7 +72,6 @@ work-docs-library/
 │   ├── mcp_server.py             # MCP stdio server（JSON-RPC，stdout 隔离）
 │   ├── plugin_router.py          # Plugin 工具函数库（被 mcp_server / admin_tools 复用）
 │   ├── admin_tools.py            # 不暴露为 MCP 的内部管理命令入口
-│   ├── requirements.txt          # 向后兼容的备用依赖清单（主要依赖在 pyproject.toml）
 │   ├── .env / .env.example       # 环境变量（凭证等，gitignored）
 │   ├── prompts/                  # LLM 提示词文件（运行时读取，无需重启）
 │   │   ├── entity_extraction_system.txt
@@ -94,7 +93,7 @@ work-docs-library/
 │   │   ├── pdf_parser.py         # PDF 本地解析器（PyMuPDF + TOC 驱动章节识别 + 表格/图片检测）
 │   │   ├── office_parser.py      # DOCX / XLSX 解析器（代码存在，尚未接入 pipeline）
 │   │   └── image_utils.py        # 图片压缩与三分类（彩色/灰度/黑白）
-│   ├── tests/                    # pytest 测试集（418 passed, 0 skipped）
+│   ├── tests/                    # pytest 测试集（416 passed, 0 skipped）
 │   │   ├── conftest.py           # 三重环境隔离（清除 WORKDOCS_ 环境变量、阻止 load_dotenv、临时目录重定向）
 │   │   ├── fixtures/             # 测试 fixture（PDF 页样本、解析输出样本）
 │   │   └── test_*.py             # 各模块测试文件
@@ -136,7 +135,7 @@ cd /path/to/work-docs-library
 
 ### 测试执行
 ```bash
-# 完整测试集（当前状态：418 passed, 0 skipped, 0 failed）
+# 完整测试集（当前状态：416 passed, 0 skipped, 0 failed）
 cd /path/to/work-docs-library
 PYTHONPATH=scripts ./.venv/bin/python -m pytest scripts/tests/ -v
 
@@ -209,7 +208,7 @@ PYTHONPATH=scripts ./.venv/bin/python -m pytest \
   2. 阻止 `load_dotenv` 重新加载 `.env` 文件
   3. 重定向 Config 默认路径到临时目录（DB、FAISS、Graph 均隔离）
 - **回归即修复**：任何导致测试失败的变更必须当场修复
-- **418 个测试用例必须全部通过**（0 skipped）
+- **416 个测试用例必须全部通过**（0 skipped）
 
 ### 测试文件清单
 | 测试文件 | 用例数 | 说明 |
@@ -220,7 +219,7 @@ PYTHONPATH=scripts ./.venv/bin/python -m pytest \
 | `test_table_utils.py` | 4 | Markdown 表格规范化单元测试 |
 | `test_office_parser.py` | 3 | DOCX / XLSX 解析测试 |
 | `test_db.py` | 15 | SQLite 操作、事务管理 |
-| `test_vector_index.py` | 16 | FAISS IndexIDMap2 增删查、事务、迁移 |
+| `test_vector_index.py` | 14 | FAISS IndexIDMap2 增删查、事务 |
 | `test_llm_client.py` | 9 | LLM 客户端 Mock |
 | `test_config_env.py` | 13 | 环境变量配置优先级、默认值、敏感 key 脱敏 |
 | `test_chapter_parser.py` | 20 | ChapterParser 树形章节解析测试 |
@@ -308,7 +307,7 @@ monkeypatch.setattr(
 ### 必须询问用户的事项
 - 修改核心数据模型（`Chunk`、`Document`、`GraphEntity`、`GraphRelation` 的字段）
 - 修改数据库 Schema（新增/删除/修改表或字段）
-- 新增外部依赖（`pyproject.toml` / `requirements.txt` 变更）
+- 新增外部依赖（`pyproject.toml` 变更）
 - 修改 Pipeline 核心流程（解析 → 章节树 → batch 构建 → 实体提取 → 图谱 → 向量化）
 - 删除已有功能或文件
 - 涉及真实 API 调用的操作（测试除外）
@@ -402,7 +401,7 @@ monkeypatch.setattr(
 - ✅ **环境隔离三重机制**：彻底根治 `.env` 污染测试环境的问题
 - ✅ **存储粒度与查询粒度解耦（方案C）**：引入 `content_blocks` 表作为存储粒度，`heading_maps` 表作为查询粒度，batch 数量减少 40-50%
 - ✅ **FAISS 索引重构为 IndexIDMap2**：直接使用 block_db_id 作为存储 ID，移除 `_BLOCK_FAISS_OFFSET` 与手动 `_id_map`
-- ✅ **418 个测试全部通过**
+- ✅ **416 个测试全部通过**
 - ✅ **PDF Parser 表格检测增强（Milestone 1-4）**：`find_tables(strategy="lines_strict")`、caption-gated 预筛选、位域图重叠保护、全部 14 个 Magic Number 配置化（已移除 PyMuPDF4LLM fallback）
 - ✅ **PDF Parser 图片检测增强（Milestone 2）**：`page.get_image_info()` 过滤链、双路径提取
 - ✅ **性能基准测试**：TI (219页) 10.3s/0表格 → 46.2s/68表格；AMBA (585页) 8.7s/0表格 → 93.3s/22表格

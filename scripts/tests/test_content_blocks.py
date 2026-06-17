@@ -37,7 +37,7 @@ def test_build_content_blocks_basic():
     sec2 = ChapterNode(level=2, title="Section 2", content="Content 2.")
     root.children = [sec1, sec2]
 
-    content_blocks, heading_maps = _build_content_blocks_and_maps([root], max_chars=1000)
+    content_blocks, heading_maps = _build_content_blocks_and_maps([root])
 
     # 每个 section 一个 block
     assert len(content_blocks) == 2
@@ -58,7 +58,7 @@ def test_build_content_blocks_with_preface():
     sec1 = ChapterNode(level=2, title="Section 1", content="Content 1.")
     root.children = [sec1]
 
-    content_blocks, _ = _build_content_blocks_and_maps([root], max_chars=1000)
+    content_blocks, _ = _build_content_blocks_and_maps([root])
 
     assert len(content_blocks) == 1
     block = content_blocks[0]
@@ -77,7 +77,7 @@ def test_build_content_blocks_with_subsections():
     sec1.children = [sub1, sub2]
     root.children = [sec1]
 
-    content_blocks, heading_maps = _build_content_blocks_and_maps([root], max_chars=1000)
+    content_blocks, heading_maps = _build_content_blocks_and_maps([root])
 
     # 只有一个 section，一个 block
     assert len(content_blocks) == 1
@@ -105,7 +105,7 @@ def test_build_content_blocks_split_by_max_chars():
         sec1 = ChapterNode(level=2, title="Section 1", content=long_content)
         root.children = [sec1]
 
-        content_blocks, heading_maps = _build_content_blocks_and_maps([root], max_chars=400)
+        content_blocks, heading_maps = _build_content_blocks_and_maps([root])
 
         # 应切分为至少 2 个 blocks
         assert len(content_blocks) >= 2
@@ -125,7 +125,7 @@ def test_build_content_blocks_seq_index():
     sec2 = ChapterNode(level=2, title="Section 2", content="B.")
     root.children = [sec1, sec2]
 
-    content_blocks, _ = _build_content_blocks_and_maps([root], max_chars=1000)
+    content_blocks, _ = _build_content_blocks_and_maps([root])
 
     seq_indices = [block["seq_index"] for block in content_blocks]
     assert seq_indices == list(range(len(content_blocks)))
@@ -137,7 +137,7 @@ def test_build_content_blocks_block_id_format():
     sec1 = ChapterNode(level=2, title="Section 1", content="A.")
     root.children = [sec1]
 
-    content_blocks, _ = _build_content_blocks_and_maps([root], max_chars=1000)
+    content_blocks, _ = _build_content_blocks_and_maps([root])
 
     assert len(content_blocks) == 1
     assert content_blocks[0]["block_id"] == "b_0"
@@ -149,7 +149,7 @@ def test_build_content_blocks_parent_heading_none():
     sec1 = ChapterNode(level=2, title="Section 1", content="A.")
     root.children = [sec1]
 
-    _, heading_maps = _build_content_blocks_and_maps([root], max_chars=1000)
+    _, heading_maps = _build_content_blocks_and_maps([root])
 
     sec1_hm = next(hm for hm in heading_maps if hm["heading_title"] == "Section 1")
     assert sec1_hm["parent_heading"] is None
@@ -166,7 +166,7 @@ def test_build_content_blocks_content_hash_consistency():
     sec1.children = [sub1]
     root.children = [sec1]
 
-    content_blocks, _ = _build_content_blocks_and_maps([root], max_chars=1000)
+    content_blocks, _ = _build_content_blocks_and_maps([root])
 
     # content_blocks 中 Section 1 包含聚合内容（Original + Sub）
     sec_block = next(b for b in content_blocks if b["section_title"] == "Section 1")

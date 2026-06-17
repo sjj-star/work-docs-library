@@ -39,7 +39,6 @@ class Config:
 
     DB_PATH: Path = _SKILL_ROOT / "knowledge_base" / "workdocs.db"
     FAISS_INDEX_PATH: Path = _SKILL_ROOT / "knowledge_base" / "faiss.index"
-    ID_MAP_PATH: Path = _SKILL_ROOT / "knowledge_base" / "id_map.json"
     PROMPT_DIR: Path = _SKILL_ROOT / "scripts" / "prompts"
 
     # LLM 对话模型配置（总结用）
@@ -128,9 +127,6 @@ class Config:
     def _initialize_numeric_configs(cls):
         """初始化数值类型的配置（在类定义后调用）."""
         cls.EMBEDDING_DIMENSION = int(_resolve_config("WORKDOCS_EMBEDDING_DIMENSION", "1024"))
-        # FAISS ID 偏移：仅用于旧格式（IndexFlatIP + id_map.json）迁移时减去偏移，
-        # 新格式（IndexIDMap2）直接使用 block_db_id 作为 FAISS 存储 ID，不再使用偏移
-        cls.BLOCK_FAISS_OFFSET = int(_resolve_config("WORKDOCS_BLOCK_FAISS_OFFSET", "0"))
         cls.LLM_BATCH_MAX_CHARS = int(_resolve_config("WORKDOCS_LLM_BATCH_MAX_CHARS", "10000"))
         cls.BLOCK_MAX_CHARS = int(_resolve_config("WORKDOCS_BLOCK_MAX_CHARS", "6000"))
         cls.LLM_BATCH_TIMEOUT = int(_resolve_config("WORKDOCS_LLM_BATCH_TIMEOUT", "3600"))

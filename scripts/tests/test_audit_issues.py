@@ -42,7 +42,6 @@ def test_faiss_duplicate_vectors_rejected(tmp_path, monkeypatch):
     修复后：add_batch 应跳过已存在的 db_id，只保留一个向量。
     """
     monkeypatch.setattr(Config, "FAISS_INDEX_PATH", tmp_path / "faiss.index")
-    monkeypatch.setattr(Config, "ID_MAP_PATH", tmp_path / "id_map.json")
     vec = VectorIndex(dim=4)
 
     # 首次添加
@@ -69,7 +68,6 @@ def test_bridge_sync_failure_graceful(tmp_path, monkeypatch):
     """
     monkeypatch.setattr(Config, "DB_PATH", tmp_path / "workdocs.db")
     monkeypatch.setattr(Config, "FAISS_INDEX_PATH", tmp_path / "faiss.index")
-    monkeypatch.setattr(Config, "ID_MAP_PATH", tmp_path / "id_map.json")
     monkeypatch.setattr(Config, "GRAPH_OUTPUT_DIR", "graphs")
     monkeypatch.setattr(Config, "EMBEDDING_DIMENSION", 4)
 
@@ -265,7 +263,6 @@ def test_ingest_partial_merge_rollback(tmp_path, monkeypatch):
     monkeypatch.setattr(Config, "DB_PATH", tmp_path / "workdocs.db")
     monkeypatch.setattr(Config, "GRAPH_OUTPUT_DIR", "graphs")
     monkeypatch.setattr(Config, "FAISS_INDEX_PATH", tmp_path / "faiss.index")
-    monkeypatch.setattr(Config, "ID_MAP_PATH", tmp_path / "id_map.json")
     monkeypatch.setattr(Config, "EMBEDDING_DIMENSION", 4)
 
     db = KnowledgeDB()
@@ -325,7 +322,6 @@ def test_faiss_remove_doc_consistency(tmp_path, monkeypatch):
     这是一个回归测试，确保 IndexIDMap2 的 remove_ids 逻辑没有 bug。
     """
     monkeypatch.setattr(Config, "FAISS_INDEX_PATH", tmp_path / "faiss.index")
-    monkeypatch.setattr(Config, "ID_MAP_PATH", tmp_path / "id_map.json")
     vec = VectorIndex(dim=4)
 
     # 添加 5 个正交向量（确保搜索结果唯一确定）
@@ -372,7 +368,6 @@ def test_stage6_sqlite_failure_rolls_back_faiss(tmp_path, monkeypatch):
 
     monkeypatch.setattr(Config, "DB_PATH", tmp_path / "workdocs.db")
     monkeypatch.setattr(Config, "FAISS_INDEX_PATH", tmp_path / "faiss.index")
-    monkeypatch.setattr(Config, "ID_MAP_PATH", tmp_path / "id_map.json")
     monkeypatch.setattr(Config, "EMBEDDING_DIMENSION", 4)
 
     db = KnowledgeDB()
@@ -419,7 +414,7 @@ def test_stage6_sqlite_failure_rolls_back_faiss(tmp_path, monkeypatch):
         pipe.stage6_submit_embed_batches("doc1", embed_jsonl)
 
     # FAISS 应无新增向量
-    vec = VectorIndex(dim=4, index_path=Config.FAISS_INDEX_PATH, id_map_path=Config.ID_MAP_PATH)
+    vec = VectorIndex(dim=4, index_path=Config.FAISS_INDEX_PATH)
     assert vec._db_ids == set()
     assert vec.search([1.0, 0.0, 0.0, 0.0], top_k=1) == []
 
@@ -441,7 +436,6 @@ def test_stage6_faiss_failure_does_not_modify_sqlite(tmp_path, monkeypatch):
 
     monkeypatch.setattr(Config, "DB_PATH", tmp_path / "workdocs.db")
     monkeypatch.setattr(Config, "FAISS_INDEX_PATH", tmp_path / "faiss.index")
-    monkeypatch.setattr(Config, "ID_MAP_PATH", tmp_path / "id_map.json")
     monkeypatch.setattr(Config, "EMBEDDING_DIMENSION", 4)
 
     db = KnowledgeDB()

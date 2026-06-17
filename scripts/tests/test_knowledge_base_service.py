@@ -11,9 +11,7 @@ from core.vector_index import VectorIndex
 def test_kbservice_uses_provided_components(tmp_path):
     """KBS 使用传入的组件而非新建."""
     db = KnowledgeDB(db_path=tmp_path / "test.db")
-    vec = VectorIndex(
-        dim=4, index_path=tmp_path / "faiss.index", id_map_path=tmp_path / "id_map.json"
-    )
+    vec = VectorIndex(dim=4, index_path=tmp_path / "faiss.index")
     graph = NetworkXGraphStore()
     svc = KnowledgeBaseService(db=db, vec=vec, graph_store=graph)
     assert svc.db is db
@@ -25,7 +23,6 @@ def test_kbservice_get_document_progress(tmp_path, monkeypatch):
     """get_document_progress 返回正确的统计."""
     monkeypatch.setattr("core.config.Config.DB_PATH", tmp_path / "test.db")
     monkeypatch.setattr("core.config.Config.FAISS_INDEX_PATH", tmp_path / "faiss.index")
-    monkeypatch.setattr("core.config.Config.ID_MAP_PATH", tmp_path / "id_map.json")
 
     svc = KnowledgeBaseService()
     svc.db.upsert_document(Document(doc_id="d1", title="T", source_path="/x.pdf", file_type="pdf"))
@@ -61,7 +58,6 @@ def test_kbservice_get_chunk_content_by_chunk_id(tmp_path, monkeypatch):
     """get_chunk_content 通过 block_db_id 获取内容."""
     monkeypatch.setattr("core.config.Config.DB_PATH", tmp_path / "test.db")
     monkeypatch.setattr("core.config.Config.FAISS_INDEX_PATH", tmp_path / "faiss.index")
-    monkeypatch.setattr("core.config.Config.ID_MAP_PATH", tmp_path / "id_map.json")
 
     svc = KnowledgeBaseService()
     svc.db.upsert_document(Document(doc_id="d1", title="T", source_path="/x.pdf", file_type="pdf"))
@@ -173,7 +169,6 @@ def test_kbservice_list_documents_empty(tmp_path, monkeypatch):
     """list_documents 空库返回空列表."""
     monkeypatch.setattr("core.config.Config.DB_PATH", tmp_path / "test.db")
     monkeypatch.setattr("core.config.Config.FAISS_INDEX_PATH", tmp_path / "faiss.index")
-    monkeypatch.setattr("core.config.Config.ID_MAP_PATH", tmp_path / "id_map.json")
 
     svc = KnowledgeBaseService()
     assert svc.list_documents() == []
@@ -183,7 +178,6 @@ def test_kbservice_query_blocks_by_doc(tmp_path, monkeypatch):
     """query_blocks_by_doc 返回文档的所有 blocks."""
     monkeypatch.setattr("core.config.Config.DB_PATH", tmp_path / "test.db")
     monkeypatch.setattr("core.config.Config.FAISS_INDEX_PATH", tmp_path / "faiss.index")
-    monkeypatch.setattr("core.config.Config.ID_MAP_PATH", tmp_path / "id_map.json")
 
     svc = KnowledgeBaseService()
     svc.db.upsert_document(Document(doc_id="d1", title="T", source_path="/x.pdf", file_type="pdf"))
@@ -209,7 +203,6 @@ def test_bridge_rebuild_from_db(tmp_path, monkeypatch):
     """Bridge 从 SQLite 全量重建，正确解析 metadata 中的实体."""
     monkeypatch.setattr("core.config.Config.DB_PATH", tmp_path / "test.db")
     monkeypatch.setattr("core.config.Config.FAISS_INDEX_PATH", tmp_path / "faiss.index")
-    monkeypatch.setattr("core.config.Config.ID_MAP_PATH", tmp_path / "id_map.json")
 
     svc = KnowledgeBaseService()
     svc.db.upsert_document(Document(doc_id="d1", title="T", source_path="/x.pdf", file_type="pdf"))
@@ -305,7 +298,6 @@ def test_sync_bridge_for_doc(tmp_path, monkeypatch):
     """_sync_bridge_for_doc 正确同步指定文档的索引."""
     monkeypatch.setattr("core.config.Config.DB_PATH", tmp_path / "test.db")
     monkeypatch.setattr("core.config.Config.FAISS_INDEX_PATH", tmp_path / "faiss.index")
-    monkeypatch.setattr("core.config.Config.ID_MAP_PATH", tmp_path / "id_map.json")
 
     svc = KnowledgeBaseService()
     svc.db.upsert_document(Document(doc_id="d1", title="T", source_path="/x.pdf", file_type="pdf"))
@@ -338,7 +330,6 @@ def test_find_chunks_by_entity(tmp_path, monkeypatch):
     """find_chunks_by_entity 通过桥接索引 O(1) 反向查找 block."""
     monkeypatch.setattr("core.config.Config.DB_PATH", tmp_path / "test.db")
     monkeypatch.setattr("core.config.Config.FAISS_INDEX_PATH", tmp_path / "faiss.index")
-    monkeypatch.setattr("core.config.Config.ID_MAP_PATH", tmp_path / "id_map.json")
 
     svc = KnowledgeBaseService()
     svc.db.upsert_document(Document(doc_id="d1", title="T", source_path="/x.pdf", file_type="pdf"))
@@ -377,7 +368,6 @@ def test_chunk_to_entities_and_entity_to_chunks(tmp_path, monkeypatch):
     """原子操作 _chunk_to_entities 和 _entity_to_chunks 正确工作."""
     monkeypatch.setattr("core.config.Config.DB_PATH", tmp_path / "test.db")
     monkeypatch.setattr("core.config.Config.FAISS_INDEX_PATH", tmp_path / "faiss.index")
-    monkeypatch.setattr("core.config.Config.ID_MAP_PATH", tmp_path / "id_map.json")
 
     svc = KnowledgeBaseService()
     svc.db.upsert_document(Document(doc_id="d1", title="T", source_path="/x.pdf", file_type="pdf"))
@@ -399,7 +389,6 @@ def test_get_chunk_deep_copy(tmp_path, monkeypatch):
     """_get_chunk 返回深拷贝，修改不影响原数据."""
     monkeypatch.setattr("core.config.Config.DB_PATH", tmp_path / "test.db")
     monkeypatch.setattr("core.config.Config.FAISS_INDEX_PATH", tmp_path / "faiss.index")
-    monkeypatch.setattr("core.config.Config.ID_MAP_PATH", tmp_path / "id_map.json")
 
     svc = KnowledgeBaseService()
     svc.db.upsert_document(Document(doc_id="d1", title="T", source_path="/x.pdf", file_type="pdf"))
@@ -419,7 +408,6 @@ def test_submit_feedback_syncs_relation_score(tmp_path, monkeypatch):
     """关系反馈提交后同步更新内存图中的 feedback_score."""
     monkeypatch.setattr("core.config.Config.DB_PATH", tmp_path / "test.db")
     monkeypatch.setattr("core.config.Config.FAISS_INDEX_PATH", tmp_path / "faiss.index")
-    monkeypatch.setattr("core.config.Config.ID_MAP_PATH", tmp_path / "id_map.json")
 
     svc = KnowledgeBaseService()
     # 先创建关系
@@ -470,7 +458,6 @@ def test_bridge_rebuild_with_content_blocks(tmp_path, monkeypatch):
 
     monkeypatch.setattr("core.config.Config.DB_PATH", tmp_path / "test.db")
     monkeypatch.setattr("core.config.Config.FAISS_INDEX_PATH", tmp_path / "faiss.index")
-    monkeypatch.setattr("core.config.Config.ID_MAP_PATH", tmp_path / "id_map.json")
 
     svc = KnowledgeBaseService()
     svc.db.upsert_document(Document(doc_id="d1", title="T", source_path="/x.pdf", file_type="pdf"))
