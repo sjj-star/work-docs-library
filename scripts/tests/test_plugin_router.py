@@ -1100,3 +1100,30 @@ def test_tool_ingest_rejects_unsafe_path():
     result = plugin_router.tool_ingest({"path": "../../etc/passwd"})
     assert result["success"] is False
     assert "unsafe" in result["error"].lower() or "outside" in result["error"].lower()
+
+
+def test_tool_evaluate(patched_config, monkeypatch):
+    """tool_evaluate 应调用 KnowledgeBaseService.evaluate_dataset 并返回结果."""
+    from plugin_router import tool_evaluate
+
+    def fake_evaluate(self, dataset_name, retriever, top_k):
+        return {
+            "num_questions": 1,
+            "avg_hit_rate@5": 1.0,
+            "avg_mrr": 1.0,
+            "avg_ndcg@5": 1.0,
+        }
+
+    monkeypatch.setattr(
+        "core.knowledge_base_service.KnowledgeBaseService.evaluate_dataset",
+        fake_evaluate,
+    )
+
+    result = tool_evaluate({"dataset_name": "baseline"})
+    assert result["success"] is True
+    assert result["dataset_name"] == "baseline"
+    assert result["avg_hit_rate@5"] == 1.0
+
+    result_missing = tool_evaluate({})
+    assert result_missing["success"] is False
+    assert "dataset_name" in result_missing["error"]

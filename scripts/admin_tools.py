@@ -36,6 +36,7 @@ _ADMIN_COMMANDS: dict[str, str] = {
     "stage5_build_embed_jsonl": "doc_build_embed_jsonl",
     "stage6_submit_embed_batches": "doc_submit_embed_batches",
     "reprocess": "reprocess",
+    "run_eval": "evaluate",
     "rebuild_global_graph": "rebuild_global_graph",
     "graph_upsert_entity": "graph_upsert_entity",
     "graph_delete_entity": "graph_delete_entity",

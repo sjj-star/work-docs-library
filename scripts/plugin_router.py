@@ -352,6 +352,30 @@ def tool_reprocess(params: dict) -> dict:
         return {"success": False, "error": str(e)}
 
 
+def tool_evaluate(params: dict) -> dict:
+    """运行评估数据集.
+
+    参数:
+        dataset_name: 评估数据集名称（required）
+        retriever: 检索器类型，默认 "semantic"
+        top_k: 返回结果数量，默认由 Config.PLUGIN_SEARCH_TOP_K 决定
+    """
+    dataset_name = params.get("dataset_name")
+    if not dataset_name:
+        return {"success": False, "error": "Missing required parameter: dataset_name"}
+
+    svc = _get_service()
+    try:
+        result = svc.evaluate_dataset(
+            dataset_name=dataset_name,
+            retriever=params.get("retriever", "semantic"),
+            top_k=params.get("top_k", Config.PLUGIN_SEARCH_TOP_K),
+        )
+        return {"success": True, "dataset_name": dataset_name, **result}
+    except ValueError as e:
+        return {"success": False, "error": str(e)}
+
+
 # ---------------------------------------------------------------------------
 # 状态与调试工具
 # ---------------------------------------------------------------------------
@@ -1150,4 +1174,5 @@ TOOL_MAP = {
     "graph_conflicts": tool_graph_conflicts,
     "graph_provenance": tool_graph_provenance,
     "rebuild_global_graph": tool_rebuild_global_graph,
+    "evaluate": tool_evaluate,
 }
