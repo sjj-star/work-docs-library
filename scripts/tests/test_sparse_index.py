@@ -47,9 +47,16 @@ def test_bm25_sparse_index_empty_db(tmp_path):
 
 
 def test_bm25_tokenize():
-    assert "spi_reset" in BM25SparseIndex._tokenize("SPI_reset")
-    assert "hello" in BM25SparseIndex._tokenize("Hello 世界")
-    assert "世界" in BM25SparseIndex._tokenize("Hello 世界")
+    tokens = BM25SparseIndex._tokenize("SPI_reset")
+    assert "spi_reset" in tokens
+    tokens = BM25SparseIndex._tokenize("Hello 世界")
+    assert "hello" in tokens
+    assert "世界" in tokens
+    # 跨非 CJK 不应产生 bigram
+    tokens = BM25SparseIndex._tokenize("中foo文")
+    assert "中文" not in tokens
+    assert "中" in tokens
+    assert "文" in tokens
 
 
 def test_bm25_empty_query(sample_db):
@@ -104,6 +111,26 @@ def test_bm25_from_blocks():
     idx = BM25SparseIndex.from_blocks(blocks)
     assert idx.index_info()["num_blocks"] == 3
     assert idx.index_info()["built"] is True
+    hits = idx.search("SPI reset", top_k=5)
+    assert len(hits) > 0
+    assert hits[0][0] == 1
+
+
+def test_from_blocks_invalid_block():
+    with pytest.raises(ValueError, match="missing required field 'id'"):
+        BM25SparseIndex.from_blocks([{"content": "no id"}])
+
+    with pytest.raises(ValueError, match="invalid content type"):
+        BM25SparseIndex.from_blocks([{"id": 1, "content": None}])
+
+
+def test_from_blocks_builds_index():
+    blocks = [
+        {"id": 1, "content": "SPI reset sequence"},
+        {"id": 2, "content": "GPIO configuration"},
+        {"id": 3, "content": "Timer interrupt handling"},
+    ]
+    idx = BM25SparseIndex.from_blocks(blocks)
     hits = idx.search("SPI reset", top_k=5)
     assert len(hits) > 0
     assert hits[0][0] == 1

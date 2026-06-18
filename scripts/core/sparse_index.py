@@ -24,17 +24,18 @@ class BM25SparseIndex:
 
     @staticmethod
     def _tokenize(text: str) -> list[str]:
-        """分词：英文数字下划线词元 + CJK 2-gram + 其他符号."""
+        """分词：英文/数字标识符 + CJK 连续字符 2-gram + 其他符号."""
         text = text.lower()
-        # English words, numbers, identifiers
-        tokens = re.findall(r"[a-zA-Z0-9_]+", text)
-        # CJK characters: use 2-gram sliding window for better phrase retention
-        cjk_chars = re.findall(r"[\u4e00-\u9fff]", text)
-        for i in range(len(cjk_chars) - 1):
-            tokens.append(cjk_chars[i] + cjk_chars[i + 1])
-        # Other non-whitespace, non-alnum symbols as single tokens
-        symbols = re.findall(r"[^\s\w\u4e00-\u9fff]", text)
-        tokens.extend(symbols)
+        tokens: list[str] = []
+        # 1. English words, numbers, identifiers
+        tokens.extend(re.findall(r"[a-zA-Z0-9_]+", text))
+        # 2. CJK runs: emit single chars and 2-grams within each contiguous run
+        for run in re.findall(r"[\u4e00-\u9fff]+", text):
+            tokens.extend(run)
+            for i in range(len(run) - 1):
+                tokens.append(run[i] + run[i + 1])
+        # 3. Other symbols
+        tokens.extend(re.findall(r"[^\s\w\u4e00-\u9fff]", text))
         return tokens
 
     @classmethod
@@ -45,9 +46,17 @@ class BM25SparseIndex:
         tokenized: list[list[str]] = []
         instance._corpus = []
         for block in blocks:
-            tokens = cls._tokenize(block["content"])
+            if not isinstance(block, dict):
+                raise ValueError(f"Block must be a dict, got {type(block)}")
+            block_id = block.get("id")
+            content = block.get("content")
+            if block_id is None:
+                raise ValueError("Block is missing required field 'id'")
+            if not isinstance(content, str):
+                raise ValueError(f"Block {block_id} has invalid content type: {type(content)}")
+            tokens = cls._tokenize(content)
             tokenized.append(tokens)
-            instance._corpus.append((block["id"], block["content"]))
+            instance._corpus.append((block_id, content))
         if tokenized:
             instance._index = BM25Okapi(tokenized)
         else:
