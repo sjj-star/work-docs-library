@@ -12,6 +12,7 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
+from core.agentic_search import AgenticSearchPlanner
 from core.config import Config
 from core.graph_store import GraphEntity, GraphRelation
 from core.knowledge_base_service import KnowledgeBaseService
@@ -548,6 +549,81 @@ def tool_semantic_search(params: dict) -> dict:
                 "results": [{"score": r["score"], **_chunk_to_dict(r["chunk"])} for r in results],
             }
     except RuntimeError as e:
+        return {"success": False, "error": str(e)}
+
+
+def tool_search_hybrid(params: dict) -> dict:
+    """混合检索：BM25 + FAISS 向量，RRF 融合.
+
+    参数:
+        text: 搜索文本（required）
+        top_k: 返回结果数量（默认 5）
+    """
+    text = params.get("text")
+    if not text:
+        return {"success": False, "error": "Missing required parameter: text"}
+    top_k = params.get("top_k", Config.PLUGIN_SEARCH_TOP_K)
+
+    svc = _get_service()
+    try:
+        results = svc.search_hybrid(str(text), top_k=top_k)
+        return {
+            "success": True,
+            "text": text,
+            "results": [{"score": r["score"], **_chunk_to_dict(r["chunk"])} for r in results],
+        }
+    except (RuntimeError, ValueError) as e:
+        return {"success": False, "error": str(e)}
+
+
+def tool_search_reranked(params: dict) -> dict:
+    """语义检索 + 重排序.
+
+    参数:
+        text: 搜索文本（required）
+        top_k: 返回结果数量（默认 5）
+        candidate_k: 候选结果数量（可选，默认不扩展）
+    """
+    text = params.get("text")
+    if not text:
+        return {"success": False, "error": "Missing required parameter: text"}
+    top_k = params.get("top_k", Config.PLUGIN_SEARCH_TOP_K)
+    candidate_k = params.get("candidate_k")
+
+    svc = _get_service()
+    try:
+        results = svc.search_reranked(str(text), top_k=top_k, candidate_k=candidate_k)
+        return {
+            "success": True,
+            "text": text,
+            "results": [{"score": r["score"], **_chunk_to_dict(r["chunk"])} for r in results],
+        }
+    except (RuntimeError, ValueError) as e:
+        return {"success": False, "error": str(e)}
+
+
+def tool_agentic_plan(params: dict) -> dict:
+    """把复杂问题分解为多个搜索步骤.
+
+    参数:
+        question: 问题文本（required）
+        context: 额外上下文（可选，默认 {}）
+    """
+    question = params.get("question")
+    if not question:
+        return {"success": False, "error": "Missing required parameter: question"}
+    context = params.get("context") or {}
+
+    try:
+        planner = AgenticSearchPlanner()
+        steps = planner.plan(str(question), context=context)
+        return {
+            "success": True,
+            "question": question,
+            "steps": [step.to_dict() for step in steps],
+        }
+    except Exception as e:
+        logger.exception("agentic_plan failed")
         return {"success": False, "error": str(e)}
 
 
@@ -1162,6 +1238,9 @@ TOOL_MAP = {
     "doc_build_embed_jsonl": tool_doc_build_embed_jsonl,
     "doc_submit_embed_batches": tool_doc_submit_embed_batches,
     "semantic_search": tool_semantic_search,
+    "search_hybrid": tool_search_hybrid,
+    "search_reranked": tool_search_reranked,
+    "agentic_plan": tool_agentic_plan,
     "query": tool_query,
     "status": tool_status,
     "toc": tool_toc,

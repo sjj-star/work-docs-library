@@ -11,8 +11,10 @@ from pathlib import Path
 import fitz
 import plugin_router
 import pytest
+from core.agentic_search import SearchStep
 from core.config import Config
 from core.db import KnowledgeDB
+from core.models import Chunk
 
 _SKILL_ROOT = Path(__file__).resolve().parent.parent
 
@@ -305,6 +307,131 @@ def test_get_content_missing_params():
 
 
 # ---------------------------------------------------------------------------
+# search_hybrid / search_reranked / agentic_plan tools
+# ---------------------------------------------------------------------------
+
+
+def test_search_hybrid_success(patched_config, monkeypatch):
+    """tool_search_hybrid 应返回混合检索结果."""
+
+    class FakeSvc:
+        def search_hybrid(self, text, top_k=5):
+            return [
+                {
+                    "score": 0.9,
+                    "chunk": Chunk(
+                        doc_id="doc1",
+                        chunk_id="c1",
+                        chunk_type="text",
+                        chapter_title="Chapter 1",
+                        content="SPI interface description",
+                    ),
+                }
+            ]
+
+    monkeypatch.setattr(plugin_router, "_get_service", lambda: FakeSvc())
+    result = plugin_router.tool_search_hybrid({"text": "SPI"})
+    assert result["success"] is True
+    assert result["text"] == "SPI"
+    assert len(result["results"]) == 1
+    assert result["results"][0]["score"] == 0.9
+    assert result["results"][0]["doc_id"] == "doc1"
+    assert "SPI interface description" in result["results"][0]["content_preview"]
+
+
+def test_search_hybrid_missing_text():
+    """tool_search_hybrid 缺少 text 时返回错误."""
+    result = plugin_router.tool_search_hybrid({})
+    assert result["success"] is False
+    assert "text" in result["error"]
+
+
+def test_search_reranked_success(patched_config, monkeypatch):
+    """tool_search_reranked 应返回重排序结果."""
+
+    class FakeSvc:
+        def search_reranked(self, text, top_k=5, candidate_k=None):
+            assert candidate_k == 20
+            return [
+                {
+                    "score": 0.95,
+                    "chunk": Chunk(
+                        doc_id="doc2",
+                        chunk_id="c2",
+                        chunk_type="text",
+                        chapter_title="Chapter 2",
+                        content="I2C bus protocol",
+                    ),
+                }
+            ]
+
+    monkeypatch.setattr(plugin_router, "_get_service", lambda: FakeSvc())
+    result = plugin_router.tool_search_reranked({"text": "I2C", "top_k": 3, "candidate_k": 20})
+    assert result["success"] is True
+    assert result["text"] == "I2C"
+    assert len(result["results"]) == 1
+    assert result["results"][0]["score"] == 0.95
+
+
+def test_search_reranked_missing_text():
+    """tool_search_reranked 缺少 text 时返回错误."""
+    result = plugin_router.tool_search_reranked({})
+    assert result["success"] is False
+    assert "text" in result["error"]
+
+
+def test_search_reranked_default_candidate_k(patched_config, monkeypatch):
+    """tool_search_reranked 不传 candidate_k 时默认为 None."""
+
+    class FakeSvc:
+        def search_reranked(self, text, top_k=5, candidate_k=None):
+            assert candidate_k is None
+            return []
+
+    monkeypatch.setattr(plugin_router, "_get_service", lambda: FakeSvc())
+    result = plugin_router.tool_search_reranked({"text": "UART"})
+    assert result["success"] is True
+    assert result["results"] == []
+
+
+def test_agentic_plan_success(monkeypatch):
+    """tool_agentic_plan 应返回搜索步骤列表."""
+
+    class FakePlanner:
+        def plan(self, question, context=None):
+            return [
+                SearchStep(
+                    step_type="semantic",
+                    query="SPI protocol",
+                    params={"top_k": 5},
+                    reason="Find SPI references",
+                ),
+                SearchStep(
+                    step_type="graph",
+                    query="SPI registers",
+                    params={"entity_type": "Register"},
+                    reason="Locate related registers",
+                ),
+            ]
+
+    monkeypatch.setattr(plugin_router, "AgenticSearchPlanner", FakePlanner)
+    result = plugin_router.tool_agentic_plan({"question": "What is SPI?"})
+    assert result["success"] is True
+    assert result["question"] == "What is SPI?"
+    assert len(result["steps"]) == 2
+    assert result["steps"][0]["step_type"] == "semantic"
+    assert result["steps"][0]["query"] == "SPI protocol"
+    assert result["steps"][1]["params"]["entity_type"] == "Register"
+
+
+def test_agentic_plan_missing_question():
+    """tool_agentic_plan 缺少 question 时返回错误."""
+    result = plugin_router.tool_agentic_plan({})
+    assert result["success"] is False
+    assert "question" in result["error"]
+
+
+# ---------------------------------------------------------------------------
 # kimi.plugin.json regression
 # ---------------------------------------------------------------------------
 
@@ -321,7 +448,7 @@ def test_kimi_plugin_json_mcp_server_uses_venv_python():
 
 
 def test_kimi_plugin_json_valid_schema():
-    """Test kimi.plugin.json follows the new spec and exposes 11 MCP tools via mcp_server."""
+    """Test kimi.plugin.json follows the new spec and exposes 14 MCP tools via mcp_server."""
     plugin_path = _SKILL_ROOT.parent / "kimi.plugin.json"
     data = json.loads(plugin_path.read_text(encoding="utf-8"))
     assert data.get("name") == "work-docs-library"
@@ -339,6 +466,9 @@ def test_kimi_plugin_json_valid_schema():
     assert set(mcp.MCP_TOOL_MAP.keys()) == {
         "ingest",
         "semantic_search",
+        "search_hybrid",
+        "search_reranked",
+        "agentic_plan",
         "query",
         "get_content",
         "status",

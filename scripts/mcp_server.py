@@ -11,6 +11,7 @@ from typing import Any
 
 from core.config import Config
 from plugin_router import (
+    tool_agentic_plan,
     tool_config,
     tool_get_content,
     tool_graph_conflicts,
@@ -19,6 +20,8 @@ from plugin_router import (
     tool_graph_query,
     tool_ingest,
     tool_query,
+    tool_search_hybrid,
+    tool_search_reranked,
     tool_semantic_search,
     tool_status,
     tool_toc,
@@ -31,6 +34,9 @@ logger = logging.getLogger("mcp_server")
 MCP_TOOL_MAP: dict[str, Any] = {
     "ingest": tool_ingest,
     "semantic_search": tool_semantic_search,
+    "search_hybrid": tool_search_hybrid,
+    "search_reranked": tool_search_reranked,
+    "agentic_plan": tool_agentic_plan,
     "query": tool_query,
     "get_content": tool_get_content,
     "status": tool_status,
@@ -68,6 +74,46 @@ MCP_TOOL_SCHEMAS: dict[str, dict] = {
             },
         },
         "required": ["text"],
+    },
+    "search_hybrid": {
+        "type": "object",
+        "properties": {
+            "text": {"type": "string", "description": "搜索文本"},
+            "top_k": {
+                "type": "integer",
+                "description": "返回结果数量",
+                "default": Config.PLUGIN_SEARCH_TOP_K,
+            },
+        },
+        "required": ["text"],
+    },
+    "search_reranked": {
+        "type": "object",
+        "properties": {
+            "text": {"type": "string", "description": "搜索文本"},
+            "top_k": {
+                "type": "integer",
+                "description": "返回结果数量",
+                "default": Config.PLUGIN_SEARCH_TOP_K,
+            },
+            "candidate_k": {
+                "type": "integer",
+                "description": "候选结果数量",
+            },
+        },
+        "required": ["text"],
+    },
+    "agentic_plan": {
+        "type": "object",
+        "properties": {
+            "question": {"type": "string", "description": "问题文本"},
+            "context": {
+                "type": "object",
+                "description": "额外上下文",
+                "default": {},
+            },
+        },
+        "required": ["question"],
     },
     "query": {
         "type": "object",

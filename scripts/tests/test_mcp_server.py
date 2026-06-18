@@ -44,7 +44,7 @@ class TestJsonRpcProtocol:
         tools = captured[0]["result"]["tools"]
         names = {t["name"] for t in tools}
         assert names == set(mcp.MCP_TOOL_MAP.keys())
-        assert len(tools) == 11
+        assert len(tools) == 14
         for tool in tools:
             assert "description" in tool
             assert tool["inputSchema"]["type"] == "object"
@@ -140,7 +140,7 @@ class TestStdioLoop:
         assert len(responses) == 2
         assert responses[0]["id"] == 1
         assert responses[1]["id"] == 2
-        assert len(responses[1]["result"]["tools"]) == 11
+        assert len(responses[1]["result"]["tools"]) == 14
 
 
 class TestIntegration:
