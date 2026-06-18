@@ -6,6 +6,7 @@ import sqlite3
 from collections.abc import Generator
 from contextlib import contextmanager
 from pathlib import Path
+from typing import Any
 
 from .config import Config
 from .models import Chapter, Document
@@ -602,3 +603,131 @@ class KnowledgeDB:
                 ),
             ).fetchone()
         return row["score"] or 0
+
+    # -- 状态统计（用于 status 工具） --
+
+    def count_documents_by_status(self) -> dict[str, int]:
+        """按状态统计文档数量."""
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT status, COUNT(*) as c FROM documents GROUP BY status"
+            ).fetchall()
+        return {row["status"]: row["c"] for row in rows}
+
+    def count_blocks_by_status(self, doc_id: str | None = None) -> dict[str, int]:
+        """按状态统计 content_blocks 数量，可限定文档."""
+        sql = "SELECT status, COUNT(*) as c FROM content_blocks WHERE 1=1"
+        params: list = []
+        if doc_id:
+            sql += " AND doc_id = ?"
+            params.append(doc_id)
+        sql += " GROUP BY status"
+        with self._connect() as conn:
+            rows = conn.execute(sql, params).fetchall()
+        result: dict[str, int] = {"pending": 0, "embedded": 0, "done": 0, "skipped": 0, "failed": 0}
+        for row in rows:
+            status = row["status"] or "pending"
+            result[status] = row["c"]
+        return result
+
+    def count_blocks_by_doc(self) -> list[dict]:
+        """按文档统计 content_blocks 数量及各状态数量."""
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT doc_id, status, COUNT(*) as c
+                FROM content_blocks
+                GROUP BY doc_id, status
+                ORDER BY doc_id
+                """
+            ).fetchall()
+        from collections import defaultdict
+        docs: dict[str, dict[str, int]] = defaultdict(
+            lambda: {"total": 0, "pending": 0, "embedded": 0, "done": 0, "skipped": 0, "failed": 0}
+        )
+        for row in rows:
+            doc_id = row["doc_id"]
+            status = row["status"] or "pending"
+            count = row["c"]
+            docs[doc_id]["total"] += count
+            docs[doc_id][status] = count
+        return [
+            {"doc_id": doc_id, **counts}
+            for doc_id, counts in sorted(docs.items())
+        ]
+
+    def count_headings(self) -> dict[str, Any]:
+        """统计 heading_maps 总数及层级分布."""
+        with self._connect() as conn:
+            total = conn.execute("SELECT COUNT(*) as c FROM heading_maps").fetchone()["c"]
+            level_rows = conn.execute(
+                "SELECT heading_level, COUNT(*) as c FROM heading_maps GROUP BY heading_level"
+            ).fetchall()
+        return {
+            "total": total,
+            "by_level": {str(row["heading_level"]): row["c"] for row in level_rows},
+        }
+
+    def count_headings_by_doc(self) -> list[dict]:
+        """按文档统计 heading_maps 数量."""
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT doc_id, COUNT(*) as c FROM heading_maps GROUP BY doc_id ORDER BY doc_id"
+            ).fetchall()
+        return [{"doc_id": row["doc_id"], "count": row["c"]} for row in rows]
+
+    def count_conflict_logs(self) -> int:
+        """冲突日志总数."""
+        with self._connect() as conn:
+            return conn.execute("SELECT COUNT(*) as c FROM conflict_logs").fetchone()["c"] or 0
+
+    def get_recent_conflicts(self, limit: int = 20) -> list[dict]:
+        """最近冲突日志."""
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM conflict_logs ORDER BY timestamp DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def count_feedback(self) -> dict[str, Any]:
+        """反馈统计：总数、平均评分、低分数量."""
+        with self._connect() as conn:
+            total = conn.execute("SELECT COUNT(*) as c FROM feedback").fetchone()["c"] or 0
+            avg_row = conn.execute("SELECT AVG(rating) as avg FROM feedback").fetchone()
+            low = conn.execute(
+                "SELECT COUNT(*) as c FROM feedback WHERE rating <= 0"
+            ).fetchone()["c"] or 0
+        return {
+            "total": total,
+            "average_rating": round(float(avg_row["avg"] or 0), 2),
+            "low_rating_count": low,
+        }
+
+    def get_low_rating_feedback(self, limit: int = 20) -> list[dict]:
+        """低分反馈记录."""
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM feedback WHERE rating <= 0 ORDER BY created_at DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def get_failed_documents(self, limit: int = 100) -> list[Document | None]:
+        """获取失败的文档列表."""
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT doc_id FROM documents WHERE status = ? ORDER BY extracted_at DESC LIMIT ?",
+                ("failed", limit),
+            ).fetchall()
+        return [self.get_document(row["doc_id"]) for row in rows if row["doc_id"]]
+
+    def get_pending_blocks_summary(self, limit: int = 20) -> list[dict]:
+        """获取 pending block 摘要."""
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT id, doc_id, block_id, seq_index FROM content_blocks "
+                "WHERE status = 'pending' ORDER BY doc_id, seq_index LIMIT ?",
+                (limit,),
+            ).fetchall()
+        return [dict(r) for r in rows]

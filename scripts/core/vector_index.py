@@ -5,6 +5,7 @@ import logging
 import os
 from pathlib import Path
 from types import TracebackType
+from typing import Any
 
 import faiss
 import numpy as np
@@ -245,6 +246,27 @@ class VectorIndex:
     def transaction(self) -> _VectorIndexTransaction:
         """返回事务上下文管理器."""
         return _VectorIndexTransaction(self)
+
+    def list_ids(self) -> set[int]:
+        """返回索引中所有存储的 block_db_id."""
+        return set(self._db_ids)
+
+    def index_info(self) -> dict[str, Any]:
+        """返回索引元信息，不加载全部向量."""
+        assert self._index is not None
+        index_path = Path(self.index_path)
+        size = index_path.stat().st_size if index_path.exists() else 0
+        index_type = type(self._index).__name__
+        inner = getattr(self._index, "index", None)
+        inner_type = type(inner).__name__ if inner else "unknown"
+        return {
+            "dimension": self.dim,
+            "total_vectors": int(self._index.ntotal),
+            "index_path": str(self.index_path),
+            "index_size_bytes": size,
+            "index_type": index_type,
+            "inner_type": inner_type,
+        }
 
     def search(self, query_vector: list[float], top_k: int = 5) -> list[tuple[int, float]]:
         """Search 函数."""

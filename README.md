@@ -166,7 +166,7 @@ work-docs-library/
 │   │   ├── pdf_parser.py         # PDF 本地解析器（fallback，输出与 BigModel 一致）
 │   │   ├── office_parser.py      # DOCX / XLSX 解析器（代码存在，尚未接入 pipeline）
 │   │   └── image_utils.py        # 图片压缩工具
-│   └── tests/                    # pytest 测试集（416 个用例）
+│   └── tests/                    # pytest 测试集（429 个用例）
 ├── knowledge_base/               # 运行时自动生成
 │   ├── workdocs.db               # SQLite 元数据
 │   ├── faiss.index               # FAISS 向量索引（IndexIDMap2，直接存储 block_db_id）
@@ -701,7 +701,7 @@ cd /path/to/work-docs-library
 PYTHONPATH=scripts ./.venv/bin/python -m pytest scripts/tests/ -v
 ```
 
-**当前状态：416 passed, 0 skipped, 0 failed。**
+**当前状态：429 passed, 0 skipped, 0 failed。**
 
 ### 测试分类与审计
 
@@ -749,7 +749,7 @@ PYTHONPATH=scripts ./.venv/bin/python -m pytest \
 
 #### 当前状态
 
-核心测试集已稳定在 **416 个用例**（0 skipped）。
+核心测试集已稳定在 **429 个用例**（0 skipped）。
 
 ### 常用测试文档
 

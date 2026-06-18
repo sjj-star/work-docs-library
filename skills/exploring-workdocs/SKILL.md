@@ -21,25 +21,28 @@ Combine semantic search and the cross-document knowledge graph to answer technic
 1. **Verify document state**
    - Call `mcp__workdocs__status` to confirm relevant documents are `done`.
 
-2. **Semantic search**
+2. **（管理员可选）先做质量检查**
+   - Call `mcp__workdocs__status` with `{"scope": "quality"}` 查看是否有失败文档、未嵌入 block、图谱不一致等全局问题。
+
+3. **Semantic search**
    - Call `mcp__workdocs__semantic_search` with `{"text": "...", "top_k": 8, "graph_depth": 1}`.
    - Try synonyms and abbreviations if the first search returns poor results.
 
-3. **Extract candidate entities**
+4. **Extract candidate entities**
    - From search results, identify entity names and types (Register, Module, Peripheral, etc.).
 
-4. **Graph lookup**
+5. **Graph lookup**
    - For each candidate entity, call `mcp__workdocs__graph_query` with `{"entity_type": "...", "name": "...", "depth": 1}`.
    - If comparing two entities, call `mcp__workdocs__graph_path` with `{"from_type": "...", "from_name": "...", "to_type": "...", "to_name": "..."}`.
 
-5. **Trace provenance and conflicts**
+6. **Trace provenance and conflicts**
    - Call `mcp__workdocs__graph_provenance` with `{"entity_type": "...", "name": "..."}` for central entities.
    - Call `mcp__workdocs__graph_conflicts` with `{"entity_type": "...", "name": "..."}` if documents disagree.
 
-6. **Read source chunks**
+7. **Read source chunks**
    - Call `mcp__workdocs__get_content` with `{"doc_id": "...", "chapter": "..."}` or `{"chunk_db_id": N}`.
 
-7. **Produce the structured report**
+8. **Produce the structured report**
    - **摘要**：2-4 sentences answering the question.
    - **关键实体**：type, name, properties, confidence, verified.
    - **关键关系**：from, to, type, properties.

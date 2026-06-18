@@ -27,6 +27,7 @@ logger = logging.getLogger("admin_tools")
 # 命令名到 tool 函数名的映射
 _ADMIN_COMMANDS: dict[str, str] = {
     "config": "config",
+    "status": "status",
     "stage1_parse": "doc_parse",
     "stage2_build_jsonl": "doc_build_batches",
     "stage2_build_batches": "doc_build_batches",  # 兼容别名

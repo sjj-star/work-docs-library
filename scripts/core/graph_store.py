@@ -508,6 +508,41 @@ class GraphStore(ABC):
         ...
 
     @abstractmethod
+    def stats_by_doc(self) -> dict[str, dict[str, int]]:
+        """按文档统计实体和关系数量."""
+        ...
+
+    @abstractmethod
+    def entity_type_distribution(self) -> dict[str, int]:
+        """按 entity_type 统计实体数量."""
+        ...
+
+    @abstractmethod
+    def relation_type_distribution(self) -> dict[str, int]:
+        """按 rel_type 统计关系数量."""
+        ...
+
+    @abstractmethod
+    def verified_stats(self) -> dict[str, int]:
+        """统计已验证的实体和关系数量."""
+        ...
+
+    @abstractmethod
+    def low_confidence_stats(self, threshold: float = 0.5) -> dict[str, int]:
+        """统计低置信度实体和关系数量."""
+        ...
+
+    @abstractmethod
+    def source_gaps(self) -> dict[str, int]:
+        """统计缺失来源的实体和关系数量."""
+        ...
+
+    @abstractmethod
+    def orphan_node_stats(self) -> dict[str, int]:
+        """统计孤立节点数量."""
+        ...
+
+    @abstractmethod
     def find_path(
         self,
         from_type: str,
@@ -1150,6 +1185,77 @@ class NetworkXGraphStore(GraphStore):
             "nodes": self._g.number_of_nodes(),
             "edges": self._g.number_of_edges(),
         }
+
+    def stats_by_doc(self) -> dict[str, dict[str, int]]:
+        """按文档统计实体和关系数量."""
+        from collections import defaultdict
+
+        result: dict[str, dict[str, int]] = defaultdict(lambda: {"entities": 0, "relations": 0})
+        for _nid, data in self._g.nodes(data=True):
+            for doc_id in _normalize_sids(data.get("source_doc_ids", set())):
+                result[doc_id]["entities"] += 1
+        for _u, _v, data in self._g.edges(data=True):
+            for doc_id in _normalize_sids(data.get("source_doc_ids", set())):
+                result[doc_id]["relations"] += 1
+        return dict(result)
+
+    def entity_type_distribution(self) -> dict[str, int]:
+        """按 entity_type 统计实体数量."""
+        from collections import Counter
+
+        return Counter(str(data.get("entity_type", "")) for _nid, data in self._g.nodes(data=True))
+
+    def relation_type_distribution(self) -> dict[str, int]:
+        """按 rel_type 统计关系数量."""
+        from collections import Counter
+
+        return Counter(str(data.get("rel_type", "")) for _u, _v, data in self._g.edges(data=True))
+
+    def verified_stats(self) -> dict[str, int]:
+        """统计已验证的实体和关系数量."""
+        verified_nodes = sum(
+            1 for _nid, data in self._g.nodes(data=True) if data.get("verified", False)
+        )
+        verified_edges = sum(
+            1 for _u, _v, data in self._g.edges(data=True) if data.get("verified", False)
+        )
+        return {"verified_entities": verified_nodes, "verified_relations": verified_edges}
+
+    def low_confidence_stats(self, threshold: float = 0.5) -> dict[str, int]:
+        """统计低置信度实体和关系数量."""
+        low_nodes = sum(
+            1
+            for _nid, data in self._g.nodes(data=True)
+            if float(data.get("confidence", 1.0)) < threshold
+        )
+        low_edges = sum(
+            1
+            for _u, _v, data in self._g.edges(data=True)
+            if float(data.get("confidence", 1.0)) < threshold
+        )
+        return {"low_confidence_entities": low_nodes, "low_confidence_relations": low_edges}
+
+    def source_gaps(self) -> dict[str, int]:
+        """统计缺失来源的实体和关系数量."""
+        nodes_without_source = sum(
+            1
+            for _nid, data in self._g.nodes(data=True)
+            if not _normalize_sids(data.get("source_doc_ids", set()))
+        )
+        edges_without_source = sum(
+            1
+            for _u, _v, data in self._g.edges(data=True)
+            if not _normalize_sids(data.get("source_doc_ids", set()))
+        )
+        return {
+            "entities_without_source": nodes_without_source,
+            "relations_without_source": edges_without_source,
+        }
+
+    def orphan_node_stats(self) -> dict[str, int]:
+        """统计孤立节点（无入边也无出边）数量."""
+        orphans = [nid for nid in self._g.nodes() if self._g.degree(nid) == 0]
+        return {"orphan_nodes": len(orphans)}
 
     def remove_document_contributions(self, doc_id: str) -> None:
         """从全局图中移除指定文档贡献的节点和边."""

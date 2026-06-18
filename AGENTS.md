@@ -97,7 +97,7 @@ work-docs-library/
 │   │   ├── pdf_parser.py         # PDF 本地解析器（PyMuPDF + TOC 驱动章节识别 + 表格/图片检测）
 │   │   ├── office_parser.py      # DOCX / XLSX 解析器（代码存在，尚未接入 pipeline）
 │   │   └── image_utils.py        # 图片压缩与三分类（彩色/灰度/黑白）
-│   ├── tests/                    # pytest 测试集（416 passed, 0 skipped）
+│   ├── tests/                    # pytest 测试集（429 passed, 0 skipped）
 │   │   ├── conftest.py           # 三重环境隔离（清除 WORKDOCS_ 环境变量、阻止 load_dotenv、临时目录重定向）
 │   │   ├── fixtures/             # 测试 fixture（PDF 页样本、解析输出样本）
 │   │   └── test_*.py             # 各模块测试文件
@@ -139,7 +139,7 @@ cd /path/to/work-docs-library
 
 ### 测试执行
 ```bash
-# 完整测试集（当前状态：416 passed, 0 skipped, 0 failed）
+# 完整测试集（当前状态：429 passed, 0 skipped, 0 failed）
 cd /path/to/work-docs-library
 PYTHONPATH=scripts ./.venv/bin/python -m pytest scripts/tests/ -v
 
@@ -212,7 +212,7 @@ PYTHONPATH=scripts ./.venv/bin/python -m pytest \
   2. 阻止 `load_dotenv` 重新加载 `.env` 文件
   3. 重定向 Config 默认路径到临时目录（DB、FAISS、Graph 均隔离）
 - **回归即修复**：任何导致测试失败的变更必须当场修复
-- **416 个测试用例必须全部通过**（0 skipped）
+- **429 个测试用例必须全部通过**（0 skipped）
 
 ### 测试文件清单
 | 测试文件 | 用例数 | 说明 |
@@ -239,6 +239,7 @@ PYTHONPATH=scripts ./.venv/bin/python -m pytest \
 | `test_pipeline_stages.py` | 31 | 六阶段 pipeline 拆分测试 |
 | `test_audit_issues.py` | 10 | 生产 bug/审计问题定向回归测试（含 FAISS/SQLite 原子性） |
 | `test_mcp_server.py` | 10 | MCP Server 工具注册与 JSON-RPC 调用测试 |
+| `test_status_tool.py` | 13 | 结构化状态仪表盘各 scope 测试 |
 
 ### Mock 方法
 使用 `monkeypatch.setattr` 替换客户端类方法：
@@ -407,7 +408,7 @@ monkeypatch.setattr(
 - ✅ **环境隔离三重机制**：彻底根治 `.env` 污染测试环境的问题
 - ✅ **存储粒度与查询粒度解耦（方案C）**：引入 `content_blocks` 表作为存储粒度，`heading_maps` 表作为查询粒度，batch 数量减少 40-50%
 - ✅ **FAISS 索引重构为 IndexIDMap2**：直接使用 block_db_id 作为存储 ID，移除 `_BLOCK_FAISS_OFFSET` 与手动 `_id_map`
-- ✅ **416 个测试全部通过**
+- ✅ **429 个测试全部通过**
 - ✅ **PDF Parser 表格检测增强（Milestone 1-4）**：`find_tables(strategy="lines_strict")`、caption-gated 预筛选、位域图重叠保护、全部 14 个 Magic Number 配置化（已移除 PyMuPDF4LLM fallback）
 - ✅ **PDF Parser 图片检测增强（Milestone 2）**：`page.get_image_info()` 过滤链、双路径提取
 - ✅ **性能基准测试**：TI (219页) 10.3s/0表格 → 46.2s/68表格；AMBA (585页) 8.7s/0表格 → 93.3s/22表格

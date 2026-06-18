@@ -15,6 +15,7 @@ from typing import Any
 from core.config import Config
 from core.graph_store import GraphEntity, GraphRelation
 from core.knowledge_base_service import KnowledgeBaseService
+from core.status_collector import StatusCollector
 
 _SKILL_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_SKILL_ROOT / "scripts"))
@@ -357,44 +358,81 @@ def tool_reprocess(params: dict) -> dict:
 
 
 def tool_status(params: dict) -> dict:
-    """列出文档或查看文档详情与进度.
+    """列出文档、查看文档详情，或返回知识库各维度结构化状态.
 
     参数:
-        doc_id: 可选，提供时返回该文档的详细状态和进度统计
+        doc_id: 可选，提供时返回该文档的详细状态和进度统计（与 scope=overview 兼容）
+        scope: 状态维度，可选值：
+            overview（默认）, documents, vectors, graph, blocks, headings,
+            conflicts, feedback, config, quality, ingest_pipeline, all
+        top_n: 列表类数据默认返回条数（默认 20）
     """
     svc = _get_service()
     doc_id = params.get("doc_id")
+    scope = params.get("scope", "overview")
+    top_n = params.get("top_n", 20)
+    if not isinstance(top_n, int) or top_n < 0:
+        top_n = 20
 
-    if doc_id:
-        # 文档详情 + 进度（原 progress 功能）
-        doc = svc.get_document(doc_id)
-        if not doc:
-            return {"success": False, "error": f"Document {doc_id} not found."}
-        stats = svc.get_document_progress(doc_id)
+    if scope == "overview":
+        if doc_id:
+            doc = svc.get_document(doc_id)
+            if not doc:
+                return {"success": False, "error": f"Document {doc_id} not found."}
+            stats = svc.get_document_progress(doc_id)
+            return {
+                "success": True,
+                "doc_id": doc_id,
+                "title": doc.title,
+                "status": doc.status,
+                "total_pages": doc.total_pages,
+                **stats,
+            }
+
+        docs = svc.list_documents()
         return {
             "success": True,
-            "doc_id": doc_id,
-            "title": doc.title,
-            "status": doc.status,
-            "total_pages": doc.total_pages,
-            **stats,
+            "documents": [
+                {
+                    "doc_id": d.doc_id,
+                    "title": d.title,
+                    "status": d.status,
+                    "total_pages": d.total_pages,
+                    "extracted_at": d.extracted_at,
+                }
+                for d in docs
+            ],
         }
 
-    # 文档列表（原 status 功能）
-    docs = svc.list_documents()
-    return {
-        "success": True,
-        "documents": [
-            {
-                "doc_id": d.doc_id,
-                "title": d.title,
-                "status": d.status,
-                "total_pages": d.total_pages,
-                "extracted_at": d.extracted_at,
-            }
-            for d in docs
-        ],
-    }
+    collector = StatusCollector(svc)
+    try:
+        if scope == "documents":
+            return collector.collect_documents_status(top_n)
+        if scope == "vectors":
+            return collector.collect_vectors_status()
+        if scope == "graph":
+            return collector.collect_graph_status()
+        if scope == "blocks":
+            return collector.collect_blocks_status(top_n)
+        if scope == "headings":
+            return collector.collect_headings_status()
+        if scope == "conflicts":
+            return collector.collect_conflicts_status(top_n)
+        if scope == "feedback":
+            return collector.collect_feedback_status(top_n)
+        if scope == "config":
+            return collector.collect_config_status()
+        if scope == "quality":
+            return collector.collect_quality_status()
+        if scope == "ingest_pipeline":
+            return collector.collect_ingest_pipeline_status()
+        if scope == "all":
+            return collector.collect_all(top_n)
+    except Exception as e:
+        logger.exception("status scope=%s failed", scope)
+        return {"success": False, "error": f"Status collection failed for scope '{scope}': {e}"}
+
+    return {"success": False, "error": f"Unknown scope: {scope}"}
 
 
 def tool_toc(params: dict) -> dict:

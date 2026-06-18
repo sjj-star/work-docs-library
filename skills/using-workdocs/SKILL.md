@@ -38,6 +38,7 @@ The work-docs-library plugin turns technical PDFs into a queryable knowledge bas
 | `mcp__workdocs__graph_provenance` | Trace entity to source doc/chunk |
 | `mcp__workdocs__graph_conflicts` | View property conflict logs |
 | `mcp__workdocs__config` | Show effective config (masked) |
+| `mcp__workdocs__status` | 状态仪表盘：支持 `scope=overview/documents/vectors/graph/blocks/headings/conflicts/feedback/config/quality/ingest_pipeline/all` |
 
 ## Rules
 
