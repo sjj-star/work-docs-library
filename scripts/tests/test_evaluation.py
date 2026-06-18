@@ -155,3 +155,77 @@ def test_faithfulness_metric_handles_non_json(monkeypatch):
     )
     assert result["score"] == 0.0
     assert result["supported_claims"] == []
+
+
+def test_faithfulness_metric_with_custom_client():
+    from core.evaluation import FaithfulnessMetric
+    from core.llm_chat_client import BaseLLMClient
+
+    class FakeClient(BaseLLMClient):
+        def chat(self, messages, temperature=0.3, **kwargs):
+            return (
+                '{"supported": ["The SPI reset starts with CS low."], '
+                '"unsupported": [], "not_found": []}'
+            )
+
+    metric = FaithfulnessMetric(client=FakeClient())
+    result = metric.score(
+        question="What is the SPI reset sequence?",
+        answer="The SPI reset starts with CS low.",
+        contexts=["To reset SPI, pull CS low first."],
+    )
+    assert result["score"] == 1.0
+    assert result["supported_claims"] == ["The SPI reset starts with CS low."]
+    assert result["unsupported_claims"] == []
+    assert result["not_found_claims"] == []
+
+
+def test_context_precision_metric_length_mismatch(monkeypatch):
+    from core.evaluation import ContextPrecisionMetric
+
+    monkeypatch.setattr(
+        "core.llm_chat_client.BaseLLMClient.chat",
+        lambda self, messages, **kwargs: '{"relevance": [true]}',
+    )
+    metric = ContextPrecisionMetric()
+    result = metric.score(
+        question="SPI reset sequence",
+        contexts=["Pull CS low first.", "This is unrelated."],
+    )
+    assert result["score"] == 0.0
+    assert result["relevance"] == [False, False]
+
+
+def test_context_precision_metric_non_list_relevance(monkeypatch):
+    from core.evaluation import ContextPrecisionMetric
+
+    monkeypatch.setattr(
+        "core.llm_chat_client.BaseLLMClient.chat",
+        lambda self, messages, **kwargs: '{"relevance": "yes"}',
+    )
+    metric = ContextPrecisionMetric()
+    result = metric.score(
+        question="SPI reset sequence",
+        contexts=["Pull CS low first.", "This is unrelated."],
+    )
+    assert result["score"] == 0.0
+    assert result["relevance"] == []
+
+
+def test_metric_with_empty_contexts(monkeypatch):
+    from core.evaluation import FaithfulnessMetric
+
+    monkeypatch.setattr(
+        "core.llm_chat_client.BaseLLMClient.chat",
+        lambda self, messages, **kwargs: "not json",
+    )
+    metric = FaithfulnessMetric()
+    result = metric.score(
+        question="What is the SPI reset sequence?",
+        answer="The SPI reset starts with CS low.",
+        contexts=[],
+    )
+    assert result["score"] == 0.0
+    assert result["supported_claims"] == []
+    assert result["unsupported_claims"] == []
+    assert result["not_found_claims"] == []

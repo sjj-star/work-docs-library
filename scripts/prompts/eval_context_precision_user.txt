@@ -1,8 +1,8 @@
 Question: {question}
 
-Retrieved contexts:
+Retrieved contexts (one per item):
 {contexts}
 
 Instructions:
-For each context, decide whether it contains information relevant to answering the question.
-Return the JSON object with a list of booleans.
+For each context above (in the same order), decide whether it contains information relevant to answering the question.
+Return a JSON object with a single key "relevance" whose value is a list of booleans, one per context.

@@ -25,29 +25,53 @@ def _parse_json_response(raw: str) -> dict[str, Any]:
         return {}
 
 
-class FaithfulnessMetric:
-    """Evaluate whether claims in an answer are supported by retrieved contexts."""
+class BaseJudgeMetric:
+    """Base class for LLM-as-judge metrics."""
 
     def __init__(self, client: BaseLLMClient | None = None) -> None:
         """Initialize the metric with an optional LLM client."""
         self.client = client or BaseLLMClient()
 
-    def score(self, question: str, answer: str, contexts: list[str]) -> dict[str, Any]:
-        """Compute the faithfulness score for the given answer and contexts."""
-        system = _load_prompt("eval_faithfulness_system")
-        user = _load_prompt("eval_faithfulness_user").format(
-            question=question,
-            answer=answer,
-            contexts="\n\n---\n\n".join(contexts),
-        )
+    def _format_prompt(self, name: str, **kwargs: Any) -> str:
+        return _load_prompt(name).format(**kwargs)
+
+    def _judge(
+        self,
+        system_prompt_name: str,
+        user_prompt_name: str,
+        **user_kwargs: Any,
+    ) -> dict[str, Any]:
+        system = _load_prompt(system_prompt_name)
+        user = self._format_prompt(user_prompt_name, **user_kwargs)
         raw = self.client.chat(
             [{"role": "system", "content": system}, {"role": "user", "content": user}],
             temperature=0.0,
         )
-        parsed = _parse_json_response(raw)
-        supported = parsed.get("supported", [])
-        unsupported = parsed.get("unsupported", [])
-        not_found = parsed.get("not_found", [])
+        return _parse_json_response(raw)
+
+    @staticmethod
+    def _ensure_list(value: Any, key: str) -> list[Any]:
+        if not isinstance(value, list):
+            logger.warning(f"Judge response key '{key}' is not a list: {value!r}")
+            return []
+        return value
+
+
+class FaithfulnessMetric(BaseJudgeMetric):
+    """Evaluate whether claims in an answer are supported by retrieved contexts."""
+
+    def score(self, question: str, answer: str, contexts: list[str]) -> dict[str, Any]:
+        """Compute the faithfulness score for the given answer and contexts."""
+        parsed = self._judge(
+            "eval_faithfulness_system",
+            "eval_faithfulness_user",
+            question=question,
+            answer=answer,
+            contexts="\n\n---\n\n".join(contexts),
+        )
+        supported = self._ensure_list(parsed.get("supported", []), "supported")
+        unsupported = self._ensure_list(parsed.get("unsupported", []), "unsupported")
+        not_found = self._ensure_list(parsed.get("not_found", []), "not_found")
         total = len(supported) + len(unsupported) + len(not_found)
         score = len(supported) / total if total > 0 else 0.0
         return {
@@ -58,28 +82,24 @@ class FaithfulnessMetric:
         }
 
 
-class ContextPrecisionMetric:
+class ContextPrecisionMetric(BaseJudgeMetric):
     """Evaluate whether retrieved contexts are relevant to the question."""
-
-    def __init__(self, client: BaseLLMClient | None = None) -> None:
-        """Initialize the metric with an optional LLM client."""
-        self.client = client or BaseLLMClient()
 
     def score(self, question: str, contexts: list[str]) -> dict[str, Any]:
         """Compute the precision score for the retrieved contexts."""
-        system = _load_prompt("eval_context_precision_system")
-        user = _load_prompt("eval_context_precision_user").format(
+        parsed = self._judge(
+            "eval_context_precision_system",
+            "eval_context_precision_user",
             question=question,
             contexts="\n\n---\n\n".join(f"[{i+1}] {ctx}" for i, ctx in enumerate(contexts)),
         )
-        raw = self.client.chat(
-            [{"role": "system", "content": system}, {"role": "user", "content": user}],
-            temperature=0.0,
-        )
-        parsed = _parse_json_response(raw)
-        relevance = parsed.get("relevance", [])
-        if not isinstance(relevance, list):
-            relevance = []
+        relevance = self._ensure_list(parsed.get("relevance"), "relevance")
+        if relevance and len(relevance) != len(contexts):
+            logger.warning(
+                f"Relevance length mismatch: expected {len(contexts)}, got {len(relevance)}. "
+                "Falling back to False padding to match context count."
+            )
+            relevance = [False] * len(contexts)
         total = len(relevance)
         relevant_count = sum(1 for r in relevance if r)
         score = relevant_count / total if total > 0 else 0.0
@@ -89,27 +109,21 @@ class ContextPrecisionMetric:
         }
 
 
-class ContextRecallMetric:
+class ContextRecallMetric(BaseJudgeMetric):
     """Evaluate whether ground-truth claims are present in retrieved contexts."""
-
-    def __init__(self, client: BaseLLMClient | None = None) -> None:
-        """Initialize the metric with an optional LLM client."""
-        self.client = client or BaseLLMClient()
 
     def score(self, ground_truth_answer: str, contexts: list[str]) -> dict[str, Any]:
         """Compute the recall score for the ground-truth answer against contexts."""
-        system = _load_prompt("eval_context_recall_system")
-        user = _load_prompt("eval_context_recall_user").format(
+        parsed = self._judge(
+            "eval_context_recall_system",
+            "eval_context_recall_user",
             ground_truth_answer=ground_truth_answer,
             contexts="\n\n---\n\n".join(contexts),
         )
-        raw = self.client.chat(
-            [{"role": "system", "content": system}, {"role": "user", "content": user}],
-            temperature=0.0,
+        attributable = self._ensure_list(parsed.get("attributable", []), "attributable")
+        not_attributable = self._ensure_list(
+            parsed.get("not_attributable", []), "not_attributable"
         )
-        parsed = _parse_json_response(raw)
-        attributable = parsed.get("attributable", [])
-        not_attributable = parsed.get("not_attributable", [])
         total = len(attributable) + len(not_attributable)
         score = len(attributable) / total if total > 0 else 0.0
         return {
