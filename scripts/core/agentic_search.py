@@ -21,7 +21,9 @@ logger = logging.getLogger(__name__)
 class SearchStep:
     """A single search step planned by AgenticSearchPlanner."""
 
-    step_type: str  # "semantic" | "graph" | "chapter" | "synthesize"
+    step_type: (
+        str  # "semantic" | "hybrid" | "reranked" | "graph" | "chapter" | "metadata" | "synthesize"
+    )
     query: str = ""
     params: dict[str, Any] = field(default_factory=dict)
     reason: str = ""
@@ -69,7 +71,15 @@ class AgenticSearchPlanner:
             if not isinstance(item, dict):
                 continue
             step_type = item.get("step_type", "")
-            if step_type not in {"semantic", "graph", "chapter", "synthesize"}:
+            if step_type not in {
+                "semantic",
+                "hybrid",
+                "reranked",
+                "graph",
+                "chapter",
+                "metadata",
+                "synthesize",
+            }:
                 logger.warning(f"Agentic planner returned unknown step_type: {step_type}")
                 continue
             steps.append(

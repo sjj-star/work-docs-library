@@ -134,3 +134,28 @@ def test_planner_ignores_non_dict_params(monkeypatch):
     planner = AgenticSearchPlanner()
     steps = planner.plan("?")
     assert steps[0].params == {}
+
+
+def test_planner_parses_all_step_types(monkeypatch):
+    def fake_chat(self, messages, **kwargs):
+        return (
+            '[{"step_type": "semantic", "query": "a"}, '
+            '{"step_type": "hybrid", "query": "b"}, '
+            '{"step_type": "reranked", "query": "c"}, '
+            '{"step_type": "graph", "query": "d"}, '
+            '{"step_type": "chapter", "query": "e"}, '
+            '{"step_type": "metadata", "query": "f"}, '
+            '{"step_type": "synthesize", "query": "g"}]'
+        )
+
+    monkeypatch.setattr("core.llm_chat_client.BaseLLMClient.chat", fake_chat)
+    planner = AgenticSearchPlanner()
+    steps = planner.plan("?")
+    assert len(steps) == 7
+    assert steps[0].step_type == "semantic"
+    assert steps[1].step_type == "hybrid"
+    assert steps[2].step_type == "reranked"
+    assert steps[3].step_type == "graph"
+    assert steps[4].step_type == "chapter"
+    assert steps[5].step_type == "metadata"
+    assert steps[6].step_type == "synthesize"

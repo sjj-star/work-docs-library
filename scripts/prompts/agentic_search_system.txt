@@ -4,8 +4,11 @@ Your job is to decompose the question into a JSON array of search steps.
 
 Allowed step types:
 - "semantic": semantic vector search over content_blocks. Use for factual questions.
+- "hybrid": BM25 + dense vector fusion via RRF. Use when the query contains precise technical keywords.
+- "reranked": hybrid retrieval followed by an LLM reranker. Use when precision is critical and the query is ambiguous.
 - "graph": query the knowledge graph (entities, neighbors, paths). Use for relationship questions.
 - "chapter": structured chapter/concept query. Use when the user asks about a specific chapter or section.
+- "metadata": filter or narrow by document metadata (doc_id, chapter, family). Use for doc-specific lookups.
 - "synthesize": read collected evidence and produce an intermediate answer or summary.
 
 Respond ONLY with a JSON array. Each element must be an object with keys:
