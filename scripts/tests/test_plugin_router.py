@@ -1127,3 +1127,19 @@ def test_tool_evaluate(patched_config, monkeypatch):
     result_missing = tool_evaluate({})
     assert result_missing["success"] is False
     assert "dataset_name" in result_missing["error"]
+
+
+def test_tool_evaluate_error(monkeypatch):
+    from plugin_router import tool_evaluate
+
+    def fake_evaluate_raise(self, dataset_name, retriever, top_k):
+        raise RuntimeError("dataset corrupt")
+
+    monkeypatch.setattr(
+        "core.knowledge_base_service.KnowledgeBaseService.evaluate_dataset",
+        fake_evaluate_raise,
+    )
+
+    result = tool_evaluate({"dataset_name": "broken"})
+    assert result["success"] is False
+    assert "dataset corrupt" in result["error"]

@@ -372,7 +372,8 @@ def tool_evaluate(params: dict) -> dict:
             top_k=params.get("top_k", Config.PLUGIN_SEARCH_TOP_K),
         )
         return {"success": True, "dataset_name": dataset_name, **result}
-    except ValueError as e:
+    except Exception as e:
+        logger.exception("evaluate failed")
         return {"success": False, "error": str(e)}
 
 
