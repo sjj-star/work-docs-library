@@ -1,13 +1,18 @@
 """Evaluation framework mechanism layer."""
 
+from __future__ import annotations
+
 import json
 import logging
 import math
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from .config import Config
 from .llm_chat_client import BaseLLMClient
 from .models import EvalDataset
+
+if TYPE_CHECKING:
+    from .knowledge_base_service import KnowledgeBaseService
 
 logger = logging.getLogger(__name__)
 
@@ -147,13 +152,16 @@ def mean_reciprocal_rank(retrieved_ids: list[int], relevant_ids: set[int]) -> fl
 
 
 def ndcg_at_k(retrieved_ids: list[int], relevance: dict[int, float], k: int) -> float:
-    """Compute Normalized Discounted Cumulative Gain at k."""
+    """Compute Normalized Discounted Cumulative Gain at k.
+
+    Uses the standard graded gain formula ``(2**rel - 1) / log2(i + 1)``.
+    """
     dcg = 0.0
     for i, rid in enumerate(retrieved_ids[:k], start=1):
         rel = relevance.get(rid, 0.0)
-        dcg += rel / math.log2(i + 1)
+        dcg += (2**rel - 1) / math.log2(i + 1)
     ideal_rels = sorted(relevance.values(), reverse=True)[:k]
-    idcg = sum(rel / math.log2(i + 1) for i, rel in enumerate(ideal_rels, start=1))
+    idcg = sum((2**rel - 1) / math.log2(i + 1) for i, rel in enumerate(ideal_rels, start=1))
     return dcg / idcg if idcg > 0 else 0.0
 
 
@@ -162,16 +170,41 @@ class EvalHarness:
 
     def __init__(
         self,
-        service,
+        service: KnowledgeBaseService,
         faithfulness: FaithfulnessMetric | None = None,
         context_precision: ContextPrecisionMetric | None = None,
         context_recall: ContextRecallMetric | None = None,
     ) -> None:
-        """Initialize harness with a service and optional judge metrics."""
+        """Initialize harness with a service and optional judge metrics.
+
+        Judge metrics are instantiated lazily so that retrieval-only evaluations
+        do not require an LLM API key.
+        """
         self.service = service
-        self.faithfulness = faithfulness or FaithfulnessMetric()
-        self.context_precision = context_precision or ContextPrecisionMetric()
-        self.context_recall = context_recall or ContextRecallMetric()
+        self._faithfulness = faithfulness
+        self._context_precision = context_precision
+        self._context_recall = context_recall
+
+    @property
+    def faithfulness(self) -> FaithfulnessMetric:
+        """Lazy judge metric for answer faithfulness."""
+        if self._faithfulness is None:
+            self._faithfulness = FaithfulnessMetric()
+        return self._faithfulness
+
+    @property
+    def context_precision(self) -> ContextPrecisionMetric:
+        """Lazy judge metric for retrieved-context precision."""
+        if self._context_precision is None:
+            self._context_precision = ContextPrecisionMetric()
+        return self._context_precision
+
+    @property
+    def context_recall(self) -> ContextRecallMetric:
+        """Lazy judge metric for ground-truth recall against contexts."""
+        if self._context_recall is None:
+            self._context_recall = ContextRecallMetric()
+        return self._context_recall
 
     def run_retrieval_eval(
         self,
@@ -195,7 +228,7 @@ class EvalHarness:
                 {
                     "question": question.question,
                     "retrieved_ids": retrieved_ids,
-                    "hit_rate@k": hit_rate_at_k(retrieved_ids, relevant_ids, top_k),
+                    f"hit_rate@{top_k}": hit_rate_at_k(retrieved_ids, relevant_ids, top_k),
                     "mrr": mean_reciprocal_rank(retrieved_ids, relevant_ids),
                     f"ndcg@{top_k}": ndcg_at_k(retrieved_ids, relevance, top_k),
                 }
@@ -210,7 +243,7 @@ class EvalHarness:
             "retriever": retriever,
             "top_k": top_k,
             "num_questions": len(results),
-            "avg_hit_rate@k": _avg("hit_rate@k"),
+            f"avg_hit_rate@{top_k}": _avg(f"hit_rate@{top_k}"),
             "avg_mrr": _avg("mrr"),
             f"avg_ndcg@{top_k}": _avg(f"ndcg@{top_k}"),
             "per_question": results,

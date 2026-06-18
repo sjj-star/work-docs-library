@@ -271,7 +271,9 @@ def test_eval_harness_retrieval(tmp_path, monkeypatch):
             return [(2, 0.8), (1, 0.7)]
 
     svc = KnowledgeBaseService(
-        db=db, vec=FakeVectorIndex(1024), graph_store=None  # type: ignore[arg-type]
+        db=db,
+        vec=FakeVectorIndex(1024),  # type: ignore[arg-type]
+        graph_store=None,
     )
 
     class FakeEmbedder:
@@ -305,5 +307,85 @@ def test_eval_harness_retrieval(tmp_path, monkeypatch):
 
     result = svc.evaluate_dataset("baseline", retriever="semantic", top_k=5)
     assert result["num_questions"] == 1
-    assert result["avg_hit_rate@k"] == 1.0
+    assert result["avg_hit_rate@5"] == 1.0
     assert result["avg_mrr"] > 0.0
+    assert "hit_rate@5" in result["per_question"][0]
+
+
+def test_ndcg_at_k_graded():
+    from core.evaluation import ndcg_at_k
+
+    relevance = {1: 3.0, 2: 2.0, 3: 1.0}
+    # Ideal ordering at k=3 retrieves [1, 2, 3]
+    assert ndcg_at_k([1, 2, 3], relevance, 3) == 1.0
+    # Reversed ordering is worse than ideal
+    assert ndcg_at_k([3, 2, 1], relevance, 3) < 1.0
+
+
+def test_run_retrieval_eval_empty_dataset():
+    from core.evaluation import EvalHarness
+    from core.models import EvalDataset
+
+    class FakeService:
+        def search_semantic(self, query, top_k=5):
+            return []
+
+    harness = EvalHarness(FakeService())  # type: ignore[arg-type]
+    ds = EvalDataset(name="empty", questions=[])
+    result = harness.run_retrieval_eval(ds, retriever="semantic", top_k=5)
+    assert result["num_questions"] == 0
+    assert result["avg_hit_rate@5"] == 0.0
+    assert result["avg_mrr"] == 0.0
+    assert result["avg_ndcg@5"] == 0.0
+    assert result["per_question"] == []
+
+
+def test_run_retrieval_eval_unsupported_retriever():
+    from core.evaluation import EvalHarness
+    from core.models import EvalDataset, EvalQuestion
+
+    class FakeService:
+        pass
+
+    harness = EvalHarness(FakeService())  # type: ignore[arg-type]
+    ds = EvalDataset(
+        name="bad", questions=[EvalQuestion(question="q", ground_truth_context_ids=[1])]
+    )
+    with pytest.raises(ValueError, match="Unsupported retriever"):
+        harness.run_retrieval_eval(ds, retriever="unknown", top_k=5)
+
+
+def test_run_rag_eval_returns_retrieval_metrics():
+    from core.evaluation import EvalHarness
+    from core.models import EvalDataset, EvalQuestion
+
+    class FakeChunk:
+        def __init__(self, chunk_id):
+            self.id = chunk_id
+
+    class FakeService:
+        def search_semantic(self, query, top_k=5):
+            return [{"chunk": FakeChunk(1)}]
+
+    harness = EvalHarness(FakeService())  # type: ignore[arg-type]
+    ds = EvalDataset(
+        name="rag",
+        questions=[EvalQuestion(question="q", ground_truth_context_ids=[1])],
+    )
+    result = harness.run_rag_eval(ds, retriever="semantic", top_k=5)
+    assert "avg_hit_rate@5" in result
+    assert "avg_mrr" in result
+    assert "avg_ndcg@5" in result
+    assert result["num_questions"] == 1
+
+
+def test_eval_harness_lazy_metrics():
+    from core.evaluation import EvalHarness
+
+    class FakeService:
+        pass
+
+    harness = EvalHarness(FakeService())  # type: ignore[arg-type]
+    assert harness._faithfulness is None
+    assert harness._context_precision is None
+    assert harness._context_recall is None
