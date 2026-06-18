@@ -1,0 +1,66 @@
+"""Hybrid retriever combining dense vector search and BM25 sparse search via RRF."""
+
+import logging
+
+from .config import Config
+from .sparse_index import BM25SparseIndex
+from .vector_index import VectorIndex
+
+logger = logging.getLogger(__name__)
+
+
+class RRFFusionRetriever:
+    """Reciprocal Rank Fusion 混合检索器：合并 BM25 与稠密向量排序."""
+
+    def __init__(
+        self,
+        vector_index: VectorIndex,
+        sparse_index: BM25SparseIndex,
+        k: float = 60.0,
+    ) -> None:
+        """Initialize the RRF fusion retriever.
+
+        Args:
+            vector_index: FAISS vector index for dense retrieval.
+            sparse_index: BM25 sparse index for lexical retrieval.
+            k: RRF constant controlling the score decay over rank.
+        """
+        self.vector_index = vector_index
+        self.sparse_index = sparse_index
+        self.k = k
+
+    def search(
+        self,
+        query_text: str,
+        embedder,
+        top_k: int = 10,
+        dense_top_k: int | None = None,
+        sparse_top_k: int | None = None,
+    ) -> list[tuple[int, float]]:
+        """Run dense + sparse retrieval and fuse with RRF.
+
+        Args:
+            query_text: The raw query string.
+            embedder: Object with an `embed(list[str]) -> list[list[float]]` method.
+            top_k: Number of fused results to return.
+            dense_top_k: Number of dense candidates. Defaults to Config.PLUGIN_BM25_TOP_K.
+            sparse_top_k: Number of sparse candidates. Defaults to Config.PLUGIN_BM25_TOP_K.
+
+        Returns:
+            List of (block_db_id, rrf_score) sorted by descending score.
+        """
+        dense_top_k = dense_top_k or Config.PLUGIN_BM25_TOP_K
+        sparse_top_k = sparse_top_k or Config.PLUGIN_BM25_TOP_K
+
+        emb = embedder.embed([query_text])[0]
+        dense_hits = self.vector_index.search(emb, top_k=dense_top_k)
+        sparse_hits = self.sparse_index.search(query_text, top_k=sparse_top_k)
+
+        scores: dict[int, float] = {}
+        for rank, (db_id, _score) in enumerate(dense_hits, start=1):
+            scores[db_id] = scores.get(db_id, 0.0) + 1.0 / (self.k + rank)
+        for rank, (db_id, _score) in enumerate(sparse_hits, start=1):
+            scores[db_id] = scores.get(db_id, 0.0) + 1.0 / (self.k + rank)
+
+        sorted_hits = sorted(scores.items(), key=lambda x: x[1], reverse=True)
+        return sorted_hits[:top_k]

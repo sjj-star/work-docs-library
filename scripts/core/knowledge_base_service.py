@@ -385,6 +385,26 @@ class KnowledgeBaseService:
                     results.append({"score": round(float(score), 4), "chunk": chunk})
         return results
 
+    def search_hybrid(self, text: str, top_k: int = Config.PLUGIN_SEARCH_TOP_K) -> list[dict]:
+        """混合检索：BM25 + FAISS 向量，RRF 融合.
+
+        Returns:
+            每个结果包含 score 和 chunk 基本信息
+            [{"score": float, "chunk": Chunk}, ...]
+        """
+        from .hybrid_retriever import RRFFusionRetriever
+        from .sparse_index import BM25SparseIndex
+
+        sparse = BM25SparseIndex(self.db)
+        retriever = RRFFusionRetriever(self.vec, sparse)
+        hits = retriever.search(text, self._get_embedder(), top_k=top_k)
+        results = []
+        for block_db_id, score in hits:
+            chunk = self._get_chunk(block_db_id)
+            if chunk:
+                results.append({"score": round(float(score), 4), "chunk": chunk})
+        return results
+
     def evaluate_dataset(
         self,
         dataset_name: str,
