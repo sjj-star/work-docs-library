@@ -113,18 +113,22 @@ def test_llm_reranker_passage_with_braces(monkeypatch):
 
 
 def test_llm_reranker_placeholder_collision(monkeypatch):
+    captured: list[str] = []
+
     def fake_chat(self, messages, **kwargs):
-        # The user prompt should contain the literal {passages} from the query,
-        # not have it substituted.
-        assert "{passages}" in messages[1]["content"]
+        captured.append(messages[1]["content"])
         return "[10]"
 
     monkeypatch.setattr("core.llm_chat_client.BaseLLMClient.chat", fake_chat)
     reranker = LLMReranker()
-    passages = [(1, "Text with {passages} substring")]
-    result = reranker.rank("query containing {num_passages}", passages)
+    passages = [(1, "Text with $passages substring")]
+    result = reranker.rank("query containing $num_passages", passages)
     assert len(result) == 1
     assert result[0][0] == 1
+    # The literal $passages from the passage should still be present in the prompt,
+    # not substituted by Template.safe_substitute.
+    assert "$passages" in captured[0]
+    assert "$num_passages" in captured[0]
 
 
 def test_llm_reranker_non_numeric_scores(monkeypatch):

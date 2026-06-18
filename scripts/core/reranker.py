@@ -16,9 +16,7 @@ class Reranker(ABC):
     """Abstract reranker interface."""
 
     @abstractmethod
-    def rank(
-        self, query: str, passages: list[tuple[int, str]]
-    ) -> list[tuple[int, float]]:
+    def rank(self, query: str, passages: list[tuple[int, str]]) -> list[tuple[int, float]]:
         """Return list of (block_db_id, score) sorted by descending relevance."""
 
 
@@ -62,9 +60,7 @@ class LLMReranker(Reranker):
         logger.warning(f"Reranker returned unexpected format: {raw[:200]}")
         return [0.0] * num_passages
 
-    def rank(
-        self, query: str, passages: list[tuple[int, str]]
-    ) -> list[tuple[int, float]]:
+    def rank(self, query: str, passages: list[tuple[int, str]]) -> list[tuple[int, float]]:
         """Score and sort passages by relevance to the query."""
         if not passages:
             return []
@@ -72,9 +68,7 @@ class LLMReranker(Reranker):
         system = self._load_prompt_template("rerank_passage_system").template
         user_template = self._load_prompt_template("rerank_passage_user")
 
-        numbered = "\n\n".join(
-            f"[{i+1}] {text}" for i, (_id, text) in enumerate(passages)
-        )
+        numbered = "\n\n".join(f"[{i + 1}] {text}" for i, (_id, text) in enumerate(passages))
         user = user_template.safe_substitute(
             query=query,
             passages=numbered,
