@@ -1,6 +1,6 @@
-Question: {question}
+Question: $question
 
-Context: {context}
+Context: $context
 
 Instructions:
 Decompose the question into the smallest number of search steps needed to answer it accurately.

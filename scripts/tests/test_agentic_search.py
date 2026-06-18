@@ -101,3 +101,36 @@ def test_planner_uses_custom_client(monkeypatch):
     steps = planner.plan("?")
     assert len(steps) == 1
     assert steps[0].step_type == "chapter"
+
+
+def test_planner_prompt_placeholder_collision(monkeypatch):
+    captured: list[str] = []
+
+    def fake_chat(self, messages, **kwargs):
+        captured.append(messages[1]["content"])
+        return '[{"step_type": "semantic", "query": "x"}]'
+
+    monkeypatch.setattr("core.llm_chat_client.BaseLLMClient.chat", fake_chat)
+    planner = AgenticSearchPlanner()
+    planner.plan("question with $context literal")
+    assert "$context" in captured[0]
+
+
+def test_planner_returns_empty_on_llm_error(monkeypatch):
+    def fake_chat(self, messages, **kwargs):
+        raise RuntimeError("LLM timeout")
+
+    monkeypatch.setattr("core.llm_chat_client.BaseLLMClient.chat", fake_chat)
+    planner = AgenticSearchPlanner()
+    steps = planner.plan("?")
+    assert steps == []
+
+
+def test_planner_ignores_non_dict_params(monkeypatch):
+    def fake_chat(self, messages, **kwargs):
+        return '[{"step_type": "semantic", "query": "x", "params": "bad"}]'
+
+    monkeypatch.setattr("core.llm_chat_client.BaseLLMClient.chat", fake_chat)
+    planner = AgenticSearchPlanner()
+    steps = planner.plan("?")
+    assert steps[0].params == {}

@@ -8,6 +8,7 @@ Skills and mechanisms live in code.
 import json
 import logging
 from dataclasses import dataclass, field
+from string import Template
 from typing import Any
 
 from .config import Config
@@ -43,12 +44,12 @@ class AgenticSearchPlanner:
         self.client = client or BaseLLMClient()
 
     @staticmethod
-    def _load_prompt(name: str) -> str:
-        """Load a prompt file from the prompts directory."""
+    def _load_prompt_template(name: str) -> Template:
+        """Load a prompt file and return it as a string.Template for safe substitution."""
         path = Config.PROMPT_DIR / f"{name}.txt"
-        if path.exists():
-            return path.read_text(encoding="utf-8")
-        return ""
+        if not path.exists():
+            raise FileNotFoundError(f"Prompt file not found: {path}")
+        return Template(path.read_text(encoding="utf-8"))
 
     @staticmethod
     def _parse_steps(raw: str) -> list[SearchStep]:
@@ -83,15 +84,19 @@ class AgenticSearchPlanner:
 
     def plan(self, question: str, context: dict[str, Any] | None = None) -> list[SearchStep]:
         """Decompose a complex question into SearchSteps."""
-        system = self._load_prompt("agentic_search_system")
-        user_template = self._load_prompt("agentic_search_user")
-        user = (
-            user_template
-            .replace("{question}", question)
-            .replace("{context}", json.dumps(context or {}, ensure_ascii=False))
+        system_template = self._load_prompt_template("agentic_search_system")
+        user_template = self._load_prompt_template("agentic_search_user")
+        user = user_template.safe_substitute(
+            question=question,
+            context=json.dumps(context or {}, ensure_ascii=False),
         )
-        raw = self.client.chat(
-            [{"role": "system", "content": system}, {"role": "user", "content": user}],
-            temperature=0.2,
-        )
+        system = system_template.template  # system prompt has no placeholders
+        try:
+            raw = self.client.chat(
+                [{"role": "system", "content": system}, {"role": "user", "content": user}],
+                temperature=0.2,
+            )
+        except Exception:
+            logger.exception("Agentic search planning failed")
+            return []
         return self._parse_steps(raw)
