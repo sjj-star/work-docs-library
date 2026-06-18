@@ -47,5 +47,63 @@ def test_bm25_sparse_index_empty_db(tmp_path):
 
 
 def test_bm25_tokenize():
-    assert BM25SparseIndex._tokenize("SPI_reset") == ["spi_reset"]
-    assert BM25SparseIndex._tokenize("Hello 世界") == ["hello", "世", "界"]
+    assert "spi_reset" in BM25SparseIndex._tokenize("SPI_reset")
+    assert "hello" in BM25SparseIndex._tokenize("Hello 世界")
+    assert "世界" in BM25SparseIndex._tokenize("Hello 世界")
+
+
+def test_bm25_empty_query(sample_db):
+    idx = BM25SparseIndex(sample_db)
+    assert idx.search("", top_k=5) == []
+
+
+def test_bm25_multi_document_search(tmp_path):
+    db = KnowledgeDB(db_path=tmp_path / "multi.db")
+    for doc_id in ("doc-a", "doc-b", "doc-c"):
+        db.upsert_document(
+            Document(
+                doc_id=doc_id,
+                title=f"Test {doc_id}",
+                source_path=f"/tmp/{doc_id}.pdf",
+                file_type="pdf",
+                total_pages=1,
+                chapters=[],
+                extracted_at="2026-01-01",
+                file_hash=doc_id,
+                status="done",
+            )
+        )
+    db.insert_block("doc-a", "ba1", "SPI protocol details", 0, {})
+    db.insert_block("doc-b", "bb1", "GPIO pin assignments", 0, {})
+    db.insert_block("doc-c", "bc1", "Timer interrupt handling", 0, {})
+    idx = BM25SparseIndex(db)
+
+    hits_spi = idx.search("SPI", top_k=5)
+    hits_gpio = idx.search("GPIO", top_k=5)
+
+    def _doc_id_of(block_id: int) -> str | None:
+        block = db.get_block_by_db_id(block_id)
+        return block["doc_id"] if block else None
+
+    assert any(_doc_id_of(bid) == "doc-a" for bid, _ in hits_spi)
+    assert any(_doc_id_of(bid) == "doc-b" for bid, _ in hits_gpio)
+
+
+def test_bm25_no_match_score_zero(sample_db):
+    idx = BM25SparseIndex(sample_db)
+    hits = idx.search("xyznonexistentterm", top_k=5)
+    assert hits == []
+
+
+def test_bm25_from_blocks():
+    blocks = [
+        {"id": 1, "content": "SPI reset sequence"},
+        {"id": 2, "content": "GPIO configuration unrelated"},
+        {"id": 3, "content": "Timer interrupt handling"},
+    ]
+    idx = BM25SparseIndex.from_blocks(blocks)
+    assert idx.index_info()["num_blocks"] == 3
+    assert idx.index_info()["built"] is True
+    hits = idx.search("SPI reset", top_k=5)
+    assert len(hits) > 0
+    assert hits[0][0] == 1

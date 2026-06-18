@@ -24,8 +24,35 @@ class BM25SparseIndex:
 
     @staticmethod
     def _tokenize(text: str) -> list[str]:
-        """简单分词：英文数字下划线 + 单个非空白非词字符."""
-        return re.findall(r"[a-zA-Z0-9_]+|[^\s\w]", text.lower(), flags=re.ASCII)
+        """分词：英文数字下划线词元 + CJK 2-gram + 其他符号."""
+        text = text.lower()
+        # English words, numbers, identifiers
+        tokens = re.findall(r"[a-zA-Z0-9_]+", text)
+        # CJK characters: use 2-gram sliding window for better phrase retention
+        cjk_chars = re.findall(r"[\u4e00-\u9fff]", text)
+        for i in range(len(cjk_chars) - 1):
+            tokens.append(cjk_chars[i] + cjk_chars[i + 1])
+        # Other non-whitespace, non-alnum symbols as single tokens
+        symbols = re.findall(r"[^\s\w\u4e00-\u9fff]", text)
+        tokens.extend(symbols)
+        return tokens
+
+    @classmethod
+    def from_blocks(cls, blocks: list[dict]) -> "BM25SparseIndex":
+        """Build a BM25 index from an existing list of block dicts."""
+        instance = cls.__new__(cls)
+        instance.db = None
+        tokenized: list[list[str]] = []
+        instance._corpus = []
+        for block in blocks:
+            tokens = cls._tokenize(block["content"])
+            tokenized.append(tokens)
+            instance._corpus.append((block["id"], block["content"]))
+        if tokenized:
+            instance._index = BM25Okapi(tokenized)
+        else:
+            instance._index = None
+        return instance
 
     def _build(self) -> None:
         """从所有文档的 content_blocks 构建 BM25 索引."""
@@ -51,11 +78,7 @@ class BM25SparseIndex:
         if not isinstance(scores, np.ndarray):
             scores = np.array(scores)
         top_idx = np.argsort(scores)[::-1][:top_k]
-        return [
-            (int(self._corpus[i][0]), float(scores[i]))
-            for i in top_idx
-            if scores[i] > 0
-        ]
+        return [(int(self._corpus[i][0]), float(scores[i])) for i in top_idx if scores[i] > 0]
 
     def index_info(self) -> dict[str, Any]:
         """返回索引元信息."""
