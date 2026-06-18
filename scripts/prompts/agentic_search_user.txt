@@ -1,0 +1,7 @@
+Question: {question}
+
+Context: {context}
+
+Instructions:
+Decompose the question into the smallest number of search steps needed to answer it accurately.
+Return a JSON array of steps.
