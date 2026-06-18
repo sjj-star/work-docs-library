@@ -416,6 +416,38 @@ class KnowledgeBaseService:
                 results.append({"score": round(float(score), 4), "chunk": chunk})
         return results
 
+    def search_reranked(
+        self,
+        text: str,
+        top_k: int = Config.PLUGIN_SEARCH_TOP_K,
+        candidate_k: int | None = None,
+    ) -> list[dict]:
+        """混合检索 + LLM 重排序.
+
+        Args:
+            text: 查询文本
+            top_k: 最终返回结果数量
+            candidate_k: 混合检索召回数量，默认 PLUGIN_SEARCH_TOP_K * 4
+
+        Returns:
+            [{"score": float, "chunk": Chunk}, ...]
+        """
+        from .reranker import LLMReranker
+
+        if candidate_k is None:
+            candidate_k = Config.PLUGIN_SEARCH_TOP_K * 4
+
+        candidates = self.search_hybrid(text, top_k=candidate_k)
+        passages = [(c["chunk"].id, c["chunk"].content) for c in candidates]
+        reranked = LLMReranker().rank(text, passages)
+
+        results = []
+        for block_db_id, score in reranked[:top_k]:
+            chunk = self._get_chunk(block_db_id)
+            if chunk:
+                results.append({"score": round(float(score), 4), "chunk": chunk})
+        return results
+
     def evaluate_dataset(
         self,
         dataset_name: str,
