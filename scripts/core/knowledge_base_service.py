@@ -435,11 +435,15 @@ class KnowledgeBaseService:
         from .reranker import LLMReranker
 
         if candidate_k is None:
-            candidate_k = Config.PLUGIN_SEARCH_TOP_K * 4
+            candidate_k = top_k * 4
 
         candidates = self.search_hybrid(text, top_k=candidate_k)
         passages = [(c["chunk"].id, c["chunk"].content) for c in candidates]
-        reranked = LLMReranker().rank(text, passages)
+        try:
+            reranked = LLMReranker().rank(text, passages)
+        except Exception:
+            logger.exception("Reranking failed, returning hybrid results")
+            reranked = [(c["chunk"].id, c["score"]) for c in candidates]
 
         results = []
         for block_db_id, score in reranked[:top_k]:

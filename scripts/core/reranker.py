@@ -3,6 +3,7 @@
 import json
 import logging
 from abc import ABC, abstractmethod
+from typing import Any
 
 from .config import Config
 from .llm_chat_client import BaseLLMClient
@@ -27,6 +28,13 @@ class LLMReranker(Reranker):
         """Initialize with an optional LLM client; create a default client if None."""
         self.client = client or BaseLLMClient()
 
+    @staticmethod
+    def _coerce_score(value: Any) -> float:
+        try:
+            return float(value)
+        except (ValueError, TypeError):
+            return 0.0
+
     def _parse_scores(self, raw: str, num_passages: int) -> list[float]:
         """Parse judge response into a list of scores."""
         try:
@@ -36,12 +44,12 @@ class LLMReranker(Reranker):
             parsed = {}
 
         if isinstance(parsed, list) and len(parsed) == num_passages:
-            return [float(s) for s in parsed]
+            return [self._coerce_score(s) for s in parsed]
 
         if isinstance(parsed, dict) and "scores" in parsed:
             scores = parsed["scores"]
             if isinstance(scores, list) and len(scores) == num_passages:
-                return [float(s) for s in scores]
+                return [self._coerce_score(s) for s in scores]
 
         logger.warning(f"Reranker returned unexpected format: {raw[:200]}")
         return [0.0] * num_passages
@@ -63,8 +71,11 @@ class LLMReranker(Reranker):
         numbered = "\n\n".join(
             f"[{i+1}] {text}" for i, (_id, text) in enumerate(passages)
         )
-        user = user_template.format(
-            query=query, passages=numbered, num_passages=len(passages)
+        user = (
+            user_template
+            .replace("{query}", query)
+            .replace("{passages}", numbered)
+            .replace("{num_passages}", str(len(passages)))
         )
 
         raw = self.client.chat(
