@@ -1,0 +1,9 @@
+Ground-truth answer: {ground_truth_answer}
+
+Retrieved contexts:
+{contexts}
+
+Instructions:
+1. Break the ground-truth answer into atomic claims.
+2. For each claim, decide if it is directly supported by the retrieved contexts.
+3. Return the JSON object with two lists: attributable and not_attributable.

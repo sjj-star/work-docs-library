@@ -1,0 +1,8 @@
+Question: {question}
+
+Retrieved contexts:
+{contexts}
+
+Instructions:
+For each context, decide whether it contains information relevant to answering the question.
+Return the JSON object with a list of booleans.

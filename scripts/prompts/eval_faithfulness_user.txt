@@ -1,0 +1,11 @@
+Question: {question}
+
+Answer: {answer}
+
+Contexts:
+{contexts}
+
+Instructions:
+1. Break the answer into atomic claims.
+2. For each claim, decide if it is supported by the contexts, contradicted by the contexts, or not found.
+3. Return the JSON object with the three lists.
