@@ -3,6 +3,7 @@
 import json
 import logging
 from abc import ABC, abstractmethod
+from string import Template
 from typing import Any
 
 from .config import Config
@@ -27,6 +28,13 @@ class LLMReranker(Reranker):
     def __init__(self, client: BaseLLMClient | None = None) -> None:
         """Initialize with an optional LLM client; create a default client if None."""
         self.client = client or BaseLLMClient()
+
+    @staticmethod
+    def _load_prompt_template(name: str) -> Template:
+        """Load a prompt file and return it as a string.Template for safe substitution."""
+        path = Config.PROMPT_DIR / f"{name}.txt"
+        text = path.read_text(encoding="utf-8") if path.exists() else ""
+        return Template(text)
 
     @staticmethod
     def _coerce_score(value: Any) -> float:
@@ -61,21 +69,16 @@ class LLMReranker(Reranker):
         if not passages:
             return []
 
-        system = (Config.PROMPT_DIR / "rerank_passage_system.txt").read_text(
-            encoding="utf-8"
-        )
-        user_template = (Config.PROMPT_DIR / "rerank_passage_user.txt").read_text(
-            encoding="utf-8"
-        )
+        system = self._load_prompt_template("rerank_passage_system").template
+        user_template = self._load_prompt_template("rerank_passage_user")
 
         numbered = "\n\n".join(
             f"[{i+1}] {text}" for i, (_id, text) in enumerate(passages)
         )
-        user = (
-            user_template
-            .replace("{query}", query)
-            .replace("{passages}", numbered)
-            .replace("{num_passages}", str(len(passages)))
+        user = user_template.safe_substitute(
+            query=query,
+            passages=numbered,
+            num_passages=str(len(passages)),
         )
 
         raw = self.client.chat(

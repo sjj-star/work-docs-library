@@ -1,8 +1,8 @@
-Query: {query}
+Query: $query
 
 Passages:
-{passages}
+$passages
 
 Instructions:
-Assign a relevance score from 0 to 10 to each of the {num_passages} passages above.
-Return a JSON array with exactly {num_passages} numbers, in the same order.
+Assign a relevance score from 0 to 10 to each of the $num_passages passages above.
+Return a JSON array with exactly $num_passages numbers, in the same order.
