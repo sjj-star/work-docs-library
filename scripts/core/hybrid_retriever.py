@@ -16,7 +16,7 @@ class RRFFusionRetriever:
         self,
         vector_index: VectorIndex,
         sparse_index: BM25SparseIndex,
-        k: float = 60.0,
+        k: float | None = None,
     ) -> None:
         """Initialize the RRF fusion retriever.
 
@@ -24,10 +24,11 @@ class RRFFusionRetriever:
             vector_index: FAISS vector index for dense retrieval.
             sparse_index: BM25 sparse index for lexical retrieval.
             k: RRF constant controlling the score decay over rank.
+                Defaults to Config.PLUGIN_HYBRID_RRF_K.
         """
         self.vector_index = vector_index
         self.sparse_index = sparse_index
-        self.k = k
+        self.k = k if k is not None else float(Config.PLUGIN_HYBRID_RRF_K)
 
     def search(
         self,
@@ -43,14 +44,17 @@ class RRFFusionRetriever:
             query_text: The raw query string.
             embedder: Object with an `embed(list[str]) -> list[list[float]]` method.
             top_k: Number of fused results to return.
-            dense_top_k: Number of dense candidates. Defaults to Config.PLUGIN_BM25_TOP_K.
+            dense_top_k: Number of dense candidates.
+                Defaults to Config.PLUGIN_SEARCH_TOP_K * 10.
             sparse_top_k: Number of sparse candidates. Defaults to Config.PLUGIN_BM25_TOP_K.
 
         Returns:
             List of (block_db_id, rrf_score) sorted by descending score.
         """
-        dense_top_k = dense_top_k or Config.PLUGIN_BM25_TOP_K
-        sparse_top_k = sparse_top_k or Config.PLUGIN_BM25_TOP_K
+        if dense_top_k is None:
+            dense_top_k = Config.PLUGIN_SEARCH_TOP_K * 10
+        if sparse_top_k is None:
+            sparse_top_k = Config.PLUGIN_BM25_TOP_K
 
         emb = embedder.embed([query_text])[0]
         dense_hits = self.vector_index.search(emb, top_k=dense_top_k)

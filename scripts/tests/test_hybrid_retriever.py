@@ -64,10 +64,15 @@ def test_knowledge_base_service_search_hybrid(tmp_path, monkeypatch):
     )
     db.insert_block("doc-a", "b1", "SPI reset sequence", 0, {})
     db.insert_block("doc-a", "b2", "GPIO config", 1, {})
+    db.insert_block("doc-a", "b3", "Timer interrupt", 2, {})
 
     class FakeVectorIndex:
         def search(self, query_vector, top_k):
             return [(1, 0.9), (2, 0.8)]
+
+    class FakeSparseIndex:
+        def search(self, query, top_k):
+            return [(2, 1.0), (3, 0.9)]
 
     class FakeEmbedder:
         def embed(self, texts):
@@ -75,7 +80,11 @@ def test_knowledge_base_service_search_hybrid(tmp_path, monkeypatch):
 
     svc = KnowledgeBaseService(db=db, vec=FakeVectorIndex(), graph_store=None)  # type: ignore[reportArgumentType]
     monkeypatch.setattr(svc, "_get_embedder", lambda: FakeEmbedder())
+    monkeypatch.setattr(svc, "_get_sparse_index", lambda: FakeSparseIndex())
 
     results = svc.search_hybrid("SPI", top_k=5)
-    assert len(results) > 0
-    assert results[0]["chunk"].doc_id == "doc-a"
+    assert len(results) == 3
+    # Block 2 appears in both dense and sparse, so it should rank first
+    assert results[0]["chunk"].chunk_id == "b2"
+    # All scores should be positive
+    assert all(r["score"] > 0 for r in results)

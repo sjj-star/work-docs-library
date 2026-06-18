@@ -15,6 +15,7 @@ from .doc_graph_pipeline import DocGraphPipeline
 from .embedding_client import EmbeddingClient
 from .graph_store import GraphEntity, GraphRelation, NetworkXGraphStore, SubGraphView
 from .models import Chunk, Document
+from .sparse_index import BM25SparseIndex
 from .vector_index import VectorIndex
 
 logger = logging.getLogger(__name__)
@@ -109,6 +110,7 @@ class KnowledgeBaseService:
         self.vec = vec or VectorIndex(dim=Config.EMBEDDING_DIMENSION)
         self.graph = graph_store or NetworkXGraphStore()
         self._embedder: EmbeddingClient | None = None
+        self._sparse_index: BM25SparseIndex | None = None
         self._bridge = _EntityChunkBridge()
         self._bridge.rebuild(self.db)
         if graph_store is None:
@@ -196,6 +198,12 @@ class KnowledgeBaseService:
             self._embedder = EmbeddingClient()
         return self._embedder
 
+    def _get_sparse_index(self) -> BM25SparseIndex:
+        """获取复用的 BM25SparseIndex 实例（懒加载）."""
+        if self._sparse_index is None:
+            self._sparse_index = BM25SparseIndex(self.db)
+        return self._sparse_index
+
     def close(self) -> None:
         """关闭资源."""
         if self._embedder is not None:
@@ -236,6 +244,8 @@ class KnowledgeBaseService:
                         self.graph.remove_document_contributions(doc_id)
                 raise RuntimeError(f"部分子图加载失败，已回滚全局图变更: {failed_doc_ids}")
             self._save_global_graph()
+            # 内容变更后使稀疏索引缓存失效
+            self._sparse_index = None
             # 同步 bridge 索引（失败时记录警告，重启后自动恢复）
             for doc_id in doc_ids:
                 try:
@@ -314,6 +324,8 @@ class KnowledgeBaseService:
                     temp.load(graph_path)
                     self._merge_graph(temp)
                 self._save_global_graph()
+                # 内容变更后使稀疏索引缓存失效
+                self._sparse_index = None
                 # 完整性校验：保存后节点数不应低于 reprocess 前（允许小幅波动）
                 after_nodes = self.graph.stats()["nodes"]
                 before_nodes = backup_g.number_of_nodes()
@@ -372,17 +384,17 @@ class KnowledgeBaseService:
         for block_db_id, score in hits:
             block = self.db.get_block_by_db_id(block_db_id)
             if block:
-                    chunk = Chunk(
-                        id=block["id"],
-                        doc_id=block["doc_id"],
-                        chunk_id=block["block_id"],
-                        content=block["content"],
-                        chunk_type="text",
-                        chapter_title=block["metadata"].get("section_title", ""),
-                        metadata=block["metadata"],
-                        status=block["status"],
-                    )
-                    results.append({"score": round(float(score), 4), "chunk": chunk})
+                chunk = Chunk(
+                    id=block["id"],
+                    doc_id=block["doc_id"],
+                    chunk_id=block["block_id"],
+                    content=block["content"],
+                    chunk_type="text",
+                    chapter_title=block["metadata"].get("section_title", ""),
+                    metadata=block["metadata"],
+                    status=block["status"],
+                )
+                results.append({"score": round(float(score), 4), "chunk": chunk})
         return results
 
     def search_hybrid(self, text: str, top_k: int = Config.PLUGIN_SEARCH_TOP_K) -> list[dict]:
@@ -393,9 +405,8 @@ class KnowledgeBaseService:
             [{"score": float, "chunk": Chunk}, ...]
         """
         from .hybrid_retriever import RRFFusionRetriever
-        from .sparse_index import BM25SparseIndex
 
-        sparse = BM25SparseIndex(self.db)
+        sparse = self._get_sparse_index()
         retriever = RRFFusionRetriever(self.vec, sparse)
         hits = retriever.search(text, self._get_embedder(), top_k=top_k)
         results = []
