@@ -1122,6 +1122,8 @@ def tool_config(params: dict) -> dict:
         "PLUGIN_GRAPH_MAX_DEPTH": "Plugin 配置",
         "PLUGIN_SUBGRAPH_DEPTH": "Plugin 配置",
         "PLUGIN_DEFAULT_LIMIT": "Plugin 配置",
+        "PLUGIN_BM25_TOP_K": "Plugin 配置",
+        "PLUGIN_HYBRID_RRF_K": "Plugin 配置",
         "GRAPH_MAX_PATH_DEPTH": "Pipeline 配置",
         "BLOCK_MAX_CHARS": "Pipeline 配置",
         "DB_PATH": "路径配置",
