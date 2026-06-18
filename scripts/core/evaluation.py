@@ -91,7 +91,7 @@ class ContextPrecisionMetric(BaseJudgeMetric):
             "eval_context_precision_system",
             "eval_context_precision_user",
             question=question,
-            contexts="\n\n---\n\n".join(f"[{i+1}] {ctx}" for i, ctx in enumerate(contexts)),
+            contexts="\n\n---\n\n".join(f"[{i + 1}] {ctx}" for i, ctx in enumerate(contexts)),
         )
         relevance = self._ensure_list(parsed.get("relevance"), "relevance")
         if relevance and len(relevance) != len(contexts):
@@ -121,9 +121,7 @@ class ContextRecallMetric(BaseJudgeMetric):
             contexts="\n\n---\n\n".join(contexts),
         )
         attributable = self._ensure_list(parsed.get("attributable", []), "attributable")
-        not_attributable = self._ensure_list(
-            parsed.get("not_attributable", []), "not_attributable"
-        )
+        not_attributable = self._ensure_list(parsed.get("not_attributable", []), "not_attributable")
         total = len(attributable) + len(not_attributable)
         score = len(attributable) / total if total > 0 else 0.0
         return {
