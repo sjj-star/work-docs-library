@@ -61,3 +61,26 @@ class Document:
         d = asdict(self)
         d["chapters"] = [c.to_dict() for c in self.chapters]
         return d
+
+
+@dataclass
+class EvalQuestion:
+    """评估问题项."""
+
+    id: int | None = None
+    question: str = ""
+    ground_truth_answer: str = ""
+    ground_truth_context_ids: list[int] = field(default_factory=list)
+    ground_truth_doc_ids: list[str] = field(default_factory=list)
+    tags: list[str] = field(default_factory=list)
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class EvalDataset:
+    """评估数据集."""
+
+    name: str = ""
+    questions: list[EvalQuestion] = field(default_factory=list)
+    created_at: str = ""
+    metadata: dict[str, Any] = field(default_factory=dict)

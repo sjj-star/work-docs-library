@@ -5,11 +5,12 @@ import logging
 import sqlite3
 from collections.abc import Generator
 from contextlib import contextmanager
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 from .config import Config
-from .models import Chapter, Document
+from .models import Chapter, Document, EvalDataset, EvalQuestion
 
 logger = logging.getLogger(__name__)
 
@@ -95,6 +96,23 @@ class KnowledgeDB:
             comment TEXT,
             created_at TEXT DEFAULT CURRENT_TIMESTAMP
         );
+        CREATE TABLE IF NOT EXISTS eval_datasets (
+            name TEXT PRIMARY KEY,
+            metadata TEXT,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP
+        );
+        CREATE TABLE IF NOT EXISTS eval_questions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            dataset_name TEXT NOT NULL,
+            question TEXT NOT NULL,
+            ground_truth_answer TEXT,
+            ground_truth_context_ids TEXT,
+            ground_truth_doc_ids TEXT,
+            tags TEXT,
+            metadata TEXT,
+            FOREIGN KEY (dataset_name) REFERENCES eval_datasets(name)
+        );
+        CREATE INDEX IF NOT EXISTS idx_eval_q_dataset ON eval_questions(dataset_name);
         CREATE INDEX IF NOT EXISTS idx_conflict_entity ON conflict_logs(entity_type, name);
         CREATE INDEX IF NOT EXISTS idx_feedback_entity ON feedback(entity_type, entity_name);
         """
@@ -731,3 +749,87 @@ class KnowledgeDB:
                 (limit,),
             ).fetchall()
         return [dict(r) for r in rows]
+
+    # -- 评估数据集 --
+
+    def save_eval_dataset(self, dataset: EvalDataset) -> None:
+        """保存评估数据集及其问题列表."""
+        created_at = dataset.created_at or datetime.now().isoformat()
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO eval_datasets (name, metadata, created_at)
+                VALUES (?, ?, ?)
+                """,
+                (
+                    dataset.name,
+                    json.dumps(dataset.metadata, ensure_ascii=False),
+                    created_at,
+                ),
+            )
+            conn.execute("DELETE FROM eval_questions WHERE dataset_name = ?", (dataset.name,))
+            for q in dataset.questions:
+                conn.execute(
+                    """
+                    INSERT INTO eval_questions (
+                        dataset_name, question, ground_truth_answer,
+                        ground_truth_context_ids, ground_truth_doc_ids, tags, metadata
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        dataset.name,
+                        q.question,
+                        q.ground_truth_answer,
+                        json.dumps(q.ground_truth_context_ids, ensure_ascii=False),
+                        json.dumps(q.ground_truth_doc_ids, ensure_ascii=False),
+                        json.dumps(q.tags, ensure_ascii=False),
+                        json.dumps(q.metadata, ensure_ascii=False),
+                    ),
+                )
+
+    def load_eval_dataset(self, name: str) -> EvalDataset:
+        """加载评估数据集及其问题列表."""
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM eval_datasets WHERE name = ?", (name,)
+            ).fetchone()
+            if not row:
+                raise ValueError(f"Eval dataset not found: {name}")
+            q_rows = conn.execute(
+                "SELECT * FROM eval_questions WHERE dataset_name = ? ORDER BY id",
+                (name,),
+            ).fetchall()
+        questions = [
+            EvalQuestion(
+                id=r["id"],
+                question=r["question"],
+                ground_truth_answer=r["ground_truth_answer"] or "",
+                ground_truth_context_ids=json.loads(r["ground_truth_context_ids"] or "[]"),
+                ground_truth_doc_ids=json.loads(r["ground_truth_doc_ids"] or "[]"),
+                tags=json.loads(r["tags"] or "[]"),
+                metadata=json.loads(r["metadata"] or "{}"),
+            )
+            for r in q_rows
+        ]
+        return EvalDataset(
+            name=row["name"],
+            questions=questions,
+            created_at=row["created_at"] or "",
+            metadata=json.loads(row["metadata"] or "{}"),
+        )
+
+    def list_eval_datasets(self) -> list[str]:
+        """列出所有评估数据集名称，按创建时间降序."""
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT name FROM eval_datasets ORDER BY created_at DESC"
+            ).fetchall()
+        return [r["name"] for r in rows]
+
+    def delete_eval_dataset(self, name: str) -> bool:
+        """删除评估数据集及其问题."""
+        with self._connect() as conn:
+            conn.execute("DELETE FROM eval_questions WHERE dataset_name = ?", (name,))
+            cur = conn.execute("DELETE FROM eval_datasets WHERE name = ?", (name,))
+            return cur.rowcount > 0
