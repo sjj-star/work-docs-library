@@ -65,8 +65,12 @@
 work-docs-library/
 ├── kimi.plugin.json              # Kimi Code 新规范插件 Manifest（MCP server + Skill）
 ├── skills/
-│   └── using-workdocs/
-│       └── SKILL.md              # 会话启动时注入的 Agent 使用指南
+│   ├── using-workdocs/
+│   │   └── SKILL.md              # 入口：总览、规则、何时调用子 skill
+│   ├── ingesting-workdocs/
+│   │   └── SKILL.md              # 文档入库/更新/重试工作流
+│   └── exploring-workdocs/
+│       └── SKILL.md              # 语义搜索 + 图谱联合查询工作流
 ├── pyproject.toml                # Python 项目配置、依赖、ruff/pyright/pytest 设置
 ├── scripts/
 │   ├── mcp_server.py             # MCP stdio server（JSON-RPC，stdout 隔离）
@@ -287,7 +291,9 @@ monkeypatch.setattr(
 | `scripts/parsers/*.py` | ⚠️ 需批准 | 解析器影响数据输入质量 |
 | `kimi.plugin.json` | ⚠️ 需批准 | Kimi Code 新规范插件 Manifest |
 | `scripts/mcp_server.py` | ⚠️ 需批准 | MCP stdio server，协议层变更影响插件可用性 |
-| `skills/using-workdocs/SKILL.md` | ⚠️ 需批准 | 会话启动 Skill，影响 Agent 使用行为 |
+| `skills/using-workdocs/SKILL.md` | ⚠️ 需批准 | 入口 Skill，影响 Agent 使用行为 |
+| `skills/ingesting-workdocs/SKILL.md` | ⚠️ 需批准 | 入库工作流 Skill |
+| `skills/exploring-workdocs/SKILL.md` | ⚠️ 需批准 | 查询+图谱联合工作流 Skill |
 
 | `README.md` / `AGENTS.md` / `DESIGN.md` | ✅ 可改 | 文档必须随代码同步更新 |
 | `knowledge_base/` | ❌ 禁止 | 运行时生成数据 |

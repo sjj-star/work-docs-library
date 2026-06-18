@@ -133,8 +133,12 @@ flowchart TB
 work-docs-library/
 ├── kimi.plugin.json              # Kimi Code 新规范插件 Manifest（MCP server + Skill）
 ├── skills/
-│   └── using-workdocs/
-│       └── SKILL.md              # 会话启动时注入的 Agent 使用指南
+│   ├── using-workdocs/
+│   │   └── SKILL.md              # 入口：总览、规则、何时调用子 skill
+│   ├── ingesting-workdocs/
+│   │   └── SKILL.md              # 文档入库/更新/重试工作流
+│   └── exploring-workdocs/
+│       └── SKILL.md              # 语义搜索 + 图谱联合查询工作流
 ├── AGENTS.md                     # Agent 开发指南（架构、策略、代码规范）
 ├── README.md                     # 本文件
 ├── scripts/
@@ -215,7 +219,7 @@ cp scripts/.env.example scripts/.env
 /plugins install ~/.kimi/plugins/work-docs-library
 ```
 
-安装成功后，会话启动时会自动加载 `skills/using-workdocs/SKILL.md`，Agent 可通过 `mcp__workdocs__*` 调用插件能力。
+安装成功后，会话启动时会自动加载 `skills/using-workdocs/SKILL.md`。复杂工作流会进一步引用 `ingesting-workdocs`（文档入库）或 `exploring-workdocs`（查询+图谱联合分析）。Agent 通过 `mcp__workdocs__*` 调用插件能力。
 
 ---
 

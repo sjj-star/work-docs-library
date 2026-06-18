@@ -1,25 +1,33 @@
 ---
 name: using-workdocs
-description: Use when working with the work-docs-library plugin to ingest technical PDFs, run semantic searches, or query the knowledge graph through Kimi Code MCP tools
+description: Use when a user wants to ingest technical PDFs, query a document knowledge base, or explore cross-document relationships through the work-docs-library Kimi Code plugin
 ---
 
 # Using Work Docs Library
 
 ## Overview
 
-This plugin turns technical PDFs into a queryable knowledge base with vector search and a cross-document knowledge graph.
+The work-docs-library plugin turns technical PDFs into a queryable knowledge base with vector search and a cross-document knowledge graph. This skill is the entry point. For concrete workflows, load the required sub-skill.
 
 ## When to Use
 
-- Ingest PDFs or directories of PDFs into the knowledge base.
-- Search documents by meaning or by chapter/concept.
-- Explore the knowledge graph: find entities, paths, provenance, or conflict logs.
+- The user mentions importing, adding, updating, or reprocessing PDFs or directories.
+- The user asks a technical question like "What is the reset sequence of the SPI module?" or "Compare GPIO in doc A and doc B."
+- The user wants to trace the source of a fact, find related registers, or visualize concept relationships.
+- The user reports missing entities, wrong relations, or wants to check conflict logs.
+
+## How to Choose a Workflow
+
+- **Import or update documents** → **REQUIRED SUB-SKILL:** `ingesting-workdocs`
+- **Answer technical questions, compare concepts, trace provenance** → **REQUIRED SUB-SKILL:** `exploring-workdocs`
+- **Manual maintenance** (entity correction, feedback, global graph rebuild) → not exposed through MCP. Use `scripts/admin_tools.py`.
 
 ## MCP Tools Quick Reference
 
 | Tool | Purpose |
 |------|---------|
 | `mcp__workdocs__ingest` | Import PDF(s) end-to-end |
+| `mcp__workdocs__reprocess` | Re-run pipeline for a doc or failed docs |
 | `mcp__workdocs__semantic_search` | Vector search; set `graph_depth>0` to include graph |
 | `mcp__workdocs__query` | Find content_blocks by doc/chapter/concept |
 | `mcp__workdocs__get_content` | Read a chapter or block raw content |
@@ -31,20 +39,15 @@ This plugin turns technical PDFs into a queryable knowledge base with vector sea
 | `mcp__workdocs__graph_conflicts` | View property conflict logs |
 | `mcp__workdocs__config` | Show effective config (masked) |
 
-## Common Workflows
-
-**Ingest and search**
-
-1. `mcp__workdocs__ingest` with `{"path": "path/to/pdf_or_dir"}`
-2. `mcp__workdocs__semantic_search` with `{"text": "reset sequence of the SPI module"}`
-
-**Explore the graph**
-
-1. `mcp__workdocs__graph_query` with `{"entity_type": "Register", "name": "SPICCR"}`
-2. `mcp__workdocs__graph_provenance` with `{"entity_type": "Register", "name": "SPICCR"}`
-
 ## Rules
 
-- Do NOT call `graph_upsert_entity`, `graph_delete_entity`, `graph_upsert_relation`, `graph_delete_relation`, `graph_feedback`, `reprocess`, or `rebuild_global_graph`; these are not exposed through MCP. Use `scripts/admin_tools.py` for manual maintenance.
-- Confirm the path with the user before ingesting if you are unsure.
-- All file paths are sandboxed; absolute paths outside allowed directories are rejected.
+- Do NOT call `graph_upsert_entity`, `graph_delete_entity`, `graph_upsert_relation`, `graph_delete_relation`, `graph_feedback`, or `rebuild_global_graph` through MCP. They are not exposed.
+- Always confirm the ingest path with the user when unsure; all paths are sandboxed.
+- For long-running ingest/reprocess calls, use background tasks with a timeout of at least 1800 seconds and poll `status`.
+
+## Common Pitfalls
+
+- Assuming ingestion succeeds immediately. Always poll `status` after ingest/reprocess.
+- Searching with only one phrasing. Try synonyms and technical abbreviations.
+- Trusting graph relations without calling `graph_provenance`.
+- Forgetting to check `graph_conflicts` when answers from different documents disagree.
