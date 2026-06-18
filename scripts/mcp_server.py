@@ -146,6 +146,8 @@ MCP_TOOL_SCHEMAS: dict[str, dict] = {
         "type": "object",
         "properties": {
             "doc_id": {"type": "string", "description": "文档 ID，提供时返回详情"},
+            "scope": {"type": "string", "description": "all|doc"},
+            "top_n": {"type": "integer", "description": "最近处理文档数量"},
         },
     },
     "toc": {
