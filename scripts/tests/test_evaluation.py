@@ -229,3 +229,81 @@ def test_metric_with_empty_contexts(monkeypatch):
     assert result["supported_claims"] == []
     assert result["unsupported_claims"] == []
     assert result["not_found_claims"] == []
+
+
+def test_hit_rate_at_k():
+    from core.evaluation import hit_rate_at_k
+
+    assert hit_rate_at_k([1, 2, 3], {3}, 5) == 1.0
+    assert hit_rate_at_k([1, 2, 3], {4}, 5) == 0.0
+    assert hit_rate_at_k([1, 2, 3], {3}, 2) == 0.0
+
+
+def test_mean_reciprocal_rank():
+    from core.evaluation import mean_reciprocal_rank
+
+    assert mean_reciprocal_rank([1, 2, 3], {2}) == 0.5
+    assert mean_reciprocal_rank([1, 2, 3], {4}) == 0.0
+    assert mean_reciprocal_rank([1, 2, 3], {1}) == 1.0
+
+
+def test_ndcg_at_k():
+    from core.evaluation import ndcg_at_k
+
+    relevance = {1: 1.0, 2: 1.0}
+    assert ndcg_at_k([1, 2, 3], relevance, 2) == 1.0
+    assert ndcg_at_k([3, 2, 1], relevance, 2) < 1.0
+
+
+def test_eval_harness_retrieval(tmp_path, monkeypatch):
+    from core.db import KnowledgeDB
+    from core.evaluation import EvalDataset
+    from core.knowledge_base_service import KnowledgeBaseService
+    from core.models import Document, EvalQuestion
+
+    db = KnowledgeDB(db_path=tmp_path / "eval.db")
+
+    class FakeVectorIndex:
+        def __init__(self, dim):
+            self.dim = dim
+
+        def search(self, query_vector, top_k=5):
+            return [(2, 0.8), (1, 0.7)]
+
+    svc = KnowledgeBaseService(
+        db=db, vec=FakeVectorIndex(1024), graph_store=None  # type: ignore[arg-type]
+    )
+
+    class FakeEmbedder:
+        def embed(self, texts):
+            return [[0.0] * 1024 for _ in texts]
+
+    monkeypatch.setattr(svc, "_get_embedder", lambda: FakeEmbedder())
+
+    db.upsert_document(
+        Document(
+            doc_id="doc-a",
+            title="Test",
+            source_path="/tmp/test.pdf",
+            file_type="pdf",
+            total_pages=1,
+            chapters=[],
+            extracted_at="2026-01-01",
+            file_hash="abc",
+            status="done",
+        )
+    )
+    db.insert_block("doc-a", "b1", "content one", 0, {})
+    db.insert_block("doc-a", "b2", "content two", 1, {})
+
+    q = EvalQuestion(
+        question="test question",
+        ground_truth_context_ids=[1, 2],
+    )
+    ds = EvalDataset(name="baseline", questions=[q])
+    db.save_eval_dataset(ds)
+
+    result = svc.evaluate_dataset("baseline", retriever="semantic", top_k=5)
+    assert result["num_questions"] == 1
+    assert result["avg_hit_rate@k"] == 1.0
+    assert result["avg_mrr"] > 0.0

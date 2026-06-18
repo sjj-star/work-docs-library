@@ -2,10 +2,12 @@
 
 import json
 import logging
+import math
 from typing import Any
 
 from .config import Config
 from .llm_chat_client import BaseLLMClient
+from .models import EvalDataset
 
 logger = logging.getLogger(__name__)
 
@@ -129,3 +131,101 @@ class ContextRecallMetric(BaseJudgeMetric):
             "attributable_claims": attributable,
             "not_attributable_claims": not_attributable,
         }
+
+
+def hit_rate_at_k(retrieved_ids: list[int], relevant_ids: set[int], k: int) -> float:
+    """Return 1.0 if any relevant id appears in the top-k retrieved ids."""
+    return 1.0 if set(retrieved_ids[:k]) & relevant_ids else 0.0
+
+
+def mean_reciprocal_rank(retrieved_ids: list[int], relevant_ids: set[int]) -> float:
+    """Return 1/rank of the first relevant id, or 0.0 if none."""
+    for i, rid in enumerate(retrieved_ids, start=1):
+        if rid in relevant_ids:
+            return 1.0 / i
+    return 0.0
+
+
+def ndcg_at_k(retrieved_ids: list[int], relevance: dict[int, float], k: int) -> float:
+    """Compute Normalized Discounted Cumulative Gain at k."""
+    dcg = 0.0
+    for i, rid in enumerate(retrieved_ids[:k], start=1):
+        rel = relevance.get(rid, 0.0)
+        dcg += rel / math.log2(i + 1)
+    ideal_rels = sorted(relevance.values(), reverse=True)[:k]
+    idcg = sum(rel / math.log2(i + 1) for i, rel in enumerate(ideal_rels, start=1))
+    return dcg / idcg if idcg > 0 else 0.0
+
+
+class EvalHarness:
+    """End-to-end evaluation harness for retrieval metrics."""
+
+    def __init__(
+        self,
+        service,
+        faithfulness: FaithfulnessMetric | None = None,
+        context_precision: ContextPrecisionMetric | None = None,
+        context_recall: ContextRecallMetric | None = None,
+    ) -> None:
+        """Initialize harness with a service and optional judge metrics."""
+        self.service = service
+        self.faithfulness = faithfulness or FaithfulnessMetric()
+        self.context_precision = context_precision or ContextPrecisionMetric()
+        self.context_recall = context_recall or ContextRecallMetric()
+
+    def run_retrieval_eval(
+        self,
+        dataset: EvalDataset,
+        retriever: str = "semantic",
+        top_k: int = 5,
+    ) -> dict[str, Any]:
+        """Run retrieval-only evaluation for each question in the dataset."""
+        results: list[dict[str, Any]] = []
+        for question in dataset.questions:
+            if retriever == "semantic":
+                hits = self.service.search_semantic(question.question, top_k=top_k)
+            else:
+                raise ValueError(f"Unsupported retriever: {retriever}")
+
+            retrieved_ids = [hit["chunk"].id for hit in hits]
+            relevant_ids = set(question.ground_truth_context_ids)
+            relevance = {cid: 1.0 for cid in relevant_ids}
+
+            results.append(
+                {
+                    "question": question.question,
+                    "retrieved_ids": retrieved_ids,
+                    "hit_rate@k": hit_rate_at_k(retrieved_ids, relevant_ids, top_k),
+                    "mrr": mean_reciprocal_rank(retrieved_ids, relevant_ids),
+                    f"ndcg@{top_k}": ndcg_at_k(retrieved_ids, relevance, top_k),
+                }
+            )
+
+        def _avg(key: str) -> float:
+            values = [r[key] for r in results]
+            return sum(values) / len(values) if values else 0.0
+
+        return {
+            "dataset_name": dataset.name,
+            "retriever": retriever,
+            "top_k": top_k,
+            "num_questions": len(results),
+            "avg_hit_rate@k": _avg("hit_rate@k"),
+            "avg_mrr": _avg("mrr"),
+            f"avg_ndcg@{top_k}": _avg(f"ndcg@{top_k}"),
+            "per_question": results,
+        }
+
+    def run_rag_eval(
+        self,
+        dataset: EvalDataset,
+        retriever: str = "semantic",
+        top_k: int = 5,
+    ) -> dict[str, Any]:
+        """Run full RAG evaluation including generation metrics.
+
+        For now, this is a placeholder that calls run_retrieval_eval and returns
+        retrieval metrics. Generation metrics will be added when answer generation
+        is integrated.
+        """
+        return self.run_retrieval_eval(dataset, retriever=retriever, top_k=top_k)

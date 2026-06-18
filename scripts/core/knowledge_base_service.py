@@ -7,7 +7,7 @@
 import copy
 import logging
 import shutil
-from typing import NamedTuple
+from typing import Any, NamedTuple
 
 from .config import Config
 from .db import KnowledgeDB
@@ -384,6 +384,19 @@ class KnowledgeBaseService:
                     )
                     results.append({"score": round(float(score), 4), "chunk": chunk})
         return results
+
+    def evaluate_dataset(
+        self,
+        dataset_name: str,
+        retriever: str = "semantic",
+        top_k: int = Config.PLUGIN_SEARCH_TOP_K,
+    ) -> dict[str, Any]:
+        """Evaluate a dataset using the specified retriever."""
+        from .evaluation import EvalHarness
+
+        dataset = self.db.load_eval_dataset(dataset_name)
+        harness = EvalHarness(self)
+        return harness.run_retrieval_eval(dataset, retriever=retriever, top_k=top_k)
 
     def query_chunks(
         self,
