@@ -140,6 +140,103 @@ def test_context_recall_metric(monkeypatch):
     assert result["not_attributable_claims"] == ["Clock idle"]
 
 
+def test_faithfulness_metric_exception_returns_zero(monkeypatch):
+    from core.evaluation import FaithfulnessMetric
+
+    monkeypatch.setattr(
+        "core.llm_chat_client.BaseLLMClient.chat",
+        lambda self, messages, **kwargs: (_ for _ in ()).throw(RuntimeError("LLM failed")),
+    )
+    metric = FaithfulnessMetric()
+    result = metric.score(
+        question="What is the SPI reset sequence?",
+        answer="The SPI reset starts with CS low.",
+        contexts=["To reset SPI, pull CS low first."],
+    )
+    assert result["score"] == 0.0
+    assert result["supported_claims"] == []
+    assert result["unsupported_claims"] == []
+    assert result["not_found_claims"] == []
+
+
+def test_context_precision_metric_exception_returns_zero(monkeypatch):
+    from core.evaluation import ContextPrecisionMetric
+
+    monkeypatch.setattr(
+        "core.llm_chat_client.BaseLLMClient.chat",
+        lambda self, messages, **kwargs: (_ for _ in ()).throw(RuntimeError("LLM failed")),
+    )
+    metric = ContextPrecisionMetric()
+    result = metric.score(
+        question="SPI reset sequence",
+        contexts=["Pull CS low first.", "This is unrelated."],
+    )
+    assert result["score"] == 0.0
+    assert result["relevance"] == []
+
+
+def test_context_recall_metric_exception_returns_zero(monkeypatch):
+    from core.evaluation import ContextRecallMetric
+
+    monkeypatch.setattr(
+        "core.llm_chat_client.BaseLLMClient.chat",
+        lambda self, messages, **kwargs: (_ for _ in ()).throw(RuntimeError("LLM failed")),
+    )
+    metric = ContextRecallMetric()
+    result = metric.score(
+        ground_truth_answer="CS low first. Clock idle.",
+        contexts=["To reset SPI, pull CS low first."],
+    )
+    assert result["score"] == 0.0
+    assert result["attributable_claims"] == []
+    assert result["not_attributable_claims"] == []
+
+
+def test_answer_relevancy_metric_score(monkeypatch):
+    from core.evaluation import AnswerRelevancyMetric
+
+    def fake_chat(self, messages, **kwargs):
+        return '{"score": 0.85, "reason": "Directly answers the question."}'
+
+    monkeypatch.setattr("core.llm_chat_client.BaseLLMClient.chat", fake_chat)
+    metric = AnswerRelevancyMetric()
+    score = metric.score(
+        question="What is the SPI reset sequence?",
+        answer="Pull CS low first, then configure the clock.",
+    )
+    assert score == 0.85
+
+
+def test_answer_relevancy_metric_malformed_response(monkeypatch):
+    from core.evaluation import AnswerRelevancyMetric
+
+    monkeypatch.setattr(
+        "core.llm_chat_client.BaseLLMClient.chat",
+        lambda self, messages, **kwargs: "not json",
+    )
+    metric = AnswerRelevancyMetric()
+    score = metric.score(
+        question="What is the SPI reset sequence?",
+        answer="Pull CS low first.",
+    )
+    assert score == 0.0
+
+
+def test_answer_relevancy_metric_exception(monkeypatch):
+    from core.evaluation import AnswerRelevancyMetric
+
+    monkeypatch.setattr(
+        "core.llm_chat_client.BaseLLMClient.chat",
+        lambda self, messages, **kwargs: (_ for _ in ()).throw(RuntimeError("LLM failed")),
+    )
+    metric = AnswerRelevancyMetric()
+    score = metric.score(
+        question="What is the SPI reset sequence?",
+        answer="Pull CS low first.",
+    )
+    assert score == 0.0
+
+
 def test_faithfulness_metric_handles_non_json(monkeypatch):
     from core.evaluation import FaithfulnessMetric
 
@@ -355,6 +452,50 @@ def test_run_retrieval_eval_unsupported_retriever():
         harness.run_retrieval_eval(ds, retriever="unknown", top_k=5)
 
 
+def test_run_retrieval_eval_hybrid():
+    from core.evaluation import EvalHarness
+    from core.models import EvalDataset, EvalQuestion
+
+    class FakeChunk:
+        def __init__(self, chunk_id):
+            self.id = chunk_id
+
+    class FakeService:
+        def search_hybrid(self, query, top_k=5):
+            return [{"chunk": FakeChunk(2)}, {"chunk": FakeChunk(1)}]
+
+    harness = EvalHarness(FakeService())  # type: ignore[arg-type]
+    ds = EvalDataset(
+        name="hybrid", questions=[EvalQuestion(question="q", ground_truth_context_ids=[1, 2])]
+    )
+    result = harness.run_retrieval_eval(ds, retriever="hybrid", top_k=5)
+    assert result["retriever"] == "hybrid"
+    assert result["avg_hit_rate@5"] == 1.0
+    assert result["avg_mrr"] > 0.0
+
+
+def test_run_retrieval_eval_reranked():
+    from core.evaluation import EvalHarness
+    from core.models import EvalDataset, EvalQuestion
+
+    class FakeChunk:
+        def __init__(self, chunk_id):
+            self.id = chunk_id
+
+    class FakeService:
+        def search_reranked(self, query, top_k=5):
+            return [{"chunk": FakeChunk(1)}]
+
+    harness = EvalHarness(FakeService())  # type: ignore[arg-type]
+    ds = EvalDataset(
+        name="reranked", questions=[EvalQuestion(question="q", ground_truth_context_ids=[1])]
+    )
+    result = harness.run_retrieval_eval(ds, retriever="reranked", top_k=5)
+    assert result["retriever"] == "reranked"
+    assert result["avg_hit_rate@5"] == 1.0
+    assert result["avg_mrr"] == 1.0
+
+
 def test_run_rag_eval_returns_retrieval_metrics():
     from core.evaluation import EvalHarness
     from core.models import EvalDataset, EvalQuestion
@@ -389,3 +530,31 @@ def test_eval_harness_lazy_metrics():
     assert harness._faithfulness is None
     assert harness._context_precision is None
     assert harness._context_recall is None
+
+
+def test_faithfulness_metric_ignores_braces_and_dollar_literals(monkeypatch):
+    """Regression for P0-1: raw user content with { } or $ must not break prompt formatting."""
+    from core.evaluation import FaithfulnessMetric
+
+    monkeypatch.setattr(
+        "core.llm_chat_client.BaseLLMClient.chat",
+        lambda self, messages, **kwargs: "not json",
+    )
+    metric = FaithfulnessMetric()
+    result = metric.score(
+        question="Question with {not_a_key}?",
+        answer="Answer with $not_a_placeholder and {curly} braces.",
+        contexts=["Context with {literal_braces} and $dollar_placeholder."],
+    )
+    assert result["score"] == 0.0
+    assert result["supported_claims"] == []
+    assert result["unsupported_claims"] == []
+    assert result["not_found_claims"] == []
+
+
+def test_load_missing_prompt_raises_file_not_found():
+    """Missing prompt files must raise FileNotFoundError instead of returning empty string."""
+    from core.evaluation import _load_prompt
+
+    with pytest.raises(FileNotFoundError):
+        _load_prompt("definitely_missing_prompt")

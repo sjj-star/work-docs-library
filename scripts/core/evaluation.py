@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import math
+from string import Template
 from typing import TYPE_CHECKING, Any
 
 from .config import Config
@@ -16,12 +17,15 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+#: Retriever strategies supported by :class:`EvalHarness`.
+ALLOWED_RETRIEVERS: set[str] = {"semantic", "hybrid", "reranked"}
+
 
 def _load_prompt(name: str) -> str:
     path = Config.PROMPT_DIR / f"{name}.txt"
-    if path.exists():
-        return path.read_text(encoding="utf-8")
-    return ""
+    if not path.exists():
+        raise FileNotFoundError(f"Prompt file not found: {path}")
+    return path.read_text(encoding="utf-8")
 
 
 def _parse_json_response(raw: str) -> dict[str, Any]:
@@ -39,8 +43,10 @@ class BaseJudgeMetric:
         """Initialize the metric with an optional LLM client."""
         self.client = client or BaseLLMClient()
 
-    def _format_prompt(self, name: str, **kwargs: Any) -> str:
-        return _load_prompt(name).format(**kwargs)
+    @staticmethod
+    def _format_prompt(name: str, **kwargs: Any) -> str:
+        template = _load_prompt(name)
+        return Template(template).safe_substitute(**kwargs)
 
     def _judge(
         self,
@@ -50,10 +56,14 @@ class BaseJudgeMetric:
     ) -> dict[str, Any]:
         system = _load_prompt(system_prompt_name)
         user = self._format_prompt(user_prompt_name, **user_kwargs)
-        raw = self.client.chat(
-            [{"role": "system", "content": system}, {"role": "user", "content": user}],
-            temperature=0.0,
-        )
+        try:
+            raw = self.client.chat(
+                [{"role": "system", "content": system}, {"role": "user", "content": user}],
+                temperature=0.0,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.error(f"Judge LLM call failed for {user_prompt_name}: {exc}")
+            raw = ""
         return _parse_json_response(raw)
 
     @staticmethod
@@ -138,6 +148,33 @@ class ContextRecallMetric(BaseJudgeMetric):
         }
 
 
+class AnswerRelevancyMetric(BaseJudgeMetric):
+    """Evaluate how relevant an answer is to the asked question."""
+
+    def score(self, question: str, answer: str) -> float:
+        """Compute the relevancy score for the given answer against the question.
+
+        Returns a float in the range [0, 1]. If the judge response cannot be
+        parsed or the score is missing/invalid, returns 0.0.
+        """
+        parsed = self._judge(
+            "eval_answer_relevancy_system",
+            "eval_answer_relevancy_user",
+            question=question,
+            answer=answer,
+        )
+        raw_score = parsed.get("score")
+        try:
+            score = float(raw_score)  # type: ignore[arg-type]
+        except (TypeError, ValueError):
+            logger.warning(f"Judge returned invalid score: {raw_score!r}")
+            return 0.0
+        if not 0.0 <= score <= 1.0:
+            logger.warning(f"Judge returned out-of-range score: {score}")
+            return 0.0
+        return round(score, 4)
+
+
 def hit_rate_at_k(retrieved_ids: list[int], relevant_ids: set[int], k: int) -> float:
     """Return 1.0 if any relevant id appears in the top-k retrieved ids."""
     return 1.0 if set(retrieved_ids[:k]) & relevant_ids else 0.0
@@ -213,12 +250,16 @@ class EvalHarness:
         top_k: int = 5,
     ) -> dict[str, Any]:
         """Run retrieval-only evaluation for each question in the dataset."""
+        if retriever not in ALLOWED_RETRIEVERS:
+            raise ValueError(f"Unsupported retriever: {retriever}")
+
+        search_method = getattr(self.service, f"search_{retriever}", None)
+        if search_method is None:
+            raise ValueError(f"Unsupported retriever: {retriever}")
+
         results: list[dict[str, Any]] = []
         for question in dataset.questions:
-            if retriever == "semantic":
-                hits = self.service.search_semantic(question.question, top_k=top_k)
-            else:
-                raise ValueError(f"Unsupported retriever: {retriever}")
+            hits = search_method(question.question, top_k=top_k)
 
             retrieved_ids = [hit["chunk"].id for hit in hits]
             relevant_ids = set(question.ground_truth_context_ids)

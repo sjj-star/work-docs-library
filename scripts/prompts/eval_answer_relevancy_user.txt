@@ -1,0 +1,8 @@
+Question: $question
+
+Answer: $answer
+
+Instructions:
+1. Read the question and answer carefully.
+2. Decide how well the answer addresses the question.
+3. Return a JSON object with a "score" float in [0.0, 1.0] and a brief "reason".
