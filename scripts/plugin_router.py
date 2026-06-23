@@ -572,7 +572,7 @@ def tool_search_hybrid(params: dict) -> dict:
             "text": text,
             "results": [{"score": r["score"], **_chunk_to_dict(r["chunk"])} for r in results],
         }
-    except (RuntimeError, ValueError) as e:
+    except Exception as e:
         return {"success": False, "error": str(e)}
 
 
@@ -598,7 +598,7 @@ def tool_search_reranked(params: dict) -> dict:
             "text": text,
             "results": [{"score": r["score"], **_chunk_to_dict(r["chunk"])} for r in results],
         }
-    except (RuntimeError, ValueError) as e:
+    except Exception as e:
         return {"success": False, "error": str(e)}
 
 
@@ -617,6 +617,8 @@ def tool_agentic_plan(params: dict) -> dict:
     try:
         planner = AgenticSearchPlanner()
         steps = planner.plan(str(question), context=context)
+        if question and not steps:
+            return {"success": False, "error": "Planner returned no steps"}
         return {
             "success": True,
             "question": question,

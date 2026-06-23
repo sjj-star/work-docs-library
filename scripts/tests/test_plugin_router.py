@@ -431,6 +431,45 @@ def test_agentic_plan_missing_question():
     assert "question" in result["error"]
 
 
+def test_search_hybrid_arbitrary_exception(patched_config, monkeypatch):
+    """tool_search_hybrid 应捕获任意异常并返回 success=False."""
+
+    class FakeSvc:
+        def search_hybrid(self, text, top_k=5):
+            raise KeyError("missing key")
+
+    monkeypatch.setattr(plugin_router, "_get_service", lambda: FakeSvc())
+    result = plugin_router.tool_search_hybrid({"text": "SPI"})
+    assert result["success"] is False
+    assert "missing key" in result["error"]
+
+
+def test_search_reranked_arbitrary_exception(patched_config, monkeypatch):
+    """tool_search_reranked 应捕获任意异常并返回 success=False."""
+
+    class FakeSvc:
+        def search_reranked(self, text, top_k=5, candidate_k=None):
+            raise ConnectionError("network down")
+
+    monkeypatch.setattr(plugin_router, "_get_service", lambda: FakeSvc())
+    result = plugin_router.tool_search_reranked({"text": "I2C"})
+    assert result["success"] is False
+    assert "network down" in result["error"]
+
+
+def test_agentic_plan_empty_steps(monkeypatch):
+    """tool_agentic_plan 对非空 question 返回空步骤时应返回错误."""
+
+    class FakePlanner:
+        def plan(self, question, context=None):
+            return []
+
+    monkeypatch.setattr(plugin_router, "AgenticSearchPlanner", FakePlanner)
+    result = plugin_router.tool_agentic_plan({"question": "What is SPI?"})
+    assert result["success"] is False
+    assert "no steps" in result["error"].lower()
+
+
 # ---------------------------------------------------------------------------
 # kimi.plugin.json regression
 # ---------------------------------------------------------------------------
