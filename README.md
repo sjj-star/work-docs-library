@@ -126,6 +126,64 @@ flowchart TB
 1. **图片引用格式**：必须使用标准 Markdown 格式 `![image_name](images/path.png)`，其中 `image_name` 将作为全局唯一的 `image_id` 使用
 2. **image_name 要求**：`[]` 中的名称应有意义且唯一（如 `"Figure 1: Timing Diagram"`），不建议留空。若留空，程序将退化为内部编号
 3. **图片路径**：`()` 中的路径应为相对于解析输出目录的相对路径，且该路径下必须存在对应的实际图片文件
+4. **章节层级**：使用 `#` 表示文档标题，`##` 表示章节，`###+` 表示子章节；`##` 是向量化切分与 batch 聚合的主要边界
+5. **保留原始内容**：除按标题层级拆分与按 `BLOCK_MAX_CHARS` 切分外，不删除、不截断源文本；代码块与表格在切分时受到保护
+6. **多文档一致性**：相同 `entity_type` + `name` 的实体在全局图中自动合并，属性冲突时保留完整性评分更高的版本
+
+## 设计原则与 Agent 使用最佳实践
+
+> 本插件是 AI Agent（Kimi Code 等）的 **MCP 扩展**，不是独立 SaaS。外部 Agent 通过组合原子 MCP 工具完成复杂任务，插件内部不启动完整 Agent 运行时。
+
+### 核心设计原则
+
+1. **复杂策略进 Skill，通用机制进代码**
+   - Python 层只提供机制：PDF 解析、chunk 切分、向量检索、图谱 CRUD、单步搜索、评估指标。
+   - Skill 层编排策略：导入 workflow、ReAct/Self-Ask 多跳检索、查询分解、结果批判。
+   - 示例：`AgenticSearchPlanner` 只把问题分解为 `SearchStep` 列表，具体执行由 `agentic-search` Skill 编排。
+
+2. **状态安全优先于智能**
+   - 数据改写类操作（图谱 CRUD、全局图重建、强制重处理、反馈）保留在 `scripts/admin_tools.py`。
+   - MCP 表面仅暴露一个写工具 `ingest`；其余均为只读查询工具。
+   - Agent 不应尝试调用 `graph_upsert_entity`、`reprocess`、`rebuild_global_graph` 等未暴露工具。
+
+3. **零数据丢失**
+   - 源 Markdown 文本不会被过滤或截断。
+   - 拆分只发生在标题边界与 `BLOCK_MAX_CHARS` 硬切分兜底，代码块与表格边界受到保护。
+
+4. **来源可溯源**
+   - 每个 entity/relation 都记录 `source_doc_ids` 与 `source_chapter`。
+   - 回答用户时应优先调用 `graph_provenance` 或 `get_content` 确认来源，避免仅依赖图谱关系。
+
+### Agent 使用建议
+
+| 场景 | 推荐工具/Skill | 注意事项 |
+|------|---------------|---------|
+| 一次性事实查询 | `semantic_search` 或 `search_hybrid` | 关键词明确用 `search_hybrid`；概念/语义模糊用 `semantic_search` |
+| 需要高精度排序 | `search_reranked` | 成本更高，仅在对 recall/precision 敏感时使用 |
+| 跨文档、多跳、关系问题 | `agentic-search` Skill | 先 `agentic_plan` 获得 SearchStep，再逐步执行 |
+| 关系/路径问题 | `graph_query` / `graph_path` | 调用后使用 `graph_provenance` 验证来源 |
+| 导入/更新文档 | `ingesting-workdocs` Skill | `ingest` 是长流程，必须用 background task + 轮询 `status` |
+| 答案冲突 | `graph_conflicts` | 检查同名实体属性覆盖日志 |
+
+## Skill 层级与调用路径
+
+插件提供项目级 Skill 与用户级 Skill，Agent 应根据问题类型加载对应子 Skill：
+
+| Skill | 路径 | 作用 | 典型场景 |
+|-------|------|------|---------|
+| `using-workdocs` | `skills/using-workdocs/SKILL.md` | 入口 Skill，负责派发至子 Skill | 用户首次提问，不确定 workflow |
+| `ingesting-workdocs` | `skills/ingesting-workdocs/SKILL.md` | 导入/更新 PDF | 用户提供 PDF 或目录 |
+| `exploring-workdocs` | `skills/exploring-workdocs/SKILL.md` | 查询、溯源、图谱探索 | 技术问答、关系查询 |
+| `agentic-search` | `~/.agents/skills/agentic-search/SKILL.md` | 多跳 planned retrieval | 问题跨越多个文档，需要结构化检索计划 |
+
+**推荐调用路径：**
+
+```
+using-workdocs（判断意图）
+  ├── 导入/更新 → ingesting-workdocs → mcp__workdocs__ingest + status 轮询
+  ├── 技术问答 → exploring-workdocs → semantic_search / search_hybrid / graph_query
+  └── 复杂多跳 → agentic-search → agentic_plan → 逐步执行 SearchStep → 综合回答
+```
 
 ---
 
@@ -617,9 +675,9 @@ export WORKDOCS_LLM_TIMEOUT=300
 |------|------|
 | `core/sparse_index.py` | `BM25SparseIndex`：基于 content_blocks 的内存 BM25 稀疏索引，CJK 2-gram + 英文标识符分词 |
 | `core/hybrid_retriever.py` | `RRFFusionRetriever`：稠密向量检索与 BM25 稀疏检索的 RRF 融合 |
-| `core/reranker.py` | `LLMReranker`：使用 LLM 对 query-passage 进行 0-10 分相关度重排序 |
+| `core/reranker.py` | `Reranker` ABC + `LLMReranker`（LLM 打分）+ `CrossEncoderReranker`（本地 CrossEncoder，默认 `BAAI/bge-reranker-v2-m3`） |
 | `core/agentic_search.py` | `AgenticSearchPlanner` + `SearchStep`：将复杂问题分解为可执行检索步骤（不执行，供 Skill 编排） |
-| `core/evaluation.py` | `EvalHarness` + LLM-as-judge 指标（Faithfulness / Context Precision / Context Recall）+ 检索指标（hit rate / MRR / NDCG） |
+| `core/evaluation.py` | `EvalHarness` + LLM-as-judge 指标（Faithfulness / Context Precision / Context Recall / Answer Relevancy）+ 检索指标（hit rate / MRR / NDCG） |
 
 ### 配置
 | 模块 | 职责 |
