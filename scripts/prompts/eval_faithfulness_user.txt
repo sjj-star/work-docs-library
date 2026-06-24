@@ -1,9 +1,9 @@
-Question: {question}
+Question: $question
 
-Answer: {answer}
+Answer: $answer
 
 Contexts:
-{contexts}
+$contexts
 
 Instructions:
 1. Break the answer into atomic claims.

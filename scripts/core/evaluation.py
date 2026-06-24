@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING, Any
 
 from .config import Config
 from .llm_chat_client import BaseLLMClient
-from .models import EvalDataset
+from .models import EvalDataset, EvalQuestion
 
 if TYPE_CHECKING:
     from .knowledge_base_service import KnowledgeBaseService
@@ -203,7 +203,7 @@ def ndcg_at_k(retrieved_ids: list[int], relevance: dict[int, float], k: int) -> 
 
 
 class EvalHarness:
-    """End-to-end evaluation harness for retrieval metrics."""
+    """End-to-end evaluation harness for retrieval and RAG metrics."""
 
     def __init__(
         self,
@@ -211,37 +211,86 @@ class EvalHarness:
         faithfulness: FaithfulnessMetric | None = None,
         context_precision: ContextPrecisionMetric | None = None,
         context_recall: ContextRecallMetric | None = None,
+        answer_relevancy: AnswerRelevancyMetric | None = None,
+        llm_client: BaseLLMClient | None = None,
     ) -> None:
         """Initialize harness with a service and optional judge metrics.
 
-        Judge metrics are instantiated lazily so that retrieval-only evaluations
-        do not require an LLM API key.
+        Judge metrics and the generation client are instantiated lazily so that
+        retrieval-only evaluations do not require an LLM API key.
         """
         self.service = service
         self._faithfulness = faithfulness
         self._context_precision = context_precision
         self._context_recall = context_recall
+        self._answer_relevancy = answer_relevancy
+        self._llm_client = llm_client
+
+    @property
+    def llm_client(self) -> BaseLLMClient:
+        """Lazy LLM client shared by answer generation and judge metrics."""
+        if self._llm_client is None:
+            self._llm_client = BaseLLMClient()
+        return self._llm_client
 
     @property
     def faithfulness(self) -> FaithfulnessMetric:
         """Lazy judge metric for answer faithfulness."""
         if self._faithfulness is None:
-            self._faithfulness = FaithfulnessMetric()
+            self._faithfulness = FaithfulnessMetric(client=self.llm_client)
         return self._faithfulness
 
     @property
     def context_precision(self) -> ContextPrecisionMetric:
         """Lazy judge metric for retrieved-context precision."""
         if self._context_precision is None:
-            self._context_precision = ContextPrecisionMetric()
+            self._context_precision = ContextPrecisionMetric(client=self.llm_client)
         return self._context_precision
 
     @property
     def context_recall(self) -> ContextRecallMetric:
         """Lazy judge metric for ground-truth recall against contexts."""
         if self._context_recall is None:
-            self._context_recall = ContextRecallMetric()
+            self._context_recall = ContextRecallMetric(client=self.llm_client)
         return self._context_recall
+
+    @property
+    def answer_relevancy(self) -> AnswerRelevancyMetric:
+        """Lazy judge metric for answer relevancy to the question."""
+        if self._answer_relevancy is None:
+            self._answer_relevancy = AnswerRelevancyMetric(client=self.llm_client)
+        return self._answer_relevancy
+
+    @staticmethod
+    def _extract_hit_text(hit: dict[str, Any]) -> str:
+        """Extract searchable text from a service search hit.
+
+        Hits produced by :class:`KnowledgeBaseService` contain a ``chunk`` object
+        with a ``content`` attribute. Tests may use stripped-down fake chunks, so
+        fall back gracefully to avoid crashes.
+        """
+        chunk = hit.get("chunk")
+        if chunk is not None:
+            content = getattr(chunk, "content", None)
+            if content:
+                return str(content)
+        return str(hit.get("text", ""))
+
+    def _generate_answer(self, question: EvalQuestion, contexts: list[str]) -> str:
+        """Generate an answer for the question using only the provided contexts."""
+        system = _load_prompt("eval_generate_answer_system")
+        user = Template(_load_prompt("eval_generate_answer_user")).safe_substitute(
+            question=question.question,
+            contexts="\n\n---\n\n".join(contexts),
+        )
+        try:
+            return self.llm_client.chat(
+                [{"role": "system", "content": system}, {"role": "user", "content": user}],
+                temperature=0.0,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.error(f"Answer generation failed: {exc}")
+            return ""
 
     def run_retrieval_eval(
         self,
@@ -298,8 +347,101 @@ class EvalHarness:
     ) -> dict[str, Any]:
         """Run full RAG evaluation including generation metrics.
 
-        For now, this is a placeholder that calls run_retrieval_eval and returns
-        retrieval metrics. Generation metrics will be added when answer generation
-        is integrated.
+        For each question the harness retrieves contexts, generates an answer,
+        and scores both the retrieval and the generated answer.
         """
-        return self.run_retrieval_eval(dataset, retriever=retriever, top_k=top_k)
+        if retriever not in ALLOWED_RETRIEVERS:
+            raise ValueError(f"Unsupported retriever: {retriever}")
+
+        search_method = getattr(self.service, f"search_{retriever}", None)
+        if search_method is None:
+            raise ValueError(f"Unsupported retriever: {retriever}")
+
+        per_question: list[dict[str, Any]] = []
+        for question in dataset.questions:
+            hits = search_method(question.question, top_k=top_k)
+            retrieved_contexts = [self._extract_hit_text(hit) for hit in hits]
+            answer = self._generate_answer(question, retrieved_contexts)
+
+            retrieved_ids = [hit["chunk"].id for hit in hits]
+            relevant_ids = set(question.ground_truth_context_ids)
+            relevance = {cid: 1.0 for cid in relevant_ids}
+
+            faithfulness_result = self.faithfulness.score(
+                question.question, answer, retrieved_contexts
+            )
+            context_precision_result = self.context_precision.score(
+                question.question, retrieved_contexts
+            )
+            context_recall_result = self.context_recall.score(
+                question.ground_truth_answer, retrieved_contexts
+            )
+            answer_relevancy_result = self.answer_relevancy.score(question.question, answer)
+
+            per_question.append(
+                {
+                    "question_id": question.id,
+                    "question": question.question,
+                    "answer": answer,
+                    "faithfulness": faithfulness_result,
+                    "context_precision": context_precision_result,
+                    "context_recall": context_recall_result,
+                    "answer_relevancy": answer_relevancy_result,
+                    "retrieval": {
+                        "retrieved_ids": retrieved_ids,
+                        f"hit_rate@{top_k}": hit_rate_at_k(retrieved_ids, relevant_ids, top_k),
+                        "mrr": mean_reciprocal_rank(retrieved_ids, relevant_ids),
+                        f"ndcg@{top_k}": ndcg_at_k(retrieved_ids, relevance, top_k),
+                    },
+                }
+            )
+
+        def _avg_score(key: str) -> float:
+            values = [q[key]["score"] for q in per_question]
+            return sum(values) / len(values) if values else 0.0
+
+        avg_faithfulness = _avg_score("faithfulness")
+        avg_context_precision = _avg_score("context_precision")
+        avg_context_recall = _avg_score("context_recall")
+        avg_answer_relevancy = (
+            sum(q["answer_relevancy"] for q in per_question) / len(per_question)
+            if per_question
+            else 0.0
+        )
+        avg_hit_rate = (
+            sum(q["retrieval"][f"hit_rate@{top_k}"] for q in per_question) / len(per_question)
+            if per_question
+            else 0.0
+        )
+        avg_mrr = (
+            sum(q["retrieval"]["mrr"] for q in per_question) / len(per_question)
+            if per_question
+            else 0.0
+        )
+        avg_ndcg = (
+            sum(q["retrieval"][f"ndcg@{top_k}"] for q in per_question) / len(per_question)
+            if per_question
+            else 0.0
+        )
+
+        return {
+            "eval_type": "rag",
+            "dataset_name": dataset.name,
+            "retriever": retriever,
+            "top_k": top_k,
+            "num_questions": len(per_question),
+            "average": {
+                "faithfulness": round(avg_faithfulness, 4),
+                "context_precision": round(avg_context_precision, 4),
+                "context_recall": round(avg_context_recall, 4),
+                "answer_relevancy": round(avg_answer_relevancy, 4),
+                "hit_rate": round(avg_hit_rate, 4),
+                "mrr": round(avg_mrr, 4),
+                "ndcg": round(avg_ndcg, 4),
+            },
+            "per_question": per_question,
+            # Backward-compatible keys for consumers expecting retrieval-only output.
+            f"avg_hit_rate@{top_k}": round(avg_hit_rate, 4),
+            "avg_mrr": round(avg_mrr, 4),
+            f"avg_ndcg@{top_k}": round(avg_ndcg, 4),
+        }

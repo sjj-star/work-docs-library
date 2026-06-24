@@ -1,0 +1,6 @@
+Contexts:
+$contexts
+
+Question: $question
+
+Answer the question using only the information in the contexts above. Return a concise answer.

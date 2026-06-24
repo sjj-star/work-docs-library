@@ -1,7 +1,7 @@
-Ground-truth answer: {ground_truth_answer}
+Ground-truth answer: $ground_truth_answer
 
 Retrieved contexts:
-{contexts}
+$contexts
 
 Instructions:
 1. Break the ground-truth answer into atomic claims.

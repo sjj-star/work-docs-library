@@ -530,6 +530,8 @@ def test_eval_harness_lazy_metrics():
     assert harness._faithfulness is None
     assert harness._context_precision is None
     assert harness._context_recall is None
+    assert harness._answer_relevancy is None
+    assert harness._llm_client is None
 
 
 def test_faithfulness_metric_ignores_braces_and_dollar_literals(monkeypatch):
@@ -558,3 +560,120 @@ def test_load_missing_prompt_raises_file_not_found():
 
     with pytest.raises(FileNotFoundError):
         _load_prompt("definitely_missing_prompt")
+
+
+def test_run_rag_eval(monkeypatch):
+    from core.evaluation import EvalHarness
+    from core.llm_chat_client import BaseLLMClient
+    from core.models import EvalDataset, EvalQuestion
+
+    class FakeChunk:
+        def __init__(self, chunk_id, content):
+            self.id = chunk_id
+            self.content = content
+
+    class FakeService:
+        def search_semantic(self, query, top_k=5):
+            return [
+                {"chunk": FakeChunk(1, "Pull CS low first.")},
+                {"chunk": FakeChunk(2, "Then configure the clock idle state.")},
+            ]
+
+    class FakeLLMClient(BaseLLMClient):
+        def chat(self, messages, temperature=0.3, **kwargs):
+            return "{}"
+
+    harness = EvalHarness(FakeService(), llm_client=FakeLLMClient())  # type: ignore[arg-type]
+    monkeypatch.setattr(harness, "_generate_answer", lambda question, contexts: "Generated answer.")
+
+    monkeypatch.setattr(harness.faithfulness, "score", lambda q, a, ctx: {"score": 0.8})
+    monkeypatch.setattr(harness.context_precision, "score", lambda q, ctx: {"score": 0.7})
+    monkeypatch.setattr(harness.context_recall, "score", lambda gt, ctx: {"score": 0.6})
+    monkeypatch.setattr(harness.answer_relevancy, "score", lambda q, a: 0.9)
+
+    q = EvalQuestion(
+        id=1,
+        question="What is the SPI reset sequence?",
+        ground_truth_answer="CS low, then clock idle.",
+        ground_truth_context_ids=[1, 2],
+    )
+    ds = EvalDataset(name="rag", questions=[q])
+    result = harness.run_rag_eval(ds, retriever="semantic", top_k=5)
+
+    assert result["eval_type"] == "rag"
+    assert result["dataset_name"] == "rag"
+    assert result["retriever"] == "semantic"
+    assert result["top_k"] == 5
+    assert result["num_questions"] == 1
+
+    average = result["average"]
+    assert "faithfulness" in average
+    assert "context_precision" in average
+    assert "context_recall" in average
+    assert "answer_relevancy" in average
+    assert "hit_rate" in average
+    assert "mrr" in average
+    assert "ndcg" in average
+    assert average["faithfulness"] == 0.8
+    assert average["context_precision"] == 0.7
+    assert average["context_recall"] == 0.6
+    assert average["answer_relevancy"] == 0.9
+    assert average["hit_rate"] == 1.0
+    assert average["mrr"] == 1.0
+    assert average["ndcg"] == 1.0
+
+    assert result["avg_hit_rate@5"] == 1.0
+    assert result["avg_mrr"] == 1.0
+    assert result["avg_ndcg@5"] == 1.0
+
+    per_q = result["per_question"][0]
+    assert per_q["question_id"] == 1
+    assert per_q["question"] == q.question
+    assert per_q["answer"] == "Generated answer."
+    assert per_q["faithfulness"]["score"] == 0.8
+    assert per_q["context_precision"]["score"] == 0.7
+    assert per_q["context_recall"]["score"] == 0.6
+    assert per_q["answer_relevancy"] == 0.9
+    assert per_q["retrieval"]["hit_rate@5"] == 1.0
+
+
+def test_run_rag_eval_llm_failure(monkeypatch):
+    from core.evaluation import EvalHarness
+    from core.llm_chat_client import BaseLLMClient
+    from core.models import EvalDataset, EvalQuestion
+
+    class FakeChunk:
+        def __init__(self, chunk_id, content):
+            self.id = chunk_id
+            self.content = content
+
+    class FakeService:
+        def search_semantic(self, query, top_k=5):
+            return [{"chunk": FakeChunk(1, "Pull CS low first.")}]
+
+    class FakeLLMClient(BaseLLMClient):
+        def chat(self, messages, temperature=0.3, **kwargs):
+            raise RuntimeError("LLM generation failed")
+
+    harness = EvalHarness(FakeService(), llm_client=FakeLLMClient())  # type: ignore[arg-type]
+
+    monkeypatch.setattr(harness.faithfulness, "score", lambda q, a, ctx: {"score": 0.0})
+    monkeypatch.setattr(harness.context_precision, "score", lambda q, ctx: {"score": 0.0})
+    monkeypatch.setattr(harness.context_recall, "score", lambda gt, ctx: {"score": 0.0})
+    monkeypatch.setattr(harness.answer_relevancy, "score", lambda q, a: 0.0)
+
+    q = EvalQuestion(
+        id=2,
+        question="What is the SPI reset sequence?",
+        ground_truth_answer="CS low first.",
+        ground_truth_context_ids=[1],
+    )
+    ds = EvalDataset(name="rag_fail", questions=[q])
+    result = harness.run_rag_eval(ds, retriever="semantic", top_k=5)
+
+    assert result["num_questions"] == 1
+    assert result["per_question"][0]["answer"] == ""
+    assert result["average"]["faithfulness"] == 0.0
+    assert result["average"]["context_precision"] == 0.0
+    assert result["average"]["context_recall"] == 0.0
+    assert result["average"]["answer_relevancy"] == 0.0

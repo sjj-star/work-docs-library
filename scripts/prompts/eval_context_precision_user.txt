@@ -1,7 +1,7 @@
-Question: {question}
+Question: $question
 
 Retrieved contexts (one per item):
-{contexts}
+$contexts
 
 Instructions:
 For each context above (in the same order), decide whether it contains information relevant to answering the question.
