@@ -66,5 +66,5 @@ class RRFFusionRetriever:
         for rank, (db_id, _score) in enumerate(sparse_hits, start=1):
             scores[db_id] = scores.get(db_id, 0.0) + 1.0 / (self.k + rank)
 
-        sorted_hits = sorted(scores.items(), key=lambda x: x[1], reverse=True)
+        sorted_hits = sorted(scores.items(), key=lambda x: (x[1], x[0]), reverse=True)
         return sorted_hits[:top_k]

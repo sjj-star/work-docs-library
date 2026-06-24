@@ -80,7 +80,12 @@ class BM25SparseIndex:
             logger.info("BM25 索引为空 | 无文档")
 
     def search(self, query: str, top_k: int = 10) -> list[tuple[int, float]]:
-        """搜索 BM25 索引，返回 (block_db_id, score) 列表."""
+        """搜索 BM25 索引，返回 (block_db_id, score) 列表.
+
+        Note:
+            Only hits with a positive BM25 score are returned; zero-score
+            candidates are filtered out to avoid noise from non-matching blocks.
+        """
         if self._index is None or not self._corpus:
             return []
         scores = self._index.get_scores(self._tokenize(query))

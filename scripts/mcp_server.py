@@ -186,6 +186,10 @@ MCP_TOOL_SCHEMAS: dict[str, dict] = {
                 "description": "最大搜索深度",
                 "default": Config.PLUGIN_GRAPH_MAX_DEPTH,
             },
+            "depth": {
+                "type": "integer",
+                "description": "max_depth 的兼容别名（已弃用，建议优先使用 max_depth）",
+            },
         },
         "required": ["from_type", "from_name", "to_type", "to_name"],
     },

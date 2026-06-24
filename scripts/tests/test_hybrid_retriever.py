@@ -1,3 +1,4 @@
+from core.config import Config
 from core.hybrid_retriever import RRFFusionRetriever
 
 
@@ -41,6 +42,41 @@ def test_rrf_empty_results():
 
     retriever = RRFFusionRetriever(FakeVectorIndex(), FakeSparseIndex())  # type: ignore[reportArgumentType]
     assert retriever.search("test", FakeEmbedder()) == []
+
+
+def test_rrf_default_k_uses_config():
+    """RRFFusionRetriever without an explicit k should adopt Config.PLUGIN_HYBRID_RRF_K."""
+
+    class FakeVectorIndex:
+        def search(self, query_vector, top_k):
+            return []
+
+    class FakeSparseIndex:
+        def search(self, query, top_k):
+            return []
+
+    retriever = RRFFusionRetriever(FakeVectorIndex(), FakeSparseIndex())  # type: ignore[reportArgumentType]
+    assert retriever.k == float(Config.PLUGIN_HYBRID_RRF_K)
+
+
+def test_rrf_tie_breaking_prefers_higher_block_id():
+    """When two blocks have identical RRF scores, the higher block_db_id wins."""
+
+    class FakeVectorIndex:
+        def search(self, query_vector, top_k):
+            return [(1, 0.5)]
+
+    class FakeSparseIndex:
+        def search(self, query, top_k):
+            return [(2, 0.5)]
+
+    class FakeEmbedder:
+        def embed(self, texts):
+            return [[0.0] * 10]
+
+    retriever = RRFFusionRetriever(FakeVectorIndex(), FakeSparseIndex(), k=60.0)  # type: ignore[reportArgumentType]
+    hits = retriever.search("test", FakeEmbedder(), top_k=2)
+    assert [h[0] for h in hits] == [2, 1]
 
 
 def test_knowledge_base_service_search_hybrid(tmp_path, monkeypatch):

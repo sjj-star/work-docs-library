@@ -484,3 +484,43 @@ def test_bridge_rebuild_with_content_blocks(tmp_path, monkeypatch):
         _EntityRef("Module", "M1"),
     }
     assert svc._bridge.get_chunks(_EntityRef("Register", "A")) == {block_id}
+
+
+def test_sparse_index_cache_invalidated_after_db_insert(tmp_path, monkeypatch):
+    """search_hybrid 的 BM25 缓存应在底层 DB 新增 block 后自动失效重建."""
+    monkeypatch.setattr("core.config.Config.DB_PATH", tmp_path / "test.db")
+    monkeypatch.setattr("core.config.Config.FAISS_INDEX_PATH", tmp_path / "faiss.index")
+
+    svc = KnowledgeBaseService()
+    svc.db.upsert_document(
+        Document(doc_id="doc-cache", title="T", source_path="/x.pdf", file_type="pdf")
+    )
+    svc.db.insert_block(doc_id="doc-cache", block_id="b1", content="alpha beta gamma", seq_index=0)
+    svc.db.insert_block(
+        doc_id="doc-cache", block_id="b2", content="delta epsilon zeta", seq_index=1
+    )
+    svc.db.insert_block(doc_id="doc-cache", block_id="b3", content="eta theta iota", seq_index=2)
+
+    class FakeVectorIndex:
+        def search(self, query_vector, top_k):
+            return []
+
+    class FakeEmbedder:
+        def embed(self, texts):
+            return [[0.0] * 4]
+
+    svc.vec = FakeVectorIndex()  # type: ignore[assignment]
+    monkeypatch.setattr(svc, "_get_embedder", lambda: FakeEmbedder())
+
+    # 首次查询以填充 BM25 缓存
+    first = svc.search_hybrid("alpha", top_k=5)
+    assert any(r["chunk"].chunk_id == "b1" for r in first)
+
+    # 直接通过 DB 插入新 block，不手动清空缓存
+    svc.db.insert_block(
+        doc_id="doc-cache", block_id="b4", content="xyzzy_alpha_token_unique", seq_index=3
+    )
+
+    # 再次查询应命中新 block，说明缓存已自动失效并重建
+    second = svc.search_hybrid("xyzzy_alpha_token_unique", top_k=5)
+    assert any(r["chunk"].chunk_id == "b4" for r in second)

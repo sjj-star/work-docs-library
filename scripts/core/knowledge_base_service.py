@@ -7,6 +7,7 @@
 import copy
 import logging
 import shutil
+from collections.abc import Callable
 from typing import Any, NamedTuple
 
 from .config import Config
@@ -15,6 +16,7 @@ from .doc_graph_pipeline import DocGraphPipeline
 from .embedding_client import EmbeddingClient
 from .graph_store import GraphEntity, GraphRelation, NetworkXGraphStore, SubGraphView
 from .models import Chunk, Document
+from .reranker import LLMReranker
 from .sparse_index import BM25SparseIndex
 from .vector_index import VectorIndex
 
@@ -111,6 +113,7 @@ class KnowledgeBaseService:
         self.graph = graph_store or NetworkXGraphStore()
         self._embedder: EmbeddingClient | None = None
         self._sparse_index: BM25SparseIndex | None = None
+        self._reranker: LLMReranker | None = None
         self._bridge = _EntityChunkBridge()
         self._bridge.rebuild(self.db)
         if graph_store is None:
@@ -199,10 +202,37 @@ class KnowledgeBaseService:
         return self._embedder
 
     def _get_sparse_index(self) -> BM25SparseIndex:
-        """获取复用的 BM25SparseIndex 实例（懒加载）."""
-        if self._sparse_index is None:
+        """获取复用的 BM25SparseIndex 实例（懒加载 + 自动失效）."""
+        current_total = sum(self.db.count_blocks_by_status().values())
+        cached_total = (
+            self._sparse_index.index_info().get("num_blocks", 0)
+            if self._sparse_index is not None
+            else -1
+        )
+        if cached_total != current_total:
             self._sparse_index = BM25SparseIndex(self.db)
+        assert self._sparse_index is not None
         return self._sparse_index
+
+    def _get_reranker(self) -> LLMReranker:
+        """获取复用的 LLMReranker 实例（懒加载）."""
+        if self._reranker is None:
+            self._reranker = LLMReranker()
+        return self._reranker
+
+    _ALLOWED_RETRIEVERS: dict[str, str] = {
+        "semantic": "search_semantic",
+        "hybrid": "search_hybrid",
+        "reranked": "search_reranked",
+    }
+
+    def _get_retriever(self, retriever: str) -> Callable[..., list[dict]]:
+        """按名称返回检索方法 callable，并在不支持时尽早抛出清晰错误."""
+        method_name = self._ALLOWED_RETRIEVERS.get(retriever)
+        if method_name is None:
+            allowed = ", ".join(sorted(self._ALLOWED_RETRIEVERS))
+            raise ValueError(f"Unsupported retriever: {retriever}. Allowed: {allowed}")
+        return getattr(self, method_name)
 
     def close(self) -> None:
         """关闭资源."""
@@ -432,15 +462,13 @@ class KnowledgeBaseService:
         Returns:
             [{"score": float, "chunk": Chunk}, ...]
         """
-        from .reranker import LLMReranker
-
         if candidate_k is None:
             candidate_k = top_k * 4
 
         candidates = self.search_hybrid(text, top_k=candidate_k)
         passages = [(c["chunk"].id, c["chunk"].content) for c in candidates]
         try:
-            reranked = LLMReranker().rank(text, passages)
+            reranked = self._get_reranker().rank(text, passages)
         except Exception:
             logger.exception("Reranking failed, returning hybrid results")
             reranked = [(c["chunk"].id, c["score"]) for c in candidates]
@@ -460,6 +488,9 @@ class KnowledgeBaseService:
     ) -> dict[str, Any]:
         """Evaluate a dataset using the specified retriever."""
         from .evaluation import EvalHarness
+
+        # 尽早校验 retriever，避免在 harness 内部才暴露不清晰的错误
+        self._get_retriever(retriever)
 
         dataset = self.db.load_eval_dataset(dataset_name)
         harness = EvalHarness(self)

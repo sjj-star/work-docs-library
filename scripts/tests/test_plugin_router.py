@@ -811,6 +811,39 @@ def test_graph_path_not_found(monkeypatch, graph_service):
     assert result["path_count"] == 0
 
 
+def test_graph_path_depth_alias(monkeypatch, graph_service):
+    """graph_path 接受 depth 作为 max_depth 的兼容别名."""
+    monkeypatch.setattr(plugin_router, "_get_service", lambda: graph_service)
+
+    # depth=1 不足以覆盖 TOP -> SUB -> REG 的两跳路径
+    result = plugin_router.tool_graph_path(
+        {
+            "from_type": "Module",
+            "from_name": "TOP",
+            "to_type": "Register",
+            "to_name": "REG",
+            "depth": 1,
+        }
+    )
+    assert result["success"] is True
+    assert result["max_depth"] == 1
+    assert result["path_count"] == 0
+
+    # depth=2 应能找到两跳路径
+    result = plugin_router.tool_graph_path(
+        {
+            "from_type": "Module",
+            "from_name": "TOP",
+            "to_type": "Register",
+            "to_name": "REG",
+            "depth": 2,
+        }
+    )
+    assert result["success"] is True
+    assert result["max_depth"] == 2
+    assert result["path_count"] == 1
+
+
 def test_graph_query_subgraph(monkeypatch, graph_service):
     """graph_query depth>1 提取子图."""
     monkeypatch.setattr(plugin_router, "_get_service", lambda: graph_service)
@@ -1312,3 +1345,12 @@ def test_tool_evaluate_error(monkeypatch):
     result = tool_evaluate({"dataset_name": "broken"})
     assert result["success"] is False
     assert "dataset corrupt" in result["error"]
+
+
+def test_tool_evaluate_invalid_retriever():
+    from plugin_router import tool_evaluate
+
+    result = tool_evaluate({"dataset_name": "baseline", "retriever": "unknown"})
+    assert result["success"] is False
+    assert "Unsupported retriever" in result["error"]
+    assert "unknown" in result["error"]

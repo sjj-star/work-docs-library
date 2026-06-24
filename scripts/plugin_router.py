@@ -39,6 +39,10 @@ if __name__ == "__main__":
 logger = logging.getLogger("plugin_router")
 
 
+#: 评估工具支持的检索器类型。
+_EVALUATION_RETRIEVERS: set[str] = {"semantic", "hybrid", "reranked"}
+
+
 # ---------------------------------------------------------------------------
 # 序列化辅助
 # ---------------------------------------------------------------------------
@@ -365,11 +369,15 @@ def tool_evaluate(params: dict) -> dict:
     if not dataset_name:
         return {"success": False, "error": "Missing required parameter: dataset_name"}
 
+    retriever = params.get("retriever", "semantic")
+    if retriever not in _EVALUATION_RETRIEVERS:
+        return {"success": False, "error": f"Unsupported retriever: {retriever}"}
+
     svc = _get_service()
     try:
         result = svc.evaluate_dataset(
             dataset_name=dataset_name,
-            retriever=params.get("retriever", "semantic"),
+            retriever=retriever,
             top_k=params.get("top_k", Config.PLUGIN_SEARCH_TOP_K),
         )
         return {"success": True, "dataset_name": dataset_name, **result}
@@ -815,7 +823,7 @@ def tool_graph_path(params: dict) -> dict:
     if not all([from_type, from_name, to_type, to_name]):
         return {"success": False, "error": "Missing from/to entity parameters"}
 
-    max_depth = params.get("max_depth", Config.PLUGIN_GRAPH_MAX_DEPTH)
+    max_depth = params.get("max_depth", params.get("depth", Config.PLUGIN_GRAPH_MAX_DEPTH))
     svc = _get_service()
     paths = svc.find_path(str(from_type), str(from_name), str(to_type), str(to_name), max_depth)
 
@@ -1202,6 +1210,7 @@ def tool_config(params: dict) -> dict:
         "PLUGIN_DEFAULT_LIMIT": "Plugin 配置",
         "PLUGIN_BM25_TOP_K": "Plugin 配置",
         "PLUGIN_HYBRID_RRF_K": "Plugin 配置",
+        "RERANK_CROSS_ENCODER_MODEL": "Plugin 配置",
         "GRAPH_MAX_PATH_DEPTH": "Pipeline 配置",
         "BLOCK_MAX_CHARS": "Pipeline 配置",
         "DB_PATH": "路径配置",
