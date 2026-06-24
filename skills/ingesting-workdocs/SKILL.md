@@ -1,6 +1,6 @@
 ---
 name: ingesting-workdocs
-description: Use when importing, updating, or reprocessing technical PDFs and directories into the work-docs-library knowledge base
+description: Use when importing or updating technical PDFs and directories into the work-docs-library knowledge base
 ---
 
 # Ingesting Work Docs
@@ -30,11 +30,11 @@ Ingestion parses PDFs, extracts chapters, builds LLM batches, runs entity/relati
 
 4. **Choose the action**
    - New PDF or directory → `mcp__workdocs__ingest` with `{"path": "..."}`.
-   - Update/retry an existing document → `mcp__workdocs__reprocess` with `{"doc_id": "..."}`.
+   - Update/retry an existing document or a failed document → **admin-only**: run `python scripts/admin_tools.py reprocess --params '{"doc_id": "..."}'`. This is not exposed as an MCP tool because it may rewrite graph/vector state.
    - Fine-grained control (rarely needed) → call the individual `doc_*` tools in order.
 
-5. **Run as a background task**
-   - **REQUIRED:** Call `mcp__workdocs__ingest` or `mcp__workdocs__reprocess` as a background task with `timeout` set to at least 1800 seconds.
+5. **Run `ingest` as a background task**
+   - **REQUIRED:** Call `mcp__workdocs__ingest` as a background task with `timeout` set to at least 1800 seconds.
    - The call returns a list of `doc_ids`; record all of them.
 
 6. **Poll until completion**
@@ -43,7 +43,7 @@ Ingestion parses PDFs, extracts chapters, builds LLM batches, runs entity/relati
 
 7. **Summarize results**
    - Report document id, status, number of chapters/blocks, entities, and relations.
-   - If the status is `failed`, show the failure reason and suggest `reprocess`.
+   - If the status is `failed`, show the failure reason and suggest running `python scripts/admin_tools.py reprocess` (admin-only) after confirming with the user.
 
 ## Output Format
 
@@ -65,9 +65,6 @@ Ingestion parses PDFs, extracts chapters, builds LLM batches, runs entity/relati
 {"path": "./docs/spi.pdf"}
 
 // Poll progress
-{"doc_id": "spi"}
-
-// Retry a failed doc
 {"doc_id": "spi"}
 ```
 

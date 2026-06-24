@@ -110,7 +110,7 @@ flowchart TB
 
 **数据流说明：**
 
-1. **阶段1（解析）**：`BigModelParserClient` 调用 **BigModel 专用** Expert API 解析 PDF，输出 Markdown 文本（含 `![alt](images/xxx.jpg)` 图片引用）+ `images/` 目录（⚠️ 该 API 非 OpenAI-compatible，仅支持 BigModel 厂商；失败时自动 fallback 到本地 `PDFParser`，输出格式完全一致）
+1. **阶段1（解析）**：`BigModelParserClient` 调用 **BigModel 专用** Expert API 解析 PDF，输出 Markdown 文本（含 `![alt](images/xxx.png)` 图片引用）+ `images/` 目录（⚠️ 该 API 非 OpenAI-compatible，仅支持 BigModel 厂商；失败时自动 fallback 到本地 `PDFParser`，输出格式完全一致）
 2. **阶段2（构建 LLM Batch）**：`ChapterParser.parse_tree()` 将 Markdown 解析为树形章节结构（`#` 文档标题，`##` 章节，`###+` 子章节）。`_collect_section_content()` 按 `##` section 递归聚合自身 content + 所有子孙 content（保留 Markdown 层级）。`_build_content_blocks_and_maps()` 使用 `_split_for_embedding()` 按 `BLOCK_MAX_CHARS`（默认 6000）将聚合内容切分为**向量化粒度**的 content_blocks（段落→句子→字符硬切分兜底，保护代码块/表格）。同时构建 `heading_maps`（`##`/`###`/`####` 都映射到同一 section 的 block 集合）。`BatchBuilder.build_batches()` **按 `section_title` 聚合**多个 content_blocks 为 LLM batch request，保持 LLM 大粒度提取；聚合后若超过 `LLM_BATCH_MAX_CHARS` 再按段落边界切分。`EntityExtractor` 流式解析图片引用，按原文顺序构建 multimodal content，生成 `{doc_id}.jsonl` + `{doc_id}_batch_info.json`
 3. **阶段3（提交 LLM Batch）**：**优先读取** `batch/{doc_id}.jsonl`（支持用户编辑后重新提交），结合 `batch/{doc_id}_batch_info.json` 做增量过滤，仅对变更/新增章节的 requests 提交 Batch API。超大 JSONL 自动按 100MB 拆分并行提交。结果保存为 `{doc_id}_results.jsonl`，增量摘要保存为 `{doc_id}_incremental.json` 供阶段4校验一致性
 4. **阶段4（解析入库，不含向量化）**：从 `results.jsonl` 解析 `entities`/`relationships`/`image_descriptions`，复用未变 section 的缓存实体/关系。`GraphStore`（NetworkX）构建图谱，**同名同类型实体自动去重合并**，每个文档保存独立子图 `graphs/{doc_id}.json`。同时保存每个文档的原始属性快照到 `doc_properties[doc_id]`，支持按文档精确查询。提取产品型号建立 `Product --[HAS_MODULE]--> Module` 关系。content_blocks 和 heading_maps 写入 SQLite，content_block 状态设为 `embedded`；每个 block 的 `metadata.extracted_entities` 缓存该 block 中提及的实体引用，作为后续跨粒度桥接索引的唯一数据源
@@ -123,7 +123,7 @@ flowchart TB
 
 本工具对被处理的 Markdown 文档（由 BigModel Expert 解析生成）有以下约束：
 
-1. **图片引用格式**：必须使用标准 Markdown 格式 `![image_name](images/path.jpg)`，其中 `image_name` 将作为全局唯一的 `image_id` 使用
+1. **图片引用格式**：必须使用标准 Markdown 格式 `![image_name](images/path.png)`，其中 `image_name` 将作为全局唯一的 `image_id` 使用
 2. **image_name 要求**：`[]` 中的名称应有意义且唯一（如 `"Figure 1: Timing Diagram"`），不建议留空。若留空，程序将退化为内部编号
 3. **图片路径**：`()` 中的路径应为相对于解析输出目录的相对路径，且该路径下必须存在对应的实际图片文件
 
@@ -174,7 +174,7 @@ work-docs-library/
 │   │   ├── pdf_parser.py         # PDF 本地解析器（fallback，输出与 BigModel 一致）
 │   │   ├── office_parser.py      # DOCX / XLSX 解析器（代码存在，尚未接入 pipeline）
 │   │   └── image_utils.py        # 图片压缩工具
-│   └── tests/                    # pytest 测试集（491 个用例）
+│   └── tests/                    # pytest 测试集（514 个用例）
 ├── knowledge_base/               # 运行时自动生成
 │   ├── workdocs.db               # SQLite 元数据
 │   ├── faiss.index               # FAISS 向量索引（IndexIDMap2，直接存储 block_db_id）
@@ -390,8 +390,8 @@ mcp__workdocs__query {"doc_id": "<DOC_HASH>", "chapter": "CPU"}
 # 正则匹配（利用 heading_maps 索引，避免全表扫描）
 mcp__workdocs__query {"doc_id": "<DOC_HASH>", "chapter_regex": "^2\\."}
 
-# 包含子章节内容（自动包含 2.1.1、2.1.2 等）
-mcp__workdocs__query {"doc_id": "<DOC_HASH>", "chapter": "2.1", "include_children": true}
+# 按概念查询（匹配 heading_maps 中的标题关键词）
+mcp__workdocs__query {"doc_id": "<DOC_HASH>", "concept": "CPU Architecture"}
 ```
 
 ### 7. 查看已导入文档
@@ -763,7 +763,7 @@ cd /path/to/work-docs-library
 PYTHONPATH=scripts ./.venv/bin/python -m pytest scripts/tests/ -v
 ```
 
-**当前状态：491 passed, 0 skipped, 0 failed。**
+**当前状态：514 passed, 0 skipped, 0 failed。**
 
 ### 测试分类与审计
 
@@ -818,7 +818,7 @@ PYTHONPATH=scripts ./.venv/bin/python -m pytest \
 
 #### 当前状态
 
-核心测试集已稳定在 **491 个用例**（0 skipped）。
+核心测试集已稳定在 **514 个用例**（0 skipped）。
 
 ### 常用测试文档
 
@@ -863,7 +863,7 @@ WORKDOCS_PARSER_API_KEY=your-api-key
 
 ### 功能限制
 
-1. **仅支持 PDF**：DOCX/XLSX 解析器代码已存在，但尚未接入 `DocGraphPipeline`
+1. **仅支持 PDF**：DOCX/XLSX 解析器代码已存在，但尚未接入 `DocGraphPipeline`。如需单独使用 office 解析器，可安装可选依赖 `pip install -e ".[office]"`。
 2. **Batch API 延迟**：Batch API 成本为同步 API 的 50%，但存在分钟级排队延迟
 3. **JSONL 大小限制**：单个 JSONL 文件不能超过 100MB，超大文档会自动拆分为多个并行 batch
 4. **Embedding 维度不可变**：FAISS 索引创建后维度固定。更换模型导致维度变化时，必须删除旧索引并重新处理
