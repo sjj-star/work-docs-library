@@ -177,9 +177,9 @@
 
 ---
 
-## 8. 配置系统：.env / 环境变量 → 默认值
+## 8. 配置系统：环境变量 → `.env` → 默认值
 
-**选择**：两层优先级配置系统——`.env`/环境变量 > 代码默认值。
+**选择**：三层优先级配置系统——环境变量 > `.env` 文件 > 代码默认值。
 
 **原因**：
 - 新 Kimi Code 插件规范不再支持旧 `plugin.json` 的 `configFile`/`inject` 字段，Kimi CLI 不再自动管理 `config.json`。
@@ -187,6 +187,7 @@
 - 统一使用 `.env`/环境变量后，配置来源单一，更易于在 CI、容器和插件环境中管理。
 
 **实现**：
+- `load_dotenv(..., override=False)` 加载 `scripts/.env`，不覆盖已存在的环境变量，因此系统/CLI 注入的环境变量优先级高于 `.env` 文件。
 - `_resolve_config(env_name, default)` 统一解析，仅检查环境变量和默认值。
 - `scripts/.env.example` 作为配置模板，与 README.md「配置说明」表格保持同步。
 - 数值类型配置（dimension、batch_max_chars 等）在类定义后通过 `_initialize_numeric_configs()` 初始化。
@@ -468,108 +469,52 @@ block_db_id = faiss_id
 - 早期使用 `_BLOCK_FAISS_OFFSET = 10_000_000` 是为了兼容共存于同一 FAISS 文件的旧 chunks；该偏移及旧格式迁移代码已移除，新代码直接使用 `block_db_id`
 - `IndexIDMap2.remove_ids` 是 FAISS 内部操作，回滚性能优于旧的快照/重建方式
 
----
+### 混合检索：BM25 稀疏索引 + FAISS 稠密向量 RRF 融合
 
-## 为什么需要 EntityChunkBridge 双向桥接索引？
+**设计**：在 `VectorIndex`（FAISS 稠密向量）之上增加 `BM25SparseIndex`，通过 `RRFFusionRetriever` 对两种检索结果做 Reciprocal Rank Fusion（RRF）。
 
-**选择**：在 `KnowledgeBaseService` 内部维护一个纯内存的 `_EntityChunkBridge`，建立 `block_db_id ↔ (entity_type, entity_name)` 的双向多对多映射。零 schema 变更、零数据模型变更，从 SQLite `content_blocks.metadata["extracted_entities"]` 构建。
+**BM25SparseIndex 实现**：
+- 内存索引，启动时从 `content_blocks` 全量构建，使用 `rank_bm25.BM25Okapi`
+- 分词策略针对技术文档优化：
+  - 英文/数字/标识符：`[a-zA-Z0-9_]+`
+  - CJK 连续字符：单字 + 2-gram，兼顾中文术语匹配能力
+  - 其他符号单独成 token
+- 工厂方法 `from_blocks(blocks)` 支持从任意 block 列表构建独立索引，便于单测与离线实验
 
-**原因**：
-- **补齐单向关联的缺失**：原有架构中 block → entity 的关联已存在（通过 `metadata.extracted_entities`），但 entity → block 的反向查询缺失。`graph_provenance` 此前通过逐文档遍历所有 blocks 做暴力扫描（O(N)），不可扩展
-- **打通不同粒度空间**：FAISS 向量索引操作的是 block 粒度（文本片段 + embedding），NetworkX 图谱操作的是 entity 粒度（结构化实体 + 关系）。桥接索引使两者可以双向导航
-- **支持策略层灵活组合**：机制层只提供原子操作（`_chunk_to_entities` / `_entity_to_chunks` / `_get_chunk` / `_semantic_hits` / `_get_subgraph`），策略层可自由组合出任意跨粒度查询（语义→图谱→语义闭环、路径文本证据链等）
-
-**实现**：
-```python
-_forward:  dict[int, set[_EntityRef]]     # block_id → {EntityRef}
-_reverse:  dict[_EntityRef, set[int]]     # EntityRef → {block_id}
+**RRF 融合公式**：
 ```
-
-**生命周期**：
-- `KnowledgeBaseService.__init__` → `bridge.rebuild()` 全量构建
-- `ingest_document` / `reprocess_document` 完成后 → `_sync_bridge_for_doc()` 增量同步
-- `attach()` 幂等设计：同一 block 重复 attach 会先 detach 旧绑定，避免索引累积
-- `detach()` 双向清理：同时清除 `_forward` 和 `_reverse`，空集合自动删除
-
-**不同粒度关联矩阵**：
-
-| 方向 | 粒度 | 已有/新增 | 机制 |
-|------|------|----------|------|
-| block → entity | 向量→图谱 | 已有 | `metadata.extracted_entities` |
-| entity → block | 图谱→向量 | **新增** | `_entity_to_chunks()` O(1) |
-| document → entity | 文档→图谱 | 已有 | `GraphEntity.source_doc_ids` |
-| entity → document | 图谱→文档 | 已有 | `GraphEntity.source_doc_ids` |
-| chapter → entity | 章节→图谱 | 已有 | `GraphEntity.source_chapter` |
-| block → subgraph | 向量→子图 | 已有 | `search_with_graph()` |
-| subgraph → block | 子图→向量 | **可组合** | 子图实体 → `_entity_to_chunks()` |
-
-**权衡**：
-- 内存索引，重启需重建（但 `KnowledgeBaseService` 为长生命周期单例，初始化成本可忽略：几百文档 × 几十实体）
-- 不解决"实体级语义搜索"（如搜索 "GPIO" 也匹配 "General Purpose Input Output"），那是实体 embedding 的范畴，不在本次机制设计范围内
-
----
-
-## 联合查询与 Agent 自主推理
-
-**设计**：`search_with_graph()` 使用原子操作组合实现语义搜索与图谱查询的联合。
-
-**原子操作层（机制，无策略参数）**：
-- `_semantic_hits(query, top_k)` → FAISS 搜索，返回 `[(block_db_id, score), ...]`
-- `_get_chunk(block_db_id)` → 深拷贝获取 Chunk 对象（内存表示）
-- `_chunk_to_entities(block_db_id)` → 桥接索引正向查询，返回 `set[_EntityRef]`
-- `_entity_to_chunks(entity_type, name)` → 桥接索引反向查询，返回 `set[block_db_id]`
-- `get_entity(type, name)` / `get_subgraph(type, name, depth)` → 图谱空间查询
-
-**策略组合示例**：
-
+score(d) = Σ 1 / (k + rank_d)
 ```
-search_with_graph（语义→图谱）:
-  _semantic_hits → _get_chunk → _chunk_to_entities → get_subgraph
+- `k = Config.PLUGIN_HYBRID_RRF_K`（默认 60）
+- 稠密候选数默认 `PLUGIN_SEARCH_TOP_K * 10`，稀疏候选数默认 `PLUGIN_BM25_TOP_K`（默认 50）
+- 返回 `[(block_db_id, rrf_score), ...]`，按融合分降序
 
-graph_provenance 优化（图谱→向量）:
-  _entity_to_chunks → _get_chunk（替换原有 O(N) 扫描）
+**KnowledgeBaseService 集成**：
+- `search_hybrid(text, top_k)`：创建 `RRFFusionRetriever(self.vec, sparse)`，调用 `embedder.embed()` 后返回 Chunk 列表
+- 稀疏索引懒加载并缓存于 `KnowledgeBaseService._sparse_index`
+- 文档入库/重处理完成后调用 `_invalidate_sparse_index()`，下次 `search_hybrid` 自动重建
 
-语义→图谱→语义闭环（可扩展策略）:
-  _semantic_hits → _chunk_to_entities → get_subgraph → 子图实体 _entity_to_chunks → _get_chunk
-```
+### 重排序：LLM 交叉编码器 Reranker
 
-**block+实体联合返回**：`get_content_with_entities(block_db_id)` 使用 `_get_chunk` + `_chunk_to_entities` + `get_entity` + `get_entity_relations`，返回 block 内容 + 全局图中最新状态的关联实体/关系（深拷贝隔离）。
+**设计**：`LLMReranker` 作为可选的第二级精排，接收 hybrid 检索的候选 passages，由 LLM 判断每个 passage 与 query 的相关度（0-10），再按得分重排。
 
-**Agent 自主推理能力**：
-- Agent 可先用 `search_with_graph` 找到相关文本和图谱实体
-- 再用 `graph_neighbors`/`graph_path`/`graph_subgraph` 做多跳推理
-- 通过 `find_chunks_by_entity` 从任意实体反向查找支撑它的原始文本 blocks
-- 发现错误时用 `graph_feedback` 标记，`feedback_score` 实时汇总到实体属性
-- 发现缺失/错误关联时用 `graph_add_entity`/`graph_add_relation`/`graph_update_entity` 动态修正
+**实现要点**：
+- 提示词使用 `string.Template.safe_substitute`，防止用户 query/passages 中包含 `$` 字符时触发异常
+- 提示词文件：`rerank_passage_system.txt`、`rerank_passage_user.txt`
+- 返回格式要求为 JSON 数组（与 passages 一一对应）或 `{"scores": [...]}`，非法格式时回退为全 0 分
+- 对 LLM 调用异常做捕获兜底：rerank 失败时直接返回 hybrid 结果，不影响搜索可用性
 
----
+**KnowledgeBaseService 集成**：
+- `search_reranked(text, top_k, candidate_k)`：先 `search_hybrid` 取 `candidate_k`（默认 `top_k * 4`）个候选，再调用 `LLMReranker.rank()`
+- 由于涉及同步 LLM 调用，reranked 检索成本显著高于纯 hybrid；仅当精度优先时使用
 
-## 反馈与数据质量闭环
+### 检索能力矩阵
 
-**设计**：`feedback` 表 + `graph_feedback` 工具建立数据质量闭环。
-
-**机制**：
-- 用户对实体/关系提交 `rating`（+1 正确 / -1 错误）+ `comment`
-- `get_entity_feedback_score()` 汇总评分，同步更新到 `GraphEntity.feedback_score`
-- `confidence` 字段标记 LLM 提取置信度（默认 1.0）
-- `verified` 字段标记人工验证状态
-- 低 confidence 或负 feedback_score 的实体可被 Agent 优先复核
-
----
-
-## IC 设计关系类型扩展
-
-**新增关系类型**（覆盖 STA、CDC、电源域、参数化等场景）：
-
-| 关系类型 | 语义 |
-|---------|------|
-| `DRIVES` | Signal/Module → Signal（驱动关系） |
-| `DRIVEN_BY` | Signal → Signal/Module（被驱动关系） |
-| `TIMING_PATH` | Entity → Entity（时序路径，STA 分析） |
-| `CLOCK_GATED_BY` | Module/Signal → Signal（时钟门控控制） |
-| `RESET_BY` | Module/Signal → Signal（复位来源） |
-| `PARAMETERIZED_BY` | Module → Parameter（参数化配置） |
-| `INSTANCE_OF` | Module → Module（实例化：instance → definition） |
+| 检索方式 | 索引 | 特点 | 适用场景 |
+|---------|------|------|---------|
+| `semantic_search` | FAISS 稠密向量 | 语义相关性强，对关键词变体鲁棒 | 概念/含义型查询 |
+| `search_hybrid` | FAISS + BM25 RRF | 结合语义与词法，对精确术语更稳 | 含精确型号/寄存器名的查询 |
+| `search_reranked` | hybrid + LLM 精排 | 精度最高，延迟与成本最高 | 答案质量优先、候选少而精的查询 |
 
 ---
 
@@ -689,11 +634,12 @@ graph_query(entity_type="Product", name="TMS320F28379D")
 | Stage 5 | embed.jsonl | `batch/{doc_id}_embed.jsonl` | Embedding 同步 API 输入请求（单文本，custom_id 编码 db_id） |
 | Stage 6 | — | — | 同步调用 Embedding API 逐条处理，结果直接入库（无中间产物文件） |
 
-**状态管理**：
-- `PROCESSING` → stage3 提交中
-- `BATCH_SUBMITTED` → stage3 完成，等待 stage4
-- `embedded` → stage4 完成（content_blocks 已入库，图谱已构建，但未向量化）
-- `DONE` → stage6 完成（向量化已入库）
+**状态管理**（`DocumentStatus`）：
+- `pending` → 初始状态
+- `processing` → stage1-stage2 处理中
+- `batch_submitted` → stage3 完成，等待 stage4
+- `done` → stage6 完成（向量化已入库）
+- `failed` → 处理失败
 
 **权衡**：
 - 磁盘占用增加：每个文档额外保存 results.jsonl、incremental.json、embed.jsonl 等（通常总计几十 KB 到几十 MB）
@@ -704,8 +650,8 @@ graph_query(entity_type="Product", name="TMS320F28379D")
 ## 20. 审计修复经验总结
 
 **背景**：
-- 2026-04 代码审计发现 21 项缺陷（9 个 P0 数据损坏风险、7 个 P1 可靠性缺陷、5 个 P2 代码质量问题），已全部修复并通过 283 个测试验证。
-- 2026-06 再次审计发现 Critical/High 级安全与数据完整性问题，按「最小紧急修复」方案修复后测试数达到 400 个。
+- 2026-04 代码审计发现 21 项缺陷（9 个 P0 数据损坏风险、7 个 P1 可靠性缺陷、5 个 P2 代码质量问题），已全部修复并通过 491 个测试验证。
+- 2026-06 再次审计发现 Critical/High 级安全与数据完整性问题，按「最小紧急修复」方案修复后测试数达到 491 个。
 
 **关键教训**：
 
@@ -715,7 +661,7 @@ graph_query(entity_type="Product", name="TMS320F28379D")
 | **用户路径必须沙箱校验** | Plugin 工具直接接受 `path`/`output_dir` | `_resolve_allowed_path` 校验，禁止跳出允许目录 |
 | **敏感配置输出必须强制脱敏** | `tool_config` 允许 `mask_sensitive=false` | 忽略请求参数，敏感 key 始终返回 `***` |
 | **外部 ZIP 必须校验条目路径** | BigModel 解析结果 ZIP 未过滤 `..` | 拒绝含 `..`、绝对路径、盘符的条目，校验 resolve 后仍在输出目录 |
-| **多存储写入顺序必须避免幽灵记录** | SQLite 先写、FAISS 后写导致 DB 引用缺失向量 | 改为先写 FAISS 再写 SQLite；失败时回滚 SQLite |
+| **多存储写入顺序必须避免幽灵记录** | SQLite 先写、FAISS 后写导致 DB 引用缺失向量 | 改为先写 FAISS 再写 SQLite；SQLite 失败时回滚 FAISS |
 | **保存 + 辅助日志必须原子失败处理** | `_save_global_graph()` 成功但冲突日志写入失败 | `save_ok` 跟踪，失败时把回滚状态重新落盘 |
 | **返回全局对象前必须深拷贝（含关系）** | `_apply_doc_properties_to_relation` 使用 `copy.copy` | 统一使用 `copy.deepcopy` |
 | **属性合并必须深拷贝可变值** | `merged_props[k] = v` 直接引用可变对象 | 合并时 `copy.deepcopy(v)`，快照也深拷贝 |
@@ -735,7 +681,7 @@ graph_query(entity_type="Product", name="TMS320F28379D")
 | **配置路径加载/保存必须一致** | `_save_global_graph` 硬编码 `"graphs"` | 统一使用 `Config.GRAPH_OUTPUT_DIR` |
 | **警惕外部库的导入级副作用** | `pymupdf4llm` 导入时激活 ONNX layout，静默改变 `find_tables()` 结果 | 移除 `pymupdf4llm` 依赖及未触发的 fallback 代码 |
 
-**新增开发原则**：详见 `AGENTS.md`「防御性编程与状态安全原则」，包含副作用隔离、索引一致性、失败回滚、输入验证、跨阶段校验、配置统一、资源生命周期管理 7 条原则。
+**新增开发原则**：详见本章（审计教训），包含副作用隔离、索引一致性、失败回滚、输入验证、跨阶段校验、配置统一、资源生命周期管理 7 条原则。
 
 ---
 
@@ -754,424 +700,6 @@ graph_query(entity_type="Product", name="TMS320F28379D")
 - 用户编辑 `batch/{doc_id}.jsonl` 时若删除了 `extra_body`，stage3 读取后会自动补充
 
 ---
-
-## 18. GapsFirstScanner：Caption-driven Linear Extractor
-
-**架构定位**：`GapsFirstScanner` 是本地 PDF 解析器（`PDFParser` fallback）的页面级提取引擎，负责从单页 PDF 中提取图片（diagrams）和表格。它替代了早期基于 UZN（Unified Zone Recognition）的全页面扫描方案，核心设计思想是**"像人一样线性阅读页面"**——从上往下，利用天然存在的 y 轴分割信息（页眉、Caption、章节标题）来划分处理区间。
-
-**历史演进**：
-- **早期版本**（UZN 方案）：从全页面角度出发，统一识别 diagram 和 table 区域，代码复杂（2000+ 行），性能极差
-- **当前版本**（GapsFirstScanner）：Caption-driven 线性提取，~600 行，性能提升 5-10x，提取质量显著改善
-
-### 18.1 核心机制：Zone 模型与 Hard Separator
-
-页面在 y 轴上被「硬分割」切分为多个区间（Zone），提取算法只在 Zone 内部搜索：
-
-```
-页面 y 轴：
-├─ header ──┤  ← 硬分割（页眉区域）
-│           │
-├─ heading ─┤  ← 硬分割（章节标题，如 "B2.2 Channel fields"）
-│           │
-├─ caption ─┤  ← 硬分割（Figure/Table Caption）
-│           │
-├─ body_text┤  ← 硬分割（大段正文块，高>20pt 且 宽>60%页面宽度）
-│           │
-├─ caption ─┤  ← 硬分割（另一个 Caption）
-│           │
-├─ footer ──┤  ← 硬分割（页尾区域）
-```
-
-**Hard Separator 构建规则**（按优先级从高到低）：
-
-| 类型 | 来源 | 合并规则 |
-|------|------|----------|
-| header/footer | 配置边距 | 固定区域，不可被其他 separator 覆盖 |
-| figure_caption | 正则匹配 `^Figure\s+[A-Z]?\d+...` | 相邻 separator 重叠时，高优先级覆盖低优先级 |
-| table_caption | 正则匹配 `^(Table|表)\s*[A-Z]?\d+...` | 同上 |
-| heading | **TOC 优先匹配**，其次字号 > 阈值 或 粗体 | 同上 |
-| body_text | 高>20pt 且 宽>60%页面宽度 | 低优先级，可被 caption/heading 覆盖 |
-
-相邻硬分割之间的空隙就是一个 `_Zone`，包含：
-- `y0`, `y1`：y 轴范围
-- `drawings`：落在该 y 范围内的矢量绘图（线条、矩形）
-- `text_block_count`：落在该范围内的文本块数量
-- `consumed`：是否已被 Figure/Table Caption 消耗
-
-### 18.2 body_text Hard Separator 的权衡
-
-**设计意图**：大段正文块（如多行段落）本身构成天然的 y 轴分割——表格/图片不会跨越正文块出现。
-
-**性能影响**（TI 219 页测试）：
-- 无 body_text 硬分割：6.7s
-- 有 body_text 硬分割：4.4s
-- **body_text 硬分割减少了 Zone 数量**，使后续 figure/table 提取遍历的 zone 更少，反而**提升了性能**
-
-**阈值选择**：`height > 20.0 and width > page_width * 0.6`
-- 过宽：会误将短段落识别为硬分割，增加 zone 数量
-- 过窄：遗漏真正的正文块，zone 过大导致搜索范围增加
-- 当前阈值基于 TI/AMBA/SPRUI07 的实证调优
-
-### 18.2a Zone 合并：跨分隔符的 Drawing
-
-**问题**：图表内部的标注文本（如 "SYSCLK"、"Master Clock"）可能被误判为 heading，产生硬分隔符，将同一幅图切分为上下两个 zone。Drawing 的中心点落入 zone 之间的 gap，导致提取丢失。
-
-**修复**：构建 zone 后，检测是否有 drawing 的 rect 同时跨越相邻两个 zone（中心点在 gap 中，且与两侧 zone 均有 >1pt 重叠）。若存在，合并这两个 zone 并重新分配所有 drawing。
-
-### 18.3 Figure Caption 驱动提取
-
-**核心规则**：不存在无 Figure Caption 的图。一个 Figure Caption 仅对应一个图片。
-
-**搜索逻辑**：
-1. 对每个 `figure_caption`，找到其上方和下方最近的、有 drawings 的 zone
-2. 比较距离，选择更近的 zone 作为目标
-3. 将目标 zone 内的 drawings 按空间邻近度聚类（`CLUSTER_PROXIMITY`）
-4. **每个 cluster 渲染为一张独立图片**（早期版本将所有 cluster 扁平化为一张大图，导致过度合并）
-5. 用 `_build_clip()` 构建最终裁剪区域：drawing-bounded X，zone-clamped Y，边缘标签扩展，padding
-
-**关键修复**：AMBA page 21 的图被分割为 3 张提取的问题，通过 cluster-based 渲染修复。
-
-### 18.4 Table Caption 驱动提取
-
-**核心规则**：Table Caption 下方的 zone 包含表格。
-
-**搜索逻辑**：
-1. 对每个 `table_caption`，找到其下方第一个未被消耗的 zone（`zone.y0 >= caption.y1`，且在 200pt 范围内）
-2. 在该 zone 内调用 `find_tables()` 提取表格
-
-### 18.5 Orphan Zone 检测：无 Caption 表格
-
-**设计意图**：可能存在无 Table Caption 的表格（如寄存器位域图、引脚配置表）。
-
-**检测流程**：
-1. Figure/Table Caption 驱动的提取会标记某些 zone 为 `consumed`
-2. 剩余的、有 drawings 的 zone 就是 "orphan zones"
-3. 对每个 orphan zone，调用 `_classify_table_style()` 判断是否是表格
-4. 如果是，调用 `find_tables()` 提取
-
-**`_classify_table_style` 算法**：
-
-```python
-def _classify_table_style(zone):
-    if not zone.drawings:
-        return None
-
-    h_lines = sum(1 for r in zone.drawings if r.width > r.height * 3)
-    v_lines = sum(1 for r in zone.drawings if r.height > r.width * 3)
-    other = sum(1 for r in zone.drawings if not above)
-
-    # 非线条元素占多数 → 框图/位域图，不是表格
-    if other > (h_lines + v_lines) * 0.5:
-        return None
-
-    # Style A: Grid table（多横线 + 多竖线）
-    if h_lines >= 4 and v_lines >= 3:
-        if text_density < 0.02:
-            return None  # 过滤位域图
-        return "grid"
-
-    # Style B: Horizontal / borderless table
-    if v_lines <= 1 and h_lines >= 4 and zone.text_block_count >= 3:
-        if text_density < 0.01:
-            return None
-        return "horizontal"   # 统一由 BorderlessTableExtractor 处理
-
-    return None
-```
-
-**产出率验证**（TI 219 页）：
-- 84 个 orphan zone 触发检测，76 个确实包含表格
-- **命中率 90.5%**，误报率极低
-
-### 18.6 自适应表格检测策略
-
-**机制与策略分离原则**：`_classify_table_style` 识别表格风格（机制），`process_page` 根据风格选择 `find_tables` 策略（策略）。
-
-**策略选择规则**：
-- 页面有任何 orphan zone 被分类为 `horizontal`（含零高度横线占多数的无边框表格）→ 直接调用 `BorderlessTableExtractor`，不再走 `find_tables`
-- 页面只有 `grid` 风格的 orphan zones → 整页使用 `lines_strict` 策略
-
-**原因**：
-- `lines_strict` 对 grid 表格精确（误报低），对 horizontal/无边框表格完全失效
-- AMBA 零高度横线表格无法被 `find_tables` 任何策略识别，需要专门的几何提取器
-- 实测 `find_tables(strategy="lines")` 在 AMBA 上零产出，且对 grid 表格误报更多，因此移除该策略
-- 按页自适应、按风格直接路由，避免全文档统一策略的"一刀切"问题
-
-**实测效果**（4 文档基准）：
-
-| 文档 | 统一 `lines` | 自适应策略 | 差异 |
-|------|-------------|-----------|------|
-| TI (grid 为主) | 37.3s / 142 表格 | **33.7s** / 134 表格 | **-3.6s**，误报减少 |
-| AMBA (horizontal 为主) | 20.0s / 14 表格 | **19.8s** / 14 表格 | 几乎相同 |
-| SPRUI07 (混合) | 93.4s / 588 表格 | **88.3s** / 537 表格 | **-5.1s**，误报减少 51 个 |
-| DC_UG (混合) | 12.9s / 90 表格 | **13.8s** / 114 表格 | +24 表格（horizontal 受益） |
-
-### 18.7 预计算优化
-
-**原始问题**：每个 Table Caption 和每个 orphan zone 都单独调用 `page.find_tables(clip=zone_rect)`，导致 142 次 PyMuPDF C 调用 → 耗时 ~20s。
-
-**优化方案**：
-1. `process_page` 开始时，根据页面 orphan zones 的风格决定 `table_strategy`
-2. 调用一次 `page.find_tables(strategy=table_strategy)`，获取全页所有表格
-3. `_find_tables_in_zone()` 遍历预计算列表，用 `tab_bbox.intersects(clip_rect)` 筛选落在当前 zone 内的表格
-4. 不再调用 PyMuPDF C 代码，纯 Python 筛选开销可忽略
-
-**效果**：TI 文档 `find_tables` 调用从 142 次降至 219 次全页扫描（但全页扫描比多次 clip 调用略快），整体性能显著改善。
-
-### 18.8 表格检测底层限制与实验记录
-
-本节记录 GapsFirstScanner 表格检测相关的底层库限制、踩坑过程和实验结论，防止后续重复无意义的工作。
-
-#### 18.8.1 AMBA 零高度线：PyMuPDF 根本性限制
-
-**实验日期**：2026-06-06
-
-**现象**：即使自适应策略正确识别了 AMBA 表格为 `horizontal`，`find_tables(strategy="lines")` 仍然返回 **0 个表格**。
-
-**实验过程**：
-1. 渲染 AMBA page 44/47/140 整页图像，确认表格有水平线、无竖直线
-2. 检查 `page.get_drawings()` 返回的 drawing 数据：
-   ```
-   Drawing 0: rect=(84.0,368.5,559.3,368.5), w=475.2, h=0.0
-   Drawing 1: rect=(84.0,368.9,559.3,368.9), w=475.2, h=0.0
-   ```
-3. 对 AMBA page 28/33/34/35 验证：17-58 条 horizontal lines，**100% 是零高度线**（height=0.000000）
-4. 测试 `lines_strict`/`lines`/`text` 三种策略，均无法有效提取
-
-**根因**：这些线条的 **height=0.0**（y0 == y1），是数学意义上的**零高度线**。`find_tables` 的内部算法无法识别零高度线条。
-
-**结论与修复**：这是 `find_tables` 的固有缺陷。为支持此类表格，新增 `scripts/parsers/borderless_table_extractor.py`：
-- 以 caption 为锚点，在下方区域搜索水平线并去重，得到行边界；
-- 用 header 行单词的 x 位置聚类出列中心；
-- 按行区间 + 最近列中心分配 word，重建 Markdown 表格。
-- `GapsFirstScanner._classify_table_style` 将零高度线/无边框表格统一归类为 `horizontal`；`process_page` 在识别到该风格时直接路由到 `BorderlessTableExtractor`，不再调用 `find_tables`。
-
-**验证**：对 AMBA CHI page 28（`Table B1.1`）实测可正确提取 3 列 4 行的无边框表格。
-
-#### 18.8.2 `tab.cells` 空伪表格：PyMuPDF 边界情况
-
-**实验日期**：2026-06-10
-
-**现象**：`parse()` 执行时出现大量 `ValueError: min() iterable argument is empty`：
-```
-Table detection failed on page 74: min() iterable argument is empty
-Table detection failed on page 83: min() iterable argument is empty
-...
-```
-
-**实验过程**：
-1. 在 `_find_tables_in_zone` 中添加完整 traceback 捕获
-2. traceback 指向 `tab.bbox` 属性访问：
-   ```
-   File ".../pymupdf/table.py", line 1534, in bbox
-       min(map(itemgetter(0), c)),
-   ValueError: min() iterable argument is empty
-   ```
-3. 确认 `find_tables()` 偶尔会返回 **cells 为空的伪表格**
-4. 访问 `tab.bbox` 时，PyMuPDF 尝试从 cells 计算 bbox，但 cells 为空 → `min()` 失败
-
-**修复**：在 `_find_tables_in_zone` 中访问 `tab.bbox` 前检查 `tab.cells`：
-```python
-for tab in tables:
-    if not tab.cells:  # 防御性跳过空 cells 伪表格
-        continue
-    tab_bbox = fitz.Rect(tab.bbox)
-    ...
-```
-
-**深层问题**：空 cells 伪表格的出现说明 orphan zone 检测过于宽松，大量非表格区域触发了 `find_tables`。后续通过收紧 `_classify_table_style` 条件减少了这种情况。
-
-#### 18.8.3 `_fix_drawing_rect` 的隐蔽副作用
-
-**实验日期**：2026-06-10
-
-**现象**：在 `_classify_table_style` 中添加 `r.height == 0.0` 零高度线检测后，基准测试显示 `filtered_zero_height=0`，检测完全失效。
-
-**实验过程**：
-1. 检查 `_fix_drawing_rect` 实现：
-   ```python
-   if rect.height < cls.DRAWING_RECT_MIN_SIZE:  # 0.0 < 0.1
-       return fitz.Rect(rect.x0, rect.y0 - 0.5, rect.x1, rect.y1 + 0.5)
-   ```
-2. 确认 `_fix_drawing_rect` 在 drawing 分配阶段已将零高度线扩展为 height=1.0
-3. `_classify_table_style` 遍历的是 `zone.drawings`（已被扩展），所以 `r.height == 0.0` 永远为 False
-
-**教训**：在 `_fix_drawing_rect` **之前**必须先统计原始 drawing 特征。解决方案：
-1. `_Zone` 添加 `h_zero_height: int` 字段
-2. `process_page` 中先遍历 `raw_drawings` 统计零高度线，再调用 `_fix_drawing_rect`
-3. `_classify_table_style` 使用 `zone.h_zero_height` 而非自行计算
-
-#### 18.8.4 `_classify_table_style` 演进与空跑率实验
-
-**实验日期**：2026-06-10
-
-**v1 算法**（旧版）：
-```python
-if len(zone.drawings) < 10: return None
-if h_lines >= 4 and v_lines >= 3: return "grid"
-if v_lines <= 1 and h_lines >= 6 and text >= 5: return "horizontal"
-```
-
-**v1 问题**：`len < 10` 硬性门槛过滤掉了一些真实表格；不区分 drawing 类型，位域图/框图被误判。
-
-**v2 算法**（当前）：
-```python
-# 1. 去掉 len<10 门槛
-# 2. 区分 horizontal / vertical / other 三类 drawing
-# 3. other > lines*0.5 时过滤（非线条元素占多数）
-# 4. grid 风格增加文本密度过滤（<0.02 text/pt 过滤位域图）
-# 5. horizontal 风格统一路由到 BorderlessTableExtractor（不再使用 find_tables）
-```
-
-**空跑率对比实验**（ orphan zone 触发 find_tables 但返回 0 表格的比例）：
-
-| 文档 | v1 空跑率 | v2 空跑率 | 主要过滤手段 |
-|------|----------|----------|------------|
-| TI | 15.9% | **1.4%** | low_density (~6), zero_height (~2) |
-| AMBA | 92.9% | **0.0%** | **zero_height (~111)** — 全部过滤 |
-| SPRUI07 | 10.4% | **8.8%** | low_density (~34) |
-| DC_UG | 31.0% | **28.6%** | low_density (~29) |
-
-**关键发现**：
-- AMBA 的 100% 空跑由零高度线导致，v2 的 zero_height 过滤将其降为 0%
-- DC_UG 仍有 ~28% 空跑，因为 DC_UG 的部分 orphan zones 确实是表格区域但 `find_tables` 未检出（非误判问题）
-- 文本密度过滤（0.02 text/pt）有效识别了位域图（大量 lines + 极少 text）
-
-#### 18.8.5 各文档 orphan zone 特征
-
-| 特征 | TI | AMBA | SPRUI07 | DC_UG |
-|------|-----|------|---------|-------|
-| 空跑主因 | 位域图误判 | **零高度线** | 少量非表格区域 | 低文本密度 |
-| success density | 5.65/100pt | N/A | 4.92/100pt | 3.38/100pt |
-| empty density | 5.14/100pt | 3.12/100pt | 5.71/100pt | 1.99/100pt |
-| success text | 23.2 | N/A | 10.8 | 12.6 |
-| empty text | 7.0 | 14.6 | 11.5 | 7.5 |
-
-#### 18.8.6 `pymupdf4llm` 导入副作用与依赖移除
-
-**实验日期**：2026-06-12
-
-**问题现象**：SPRUI07 page 80（PDF 页码 79，0-based）在本地 PDF fallback 解析中，**Figure 1-29 错误认领了 Table 1-28 的 zone，Figure 1-30 完全丢失**，最终只提取出 2 张图（期望 3 张）。现象仅在 `PDFParser` 被导入后出现；单独运行 `GapsFirstScanner.process_page()` 时结果正确。
-
-**初步假设**：测试者曾怀疑 PyMuPDF 存在"内部状态错误"，因为调用 `_extract_horizontal_decorations()` 后再处理 page 80 会触发问题。
-
-**实验方法**：
-
-1. **最小复现**：构造独立脚本，分别测试以下场景对 page 80 的影响：
-   - 不导入 `pdf_parser`，直接调用 `GapsFirstScanner.process_page()`
-   - 导入 `parsers.pdf_parser` 后再调用 `process_page()`
-   - 仅导入 `pymupdf4llm` 后再调用 `process_page()`
-   - 分别单独调用 `page.get_drawings()` / `page.get_text("dict")` / `_extract_horizontal_decorations()` 后再处理
-
-2. **对照实验**：对比 Layout 激活前后 `page.find_tables(strategy="lines_strict")` 的返回结果。
-
-3. **根因定位**：检查 `pymupdf4llm` 导入时的副作用，确认其是否修改 `pymupdf` 模块状态。
-
-**实验结果**：
-
-| 前置操作 | page 80 图片数 | 是否正确 |
-|---------|--------------|---------|
-| 无前置 | 3 | ✅ |
-| `import pymupdf4llm` | 2 | ❌ |
-| `import parsers.pdf_parser` | 2 | ❌ |
-| `_extract_horizontal_decorations(page)` | 2 | ❌ |
-| `page.get_text("dict")` | 2 | ❌ |
-
-关键发现：
-- `page.get_drawings()` 和 `page.get_text("dict")` 在 Layout 激活前后返回**完全相同**的数据。
-- 差异完全集中在 `page.find_tables()` 的返回结果：
-
-| Layout 状态 | `find_tables` 返回的关键 bbox | 含义 |
-|------------|---------------------------|------|
-| 未激活 | `(54.1, 170.1, 557.8, 236.8)` | Table 1-28，边界清晰 |
-| 未激活 | `(54.1, 350.8, 557.8, 439.1)` | Table 1-29，边界清晰 |
-| 激活后 | `(65.3, 172.9, 544.4, 303.6)` | **Table 1-28 与 Figure 1-29 位域图被合并为一个大表格** |
-| 激活后 | `(57.0, 89.7, 544.4, 135.5)` | Figure 1-28 位域图被识别为表格 |
-
-**缺陷现场（调用链）**：
-
-1. `pymupdf4llm/__init__.py` 导入时无条件执行：
-   ```python
-   try:
-       import pymupdf.layout
-   except ImportError:
-       use_layout(False)
-   else:
-       use_layout(True)
-   ```
-2. `use_layout(True)` 调用 `pymupdf.layout.activate()`，将 `pymupdf._get_layout` 设置为一个 ONNX 文档布局分析器。
-3. `fitz.Page.find_tables()` 内部会调用 `page.get_layout()`。
-4. `page.get_layout()` 调用 `pymupdf._get_layout(self)`，触发 ONNX 模型推理。
-5. Layout 信息被写入 `page.layout_information`，并**改变 `find_tables()` 的表格 bbox 计算**，导致 register bitfield diagram 与真实表格被错误合并。
-
-**关键发现：fallback 是死代码**
-
-在排查过程中进一步发现：`PDFParser.parse()` 中虽然定义了 `problem_pages` 字典和 `_call_pymupdf4llm_for_pages()` 等 fallback 方法，但 `_should_trigger_p4l_fallback()` **从未被调用**，`problem_pages` 也**从未被填充**。因此整个 PyMuPDF4LLM fallback 路径（Milestone 3）是**死代码**，不会在实际解析中产生任何输出。
-
-**最终修复方案**：
-
-既然 `pymupdf4llm` 的 layout 引擎会污染 `find_tables()`，且该依赖的 fallback 路径从未实际触发，**直接移除 `pymupdf4llm` 依赖**是最彻底的解决方案：
-
-- 从 `pyproject.toml` 删除 `"pymupdf4llm>=1.27.0,<2.0.0"`
-- 从 `scripts/parsers/pdf_parser.py` 删除：
-  - `import pymupdf4llm` 和 `import pymupdf`
-  - `_should_trigger_p4l_fallback()`
-  - `_call_pymupdf4llm_for_pages()`
-  - `_extract_tables_from_p4l_text()`
-  - `_fuse_p4l_tables_into_pages()`
-  - `_merge_image_lists()`
-  - `parse()` 中的 `problem_pages` 相关逻辑
-- 删除 `scripts/benchmark/run_pymupdf4llm.py`
-- 清理 benchmark 脚本中所有 `pymupdf4llm` 对比项
-
-**验证结果**：
-- SPRUI07 page 80 正确提取 3 张图、3 张表。
-- 全量测试通过。
-
-**教训**：
-- 外部库的导入级副作用（import-time side effect）可能 silently 改变同一进程中其他依赖库的行为。
-- 当依赖库的行为与文档/直觉不符时，应优先检查**导入顺序和导入副作用**，而非假设底层库有状态错误。
-- 引入依赖前应确认其实际使用路径；长期不触发且存在副作用的 fallback 代码应当及时清理，避免成为"隐患代码"。
-
-### 18.9 历史演进与性能数据
-
-**旧架构（UZN 方案，已删除）**：
-- `unified_zone_recognition.py`，2037 行
-- 从全页面角度统一识别 diagram 和 table 区域
-- 代码复杂、性能极差、提取质量差
-
-**当前架构（GapsFirstScanner）**：
-- `gaps_first_scanner.py`，~600 行
-- Caption-driven 线性提取，hard separator + zone 模型
-- 已删除死代码：`_find_figure_regions`、`_detect_and_convert_tables`、`_strip_zone_text_blocks`、`_build_images_from_uzn`
-
-**性能基准**（4 文档，GapsFirstScanner）：
-
-| 文档 | 页数 | process_page | 每页耗时 | 图片 | 表格 |
-|------|------|-------------|----------|------|------|
-| TI TMS320F28335 | 219 | 30.6s | 140ms | 85 | 128 |
-| AMBA CHI | 585 | 20.0s | 34ms | 218 | 14 |
-| SPRUI07 | 868 | 76.4s | 88ms | 586 | 442 |
-| DC_UG | 748 | 8.1s | 11ms | 1 | 61 |
-
-**早期 Milestone 数据**（旧 PDFParser，lines_strict）：
-
-| 文档 | 页数 | 改进前 | 版本 A（lines_strict） | 表格数 |
-|------|------|--------|----------------------|--------|
-| TI TMS320F28335 | 219 | 10.3s / 0表格 | 46.2s / 68表格 | 68 |
-| AMBA CHI | 585 | 8.7s / 0表格 | 93.3s / 22表格 | 22 |
-
-**注意**：GapsFirstScanner 的数据与旧 PDFParser **不可直接比较**，因为：
-1. 架构完全不同（UZN vs Caption-driven）
-2. 图片提取逻辑完全不同（旧版提取大量位域图/装饰线，新版只提取有 Caption 的图）
-3. 表格检测范围不同（旧版全页扫描，新版 zone 级扫描）
-
-### 18.10 多进程并行化结论
-
-- 8 workers 加速比：TI 2.07x / AMBA 1.61x
-- 但 find_tables 流程仅占解析总时间的 18-30%，Amdahl 定律限制整体收益仅 ~1.3x
-- **即使 find_tables 无限加速，TI 仍需 28s+，AMBA 仍需 75s+**
-- **否决实施**：代码复杂度增加不值得有限的收益
 
 ## 22. 实体提取 Prompt 设计
 
@@ -1318,7 +846,7 @@ Step 1: 内容分类（8 种类型）
 **Prompt 不测试原则**：
 - **不通过代码测试约束 prompt 内容**：prompt 是策略，策略变化快，静态字符串测试（如 `assert "opcode" in system_msg`）会成为迭代阻力
 - prompt 质量通过完整 Pipeline 运行后的全局节点/边变化、具体实体差异来评估
-- prompt 的约束规范通过 DESIGN.md 本章记录，不通过单元测试断言
+- prompt 的约束规范通过本章记录，不通过单元测试断言
 
 ### 22.7 变更历史
 
@@ -1328,11 +856,761 @@ Step 1: 内容分类（8 种类型）
 | 2026-05-18 | 代码示例寄存器字段排除 | 代码示例误提取从 13 个降至 0 个 |
 | 2026-05-18 | 属性格式统一规范 | bits/reset_value/format 格式不一致问题消除 |
 | 2026-05-20 | **聚焦 ISA + 外设寄存器双方向** | 核心实体类型从 35 个精简到 ~18 个；新增 ISA 专属 13 项属性、外设寄存器专属 10 项属性；新增"代码生成导向提取"章节 |
-| 2026-05-20 | **移除 prompt 静态测试** | `test_entity_extractor.py` 从 12 个测试精简到 3 个（仅保留代码逻辑测试）；prompt 约束通过 DESIGN.md 文档化 |
+| 2026-05-20 | **移除 prompt 静态测试** | 移除 prompt 静态测试，prompt 约束通过本文档化（原 `test_entity_extractor.py` 已清理） |
+
+### 22.8 Agentic 搜索 Prompt 设计
+
+**设计目标**：让 LLM 把复杂问题分解为可独立执行的检索步骤，而不是在插件内部执行完整 Agent 循环。这符合「机制进代码、策略进 Skill」的原则。
+
+**提示词文件**：
+- `scripts/prompts/agentic_search_system.txt`：定义允许步骤类型与输出格式
+- `scripts/prompts/agentic_search_user.txt`：接收 `$question` 与 `$context`，要求返回 JSON 数组
+
+**允许步骤类型**：
+| 类型 | 用途 |
+|------|------|
+| `semantic` | FAISS 语义搜索，适合事实型问题 |
+| `hybrid` | BM25 + 稠密向量 RRF 融合，适合含精确技术关键词的问题 |
+| `reranked` | hybrid 后再经 LLM 精排，适合精度优先的歧义查询 |
+| `graph` | 知识图谱实体/邻居/路径查询，适合关系型问题 |
+| `chapter` | 按章节标题结构化查询，适合指定章节的问题 |
+| `metadata` | 按文档元数据过滤，适合限定文档范围 |
+| `synthesize` | 汇总已收集证据生成中间答案 |
+
+**安全设计**：
+- 使用 `string.Template.safe_substitute` 替换 `$question` 与 `$context`，避免用户输入中的 `$` 触发异常
+- 返回非 JSON 或非列表时，`AgenticSearchPlanner._parse_steps` 返回空列表，由调用 Agent 决定如何降级
+- `step_type` 白名单校验，未知类型直接丢弃
+
+**与 Skill 的边界**：
+- `agentic_search_system.txt` 只负责规划，不执行任何搜索
+- 实际执行由外部 Agent 通过 Skill 编排，调用 `search_hybrid`、`search_reranked`、`graph_query` 等原子 MCP 工具完成
 
 ---
 
-## 已知限制与权衡汇总
+## 23. 评估框架
+
+### 23.1 数据模型：EvalQuestion 与 EvalDataset
+
+**新增数据模型**：
+
+```python
+@dataclass
+class EvalQuestion:
+    id: int | None = None
+    question: str = ""
+    ground_truth_answer: str = ""
+    ground_truth_context_ids: list[int] = field(default_factory=list)
+    ground_truth_doc_ids: list[str] = field(default_factory=list)
+    tags: list[str] = field(default_factory=list)
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+@dataclass
+class EvalDataset:
+    name: str = ""
+    questions: list[EvalQuestion] = field(default_factory=list)
+    created_at: str = ""
+    metadata: dict[str, Any] = field(default_factory=dict)
+```
+
+**SQLite Schema**：
+
+```sql
+CREATE TABLE IF NOT EXISTS eval_datasets (
+    name TEXT PRIMARY KEY,
+    metadata TEXT,
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS eval_questions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    dataset_name TEXT NOT NULL,
+    question TEXT NOT NULL,
+    ground_truth_answer TEXT,
+    ground_truth_context_ids TEXT,
+    ground_truth_doc_ids TEXT,
+    tags TEXT,
+    metadata TEXT,
+    FOREIGN KEY (dataset_name) REFERENCES eval_datasets(name)
+);
+CREATE INDEX IF NOT EXISTS idx_eval_q_dataset ON eval_questions(dataset_name);
+```
+
+**设计要点**：
+- `ground_truth_context_ids` 使用 `block_db_id`（即 FAISS 存储 ID），与 `content_blocks.id` 对齐
+- 数据集级联保存：`save_eval_dataset` 先写 `eval_datasets`，再删除旧问题并插入新问题
+- 不强制要求 `ground_truth_answer`，支持仅做检索评估（retrieval-only）
+
+### 23.2 LLM-as-Judge 指标
+
+**基类**：`BaseJudgeMetric`
+- 封装 `_judge(system_prompt_name, user_prompt_name, **kwargs)`，统一调用 `BaseLLMClient.chat`
+- 提示词文件：`eval_faithfulness_*.txt`、`eval_context_precision_*.txt`、`eval_context_recall_*.txt`
+- 对非 JSON 返回做空字典兜底，避免单次 judge 失败中断整批评估
+
+**具体指标**：
+
+| 指标 | 类 | 输入 | 输出 |
+|------|-----|------|------|
+| `FaithfulnessMetric` | 答案忠实度 | question, answer, contexts | `score` + supported/unsupported/not_found claims |
+| `ContextPrecisionMetric` | 检索上下文精确度 | question, contexts | `score` + 每段 relevance bool 列表 |
+| `ContextRecallMetric` | 检索上下文召回率 | ground_truth_answer, contexts | `score` + attributable/not_attributable claims |
+
+**Judge 调用策略**：
+- `EvalHarness` 对三个 judge 指标使用懒加载属性
+- 纯检索评估（`run_retrieval_eval`）不实例化 judge，无需 LLM API key
+
+### 23.3 检索指标
+
+纯统计指标，不依赖 LLM：
+
+| 指标 | 函数 | 说明 |
+|------|------|------|
+| Hit Rate@K | `hit_rate_at_k` | top-k 中命中任意 relevant id 即得 1.0 |
+| MRR | `mean_reciprocal_rank` | 首个 relevant id 的倒排秩，无则 0 |
+| NDCG@K | `ndcg_at_k` | 分级相关性折扣累积增益，当前 relevant 统一计 1.0 |
+
+### 23.4 执行入口
+
+**`EvalHarness.run_retrieval_eval(dataset, retriever, top_k)`**：
+- 遍历 `EvalDataset.questions`
+- 按 `retriever` 名称调用 `KnowledgeBaseService` 对应检索方法（当前支持 `semantic`）
+- 计算每条问题的 hit_rate、MRR、NDCG
+- 返回数据集级平均指标与 per_question 明细
+
+**`KnowledgeBaseService.evaluate_dataset(dataset_name, retriever, top_k)`**：
+- 从 SQLite 加载数据集
+- 委托 `EvalHarness.run_retrieval_eval`
+- 返回结构化 JSON，便于 Admin/Skill 消费
+
+**Admin 命令**：
+- `python scripts/admin_tools.py evaluate --params '{"dataset_name": "..."}'`
+- 兼容别名 `run_eval`
+- 不暴露为 MCP 工具，避免 Agent 误触发评估流程产生非预期 LLM/检索成本
+
+### 23.5 当前范围与后续扩展
+
+- 当前已实现 retrieval-only 评估（`run_retrieval_eval`）和完整 RAG 评估（`run_rag_eval`）
+- `run_rag_eval` 会调用内部 LLM 生成答案，并使用 `FaithfulnessMetric`、`ContextPrecisionMetric`、`ContextRecallMetric`、`AnswerRelevancyMetric` 进行评分；该入口当前通过 `EvalHarness` 编程接口使用，admin 命令 `evaluate` / `run_eval` 默认执行 retrieval-only 评估
+- 评估数据集创建/导入当前通过 `KnowledgeDB.save_eval_dataset` 编程接口完成，未提供独立 CLI
+
+---
+
+## 24. Agentic 搜索
+
+### 24.1 机制与策略分离
+
+**设计**：`AgenticSearchPlanner` 只负责把复杂问题分解为 `SearchStep` 列表，不执行任何搜索。执行由外部 Agent 通过 Skill 编排完成。
+
+**原因**：
+- LLM 调用成本由外部 Agent/Skill 承担，插件内部只提供原子机制
+- 每个 `SearchStep` 都是一次原子 MCP 工具调用（`semantic_search`、`search_hybrid`、`search_reranked`、`graph_query`、`query` 等）
+- 策略（如何组合步骤、何时终止、如何综合）属于 Skill 层，可随使用场景快速迭代而无需修改插件代码
+
+### 24.2 SearchStep 数据模型
+
+```python
+@dataclass
+class SearchStep:
+    step_type: str  # semantic | hybrid | reranked | graph | chapter | metadata | synthesize
+    query: str = ""
+    params: dict[str, Any] = field(default_factory=dict)
+    reason: str = ""
+```
+
+**字段说明**：
+- `step_type`：严格白名单校验，未知类型丢弃
+- `query`：该步骤的查询文本
+- `params`：可选参数，例如 `{"entity_type": "Module"}`、`{"doc_id": "..."}`
+- `reason`：一句话解释该步骤的必要性，便于 Agent 理解规划逻辑
+
+### 24.3 与 MCP 工具的映射
+
+| `step_type` | 典型执行工具 |
+|-------------|-------------|
+| `semantic` | `semantic_search` |
+| `hybrid` | `search_hybrid` |
+| `reranked` | `search_reranked` |
+| `graph` | `graph_query` / `graph_neighbors` / `graph_path` |
+| `chapter` | `query`（chapter 参数） |
+| `metadata` | `query`（doc_id/chapter 过滤） |
+| `synthesize` | 由 Skill 在 Agent 侧完成，不调用插件工具 |
+
+### 24.4 MCP 工具与 Skill
+
+**新增 MCP 工具**：
+- `agentic_plan(question, context)` → 返回 `SearchStep` 列表
+- `search_hybrid(text, top_k)` → 返回 hybrid 检索结果
+- `search_reranked(text, top_k, candidate_k)` → 返回 reranked 检索结果
+
+**MCP 工具总数**：本周期完成后，MCP 工具面从 11 个扩展到 **14 个**。
+
+**Skill 文件**：`~/.agents/skills/agentic-search/SKILL.md`
+- 定义复杂问题的标准处理流程
+- 示范如何调用 `agentic_plan` 后逐步执行 `SearchStep`
+- 规定证据综合、来源引用与失败降级策略
+
+### 24.5 安全与失败处理
+
+- `AgenticSearchPlanner.plan()` 捕获所有异常并返回空列表，避免规划失败阻塞 Agent
+- 返回空列表时，Skill 应降级为单步 `semantic_search` 或 `search_hybrid`
+- 所有提示词替换使用 `string.Template.safe_substitute`，防止输入中的 `$` 破坏模板
+
+---
+
+## 25. 新增架构决策记录
+
+### 25.1 LLM 成本由外部 Agent 承担
+
+**决策**：插件内部只提供检索/评估/规划的**机制**，LLM 策略编排留在 Skill/外部 Agent 中。
+
+**原因**：
+- 本插件是 Kimi Code 等 Agent 的 MCP 扩展，不是独立 SaaS
+- Agentic 搜索、复杂查询改写、结果综合等需要多轮 LLM 推理的能力，若硬编码在插件内部，会把 LLM 调用成本固定为插件运行成本
+- 将策略外移到 Skill 后，外部 Agent 按需调用原子工具，插件仅在被调用时产生计算/API 成本
+
+**表现**：
+- `AgenticSearchPlanner` 只返回步骤列表，不执行步骤
+- `LLMReranker` 虽然内部调用 LLM，但只在 `search_reranked` 被显式调用时触发
+- 评估指标中的 judge 指标懒加载，retrieval-only 评估无需 LLM key
+
+### 25.2 Agentic Search 的机制与策略分离
+
+**决策**：Agentic 搜索拆分为「规划器」（机制）与「执行策略」（Skill）。
+
+**原因**：
+- 规划器需要稳定的 JSON 输出格式与白名单校验，适合作为可测试的代码机制
+- 执行策略（选择哪个检索器、何时做图谱扩展、如何综合多源证据）变化快，且与用户场景强相关，适合放在 Skill
+- 分离后，同一组 MCP 工具可支撑多种 Agentic 策略（验证型、探索型、对比型等）
+
+**接口边界**：
+- 机制层：`AgenticSearchPlanner.plan(question, context) -> list[SearchStep]`
+- 策略层：Skill 读取 `SearchStep` 列表，调用对应 MCP 工具，收集结果后生成答案
+
+---
+
+## 26. GapsFirstScanner：Caption-driven Linear Extractor
+
+**架构定位**：`GapsFirstScanner` 是本地 PDF 解析器（`PDFParser` fallback）的页面级提取引擎，负责从单页 PDF 中提取图片（diagrams）和表格。它替代了早期基于 UZN（Unified Zone Recognition）的全页面扫描方案，核心设计思想是**"像人一样线性阅读页面"**——从上往下，利用天然存在的 y 轴分割信息（页眉、Caption、章节标题）来划分处理区间。
+
+**历史演进**：
+- **早期版本**（UZN 方案）：从全页面角度出发，统一识别 diagram 和 table 区域，代码复杂（2000+ 行），性能极差
+- **当前版本**（GapsFirstScanner）：Caption-driven 线性提取，~600 行，性能提升 5-10x，提取质量显著改善
+
+### 26.1 核心机制：Zone 模型与 Hard Separator
+
+页面在 y 轴上被「硬分割」切分为多个区间（Zone），提取算法只在 Zone 内部搜索：
+
+```
+页面 y 轴：
+├─ header ──┤  ← 硬分割（页眉区域）
+│           │
+├─ heading ─┤  ← 硬分割（章节标题，如 "B2.2 Channel fields"）
+│           │
+├─ caption ─┤  ← 硬分割（Figure/Table Caption）
+│           │
+├─ body_text┤  ← 硬分割（大段正文块，高>20pt 且 宽>60%页面宽度）
+│           │
+├─ caption ─┤  ← 硬分割（另一个 Caption）
+│           │
+├─ footer ──┤  ← 硬分割（页尾区域）
+```
+
+**Hard Separator 构建规则**（按优先级从高到低）：
+
+| 类型 | 来源 | 合并规则 |
+|------|------|----------|
+| header/footer | 配置边距 | 固定区域，不可被其他 separator 覆盖 |
+| figure_caption | 正则匹配 `^Figure\s+[A-Z]?\d+...` | 相邻 separator 重叠时，高优先级覆盖低优先级 |
+| table_caption | 正则匹配 `^(Table|表)\s*[A-Z]?\d+...` | 同上 |
+| heading | **TOC 优先匹配**，其次字号 > 阈值 或 粗体 | 同上 |
+| body_text | 高>20pt 且 宽>60%页面宽度 | 低优先级，可被 caption/heading 覆盖 |
+
+相邻硬分割之间的空隙就是一个 `_Zone`，包含：
+- `y0`, `y1`：y 轴范围
+- `drawings`：落在该 y 范围内的矢量绘图（线条、矩形）
+- `text_block_count`：落在该范围内的文本块数量
+- `consumed`：是否已被 Figure/Table Caption 消耗
+
+### 26.2 body_text Hard Separator 的权衡
+
+**设计意图**：大段正文块（如多行段落）本身构成天然的 y 轴分割——表格/图片不会跨越正文块出现。
+
+**性能影响**（TI 219 页测试）：
+- 无 body_text 硬分割：6.7s
+- 有 body_text 硬分割：4.4s
+- **body_text 硬分割减少了 Zone 数量**，使后续 figure/table 提取遍历的 zone 更少，反而**提升了性能**
+
+**阈值选择**：`height > 20.0 and width > page_width * 0.6`
+- 过宽：会误将短段落识别为硬分割，增加 zone 数量
+- 过窄：遗漏真正的正文块，zone 过大导致搜索范围增加
+- 当前阈值基于 TI/AMBA/SPRUI07 的实证调优
+
+### 26.2a Zone 合并：跨分隔符的 Drawing
+
+**问题**：图表内部的标注文本（如 "SYSCLK"、"Master Clock"）可能被误判为 heading，产生硬分隔符，将同一幅图切分为上下两个 zone。Drawing 的中心点落入 zone 之间的 gap，导致提取丢失。
+
+**修复**：构建 zone 后，检测是否有 drawing 的 rect 同时跨越相邻两个 zone（中心点在 gap 中，且与两侧 zone 均有 >1pt 重叠）。若存在，合并这两个 zone 并重新分配所有 drawing。
+
+### 26.3 Figure Caption 驱动提取
+
+**核心规则**：不存在无 Figure Caption 的图。一个 Figure Caption 仅对应一个图片。
+
+**搜索逻辑**：
+1. 对每个 `figure_caption`，找到其上方和下方最近的、有 drawings 的 zone
+2. 比较距离，选择更近的 zone 作为目标
+3. 将目标 zone 内的 drawings 按空间邻近度聚类（`CLUSTER_PROXIMITY`）
+4. **每个 cluster 渲染为一张独立图片**（早期版本将所有 cluster 扁平化为一张大图，导致过度合并）
+5. 用 `_build_clip()` 构建最终裁剪区域：drawing-bounded X，zone-clamped Y，边缘标签扩展，padding
+
+**关键修复**：AMBA page 21 的图被分割为 3 张提取的问题，通过 cluster-based 渲染修复。
+
+### 26.4 Table Caption 驱动提取
+
+**核心规则**：Table Caption 下方的 zone 包含表格。
+
+**搜索逻辑**：
+1. 对每个 `table_caption`，找到其下方第一个未被消耗的 zone（`zone.y0 >= caption.y1`，且在 200pt 范围内）
+2. 在该 zone 内调用 `find_tables()` 提取表格
+
+### 26.5 Orphan Zone 检测：无 Caption 表格
+
+**设计意图**：可能存在无 Table Caption 的表格（如寄存器位域图、引脚配置表）。
+
+**检测流程**：
+1. Figure/Table Caption 驱动的提取会标记某些 zone 为 `consumed`
+2. 剩余的、有 drawings 的 zone 就是 "orphan zones"
+3. 对每个 orphan zone，调用 `_classify_table_style()` 判断是否是表格
+4. 如果是，调用 `find_tables()` 提取
+
+**`_classify_table_style` 算法**：
+
+```python
+def _classify_table_style(zone):
+    if not zone.drawings:
+        return None
+
+    h_lines = sum(1 for r in zone.drawings if r.width > r.height * 3)
+    v_lines = sum(1 for r in zone.drawings if r.height > r.width * 3)
+    other = sum(1 for r in zone.drawings if not above)
+
+    # 非线条元素占多数 → 框图/位域图，不是表格
+    if other > (h_lines + v_lines) * 0.5:
+        return None
+
+    # Style A: Grid table（多横线 + 多竖线）
+    if h_lines >= 4 and v_lines >= 3:
+        if text_density < 0.02:
+            return None  # 过滤位域图
+        return "grid"
+
+    # Style B: Horizontal / borderless table
+    if v_lines <= 1 and h_lines >= 4 and zone.text_block_count >= 3:
+        if text_density < 0.01:
+            return None
+        return "horizontal"   # 统一由 BorderlessTableExtractor 处理
+
+    return None
+```
+
+**产出率验证**（TI 219 页）：
+- 84 个 orphan zone 触发检测，76 个确实包含表格
+- **命中率 90.5%**，误报率极低
+
+### 26.6 自适应表格检测策略
+
+**机制与策略分离原则**：`_classify_table_style` 识别表格风格（机制），`process_page` 根据风格选择 `find_tables` 策略（策略）。
+
+**策略选择规则**：
+- 页面有任何 orphan zone 被分类为 `horizontal`（含零高度横线占多数的无边框表格）→ 直接调用 `BorderlessTableExtractor`，不再走 `find_tables`
+- 页面只有 `grid` 风格的 orphan zones → 整页使用 `lines_strict` 策略
+
+**原因**：
+- `lines_strict` 对 grid 表格精确（误报低），对 horizontal/无边框表格完全失效
+- AMBA 零高度横线表格无法被 `find_tables` 任何策略识别，需要专门的几何提取器
+- 实测 `find_tables(strategy="lines")` 在 AMBA 上零产出，且对 grid 表格误报更多，因此移除该策略
+- 按页自适应、按风格直接路由，避免全文档统一策略的"一刀切"问题
+
+**实测效果**（4 文档基准）：
+
+| 文档 | 统一 `lines` | 自适应策略 | 差异 |
+|------|-------------|-----------|------|
+| TI (grid 为主) | 37.3s / 142 表格 | **33.7s** / 134 表格 | **-3.6s**，误报减少 |
+| AMBA (horizontal 为主) | 20.0s / 14 表格 | **19.8s** / 14 表格 | 几乎相同 |
+| SPRUI07 (混合) | 93.4s / 588 表格 | **88.3s** / 537 表格 | **-5.1s**，误报减少 51 个 |
+| DC_UG (混合) | 12.9s / 90 表格 | **13.8s** / 114 表格 | +24 表格（horizontal 受益） |
+
+### 26.7 预计算优化
+
+**原始问题**：每个 Table Caption 和每个 orphan zone 都单独调用 `page.find_tables(clip=zone_rect)`，导致 142 次 PyMuPDF C 调用 → 耗时 ~20s。
+
+**优化方案**：
+1. `process_page` 开始时，根据页面 orphan zones 的风格决定 `table_strategy`
+2. 调用一次 `page.find_tables(strategy=table_strategy)`，获取全页所有表格
+3. `_find_tables_in_zone()` 遍历预计算列表，用 `tab_bbox.intersects(clip_rect)` 筛选落在当前 zone 内的表格
+4. 不再调用 PyMuPDF C 代码，纯 Python 筛选开销可忽略
+
+**效果**：TI 文档 `find_tables` 调用从 142 次降至 219 次全页扫描（但全页扫描比多次 clip 调用略快），整体性能显著改善。
+
+### 26.8 表格检测底层限制与实验记录
+
+本节记录 GapsFirstScanner 表格检测相关的底层库限制、踩坑过程和实验结论，防止后续重复无意义的工作。
+
+#### 26.8.1 AMBA 零高度线：PyMuPDF 根本性限制
+
+**实验日期**：2026-06-06
+
+**现象**：即使自适应策略正确识别了 AMBA 表格为 `horizontal`，`find_tables(strategy="lines")` 仍然返回 **0 个表格**。
+
+**实验过程**：
+1. 渲染 AMBA page 44/47/140 整页图像，确认表格有水平线、无竖直线
+2. 检查 `page.get_drawings()` 返回的 drawing 数据：
+   ```
+   Drawing 0: rect=(84.0,368.5,559.3,368.5), w=475.2, h=0.0
+   Drawing 1: rect=(84.0,368.9,559.3,368.9), w=475.2, h=0.0
+   ```
+3. 对 AMBA page 28/33/34/35 验证：17-58 条 horizontal lines，**100% 是零高度线**（height=0.000000）
+4. 测试 `lines_strict`/`lines`/`text` 三种策略，均无法有效提取
+
+**根因**：这些线条的 **height=0.0**（y0 == y1），是数学意义上的**零高度线**。`find_tables` 的内部算法无法识别零高度线条。
+
+**结论与修复**：这是 `find_tables` 的固有缺陷。为支持此类表格，新增 `scripts/parsers/borderless_table_extractor.py`：
+- 以 caption 为锚点，在下方区域搜索水平线并去重，得到行边界；
+- 用 header 行单词的 x 位置聚类出列中心；
+- 按行区间 + 最近列中心分配 word，重建 Markdown 表格。
+- `GapsFirstScanner._classify_table_style` 将零高度线/无边框表格统一归类为 `horizontal`；`process_page` 在识别到该风格时直接路由到 `BorderlessTableExtractor`，不再调用 `find_tables`。
+
+**验证**：对 AMBA CHI page 28（`Table B1.1`）实测可正确提取 3 列 4 行的无边框表格。
+
+#### 26.8.2 `tab.cells` 空伪表格：PyMuPDF 边界情况
+
+**实验日期**：2026-06-10
+
+**现象**：`parse()` 执行时出现大量 `ValueError: min() iterable argument is empty`：
+```
+Table detection failed on page 74: min() iterable argument is empty
+Table detection failed on page 83: min() iterable argument is empty
+...
+```
+
+**实验过程**：
+1. 在 `_find_tables_in_zone` 中添加完整 traceback 捕获
+2. traceback 指向 `tab.bbox` 属性访问：
+   ```
+   File ".../pymupdf/table.py", line 1534, in bbox
+       min(map(itemgetter(0), c)),
+   ValueError: min() iterable argument is empty
+   ```
+3. 确认 `find_tables()` 偶尔会返回 **cells 为空的伪表格**
+4. 访问 `tab.bbox` 时，PyMuPDF 尝试从 cells 计算 bbox，但 cells 为空 → `min()` 失败
+
+**修复**：在 `_find_tables_in_zone` 中访问 `tab.bbox` 前检查 `tab.cells`：
+```python
+for tab in tables:
+    if not tab.cells:  # 防御性跳过空 cells 伪表格
+        continue
+    tab_bbox = fitz.Rect(tab.bbox)
+    ...
+```
+
+**深层问题**：空 cells 伪表格的出现说明 orphan zone 检测过于宽松，大量非表格区域触发了 `find_tables`。后续通过收紧 `_classify_table_style` 条件减少了这种情况。
+
+#### 26.8.3 `_fix_drawing_rect` 的隐蔽副作用
+
+**实验日期**：2026-06-10
+
+**现象**：在 `_classify_table_style` 中添加 `r.height == 0.0` 零高度线检测后，基准测试显示 `filtered_zero_height=0`，检测完全失效。
+
+**实验过程**：
+1. 检查 `_fix_drawing_rect` 实现：
+   ```python
+   if rect.height < cls.DRAWING_RECT_MIN_SIZE:  # 0.0 < 0.1
+       return fitz.Rect(rect.x0, rect.y0 - 0.5, rect.x1, rect.y1 + 0.5)
+   ```
+2. 确认 `_fix_drawing_rect` 在 drawing 分配阶段已将零高度线扩展为 height=1.0
+3. `_classify_table_style` 遍历的是 `zone.drawings`（已被扩展），所以 `r.height == 0.0` 永远为 False
+
+**教训**：在 `_fix_drawing_rect` **之前**必须先统计原始 drawing 特征。解决方案：
+1. `_Zone` 添加 `h_zero_height: int` 字段
+2. `process_page` 中先遍历 `raw_drawings` 统计零高度线，再调用 `_fix_drawing_rect`
+3. `_classify_table_style` 使用 `zone.h_zero_height` 而非自行计算
+
+#### 26.8.4 `_classify_table_style` 演进与空跑率实验
+
+**实验日期**：2026-06-10
+
+**v1 算法**（旧版）：
+```python
+if len(zone.drawings) < 10: return None
+if h_lines >= 4 and v_lines >= 3: return "grid"
+if v_lines <= 1 and h_lines >= 6 and text >= 5: return "horizontal"
+```
+
+**v1 问题**：`len < 10` 硬性门槛过滤掉了一些真实表格；不区分 drawing 类型，位域图/框图被误判。
+
+**v2 算法**（当前）：
+```python
+# 1. 去掉 len<10 门槛
+# 2. 区分 horizontal / vertical / other 三类 drawing
+# 3. other > lines*0.5 时过滤（非线条元素占多数）
+# 4. grid 风格增加文本密度过滤（<0.02 text/pt 过滤位域图）
+# 5. horizontal 风格统一路由到 BorderlessTableExtractor（不再使用 find_tables）
+```
+
+**空跑率对比实验**（ orphan zone 触发 find_tables 但返回 0 表格的比例）：
+
+| 文档 | v1 空跑率 | v2 空跑率 | 主要过滤手段 |
+|------|----------|----------|------------|
+| TI | 15.9% | **1.4%** | low_density (~6), zero_height (~2) |
+| AMBA | 92.9% | **0.0%** | **zero_height (~111)** — 全部过滤 |
+| SPRUI07 | 10.4% | **8.8%** | low_density (~34) |
+| DC_UG | 31.0% | **28.6%** | low_density (~29) |
+
+**关键发现**：
+- AMBA 的 100% 空跑由零高度线导致，v2 的 zero_height 过滤将其降为 0%
+- DC_UG 仍有 ~28% 空跑，因为 DC_UG 的部分 orphan zones 确实是表格区域但 `find_tables` 未检出（非误判问题）
+- 文本密度过滤（0.02 text/pt）有效识别了位域图（大量 lines + 极少 text）
+
+#### 26.8.5 各文档 orphan zone 特征
+
+| 特征 | TI | AMBA | SPRUI07 | DC_UG |
+|------|-----|------|---------|-------|
+| 空跑主因 | 位域图误判 | **零高度线** | 少量非表格区域 | 低文本密度 |
+| success density | 5.65/100pt | N/A | 4.92/100pt | 3.38/100pt |
+| empty density | 5.14/100pt | 3.12/100pt | 5.71/100pt | 1.99/100pt |
+| success text | 23.2 | N/A | 10.8 | 12.6 |
+| empty text | 7.0 | 14.6 | 11.5 | 7.5 |
+
+#### 26.8.6 `pymupdf4llm` 导入副作用与依赖移除
+
+**实验日期**：2026-06-12
+
+**问题现象**：SPRUI07 page 80（PDF 页码 79，0-based）在本地 PDF fallback 解析中，**Figure 1-29 错误认领了 Table 1-28 的 zone，Figure 1-30 完全丢失**，最终只提取出 2 张图（期望 3 张）。现象仅在 `PDFParser` 被导入后出现；单独运行 `GapsFirstScanner.process_page()` 时结果正确。
+
+**初步假设**：测试者曾怀疑 PyMuPDF 存在"内部状态错误"，因为调用 `_extract_horizontal_decorations()` 后再处理 page 80 会触发问题。
+
+**实验方法**：
+
+1. **最小复现**：构造独立脚本，分别测试以下场景对 page 80 的影响：
+   - 不导入 `pdf_parser`，直接调用 `GapsFirstScanner.process_page()`
+   - 导入 `parsers.pdf_parser` 后再调用 `process_page()`
+   - 仅导入 `pymupdf4llm` 后再调用 `process_page()`
+   - 分别单独调用 `page.get_drawings()` / `page.get_text("dict")` / `_extract_horizontal_decorations()` 后再处理
+
+2. **对照实验**：对比 Layout 激活前后 `page.find_tables(strategy="lines_strict")` 的返回结果。
+
+3. **根因定位**：检查 `pymupdf4llm` 导入时的副作用，确认其是否修改 `pymupdf` 模块状态。
+
+**实验结果**：
+
+| 前置操作 | page 80 图片数 | 是否正确 |
+|---------|--------------|---------|
+| 无前置 | 3 | ✅ |
+| `import pymupdf4llm` | 2 | ❌ |
+| `import parsers.pdf_parser` | 2 | ❌ |
+| `_extract_horizontal_decorations(page)` | 2 | ❌ |
+| `page.get_text("dict")` | 2 | ❌ |
+
+关键发现：
+- `page.get_drawings()` 和 `page.get_text("dict")` 在 Layout 激活前后返回**完全相同**的数据。
+- 差异完全集中在 `page.find_tables()` 的返回结果：
+
+| Layout 状态 | `find_tables` 返回的关键 bbox | 含义 |
+|------------|---------------------------|------|
+| 未激活 | `(54.1, 170.1, 557.8, 236.8)` | Table 1-28，边界清晰 |
+| 未激活 | `(54.1, 350.8, 557.8, 439.1)` | Table 1-29，边界清晰 |
+| 激活后 | `(65.3, 172.9, 544.4, 303.6)` | **Table 1-28 与 Figure 1-29 位域图被合并为一个大表格** |
+| 激活后 | `(57.0, 89.7, 544.4, 135.5)` | Figure 1-28 位域图被识别为表格 |
+
+**缺陷现场（调用链）**：
+
+1. `pymupdf4llm/__init__.py` 导入时无条件执行：
+   ```python
+   try:
+       import pymupdf.layout
+   except ImportError:
+       use_layout(False)
+   else:
+       use_layout(True)
+   ```
+2. `use_layout(True)` 调用 `pymupdf.layout.activate()`，将 `pymupdf._get_layout` 设置为一个 ONNX 文档布局分析器。
+3. `fitz.Page.find_tables()` 内部会调用 `page.get_layout()`。
+4. `page.get_layout()` 调用 `pymupdf._get_layout(self)`，触发 ONNX 模型推理。
+5. Layout 信息被写入 `page.layout_information`，并**改变 `find_tables()` 的表格 bbox 计算**，导致 register bitfield diagram 与真实表格被错误合并。
+
+**关键发现：fallback 是死代码**
+
+在排查过程中进一步发现：`PDFParser.parse()` 中虽然定义了 `problem_pages` 字典和 `_call_pymupdf4llm_for_pages()` 等 fallback 方法，但 `_should_trigger_p4l_fallback()` **从未被调用**，`problem_pages` 也**从未被填充**。因此整个 PyMuPDF4LLM fallback 路径（Milestone 3）是**死代码**，不会在实际解析中产生任何输出。
+
+**最终修复方案**：
+
+既然 `pymupdf4llm` 的 layout 引擎会污染 `find_tables()`，且该依赖的 fallback 路径从未实际触发，**直接移除 `pymupdf4llm` 依赖**是最彻底的解决方案：
+
+- 从 `pyproject.toml` 删除 `"pymupdf4llm>=1.27.0,<2.0.0"`
+- 从 `scripts/parsers/pdf_parser.py` 删除：
+  - `import pymupdf4llm` 和 `import pymupdf`
+  - `_should_trigger_p4l_fallback()`
+  - `_call_pymupdf4llm_for_pages()`
+  - `_extract_tables_from_p4l_text()`
+  - `_fuse_p4l_tables_into_pages()`
+  - `_merge_image_lists()`
+  - `parse()` 中的 `problem_pages` 相关逻辑
+- 删除 `scripts/benchmark/run_pymupdf4llm.py`
+- 清理 benchmark 脚本中所有 `pymupdf4llm` 对比项
+
+**验证结果**：
+- SPRUI07 page 80 正确提取 3 张图、3 张表。
+- 全量测试通过。
+
+**教训**：
+- 外部库的导入级副作用（import-time side effect）可能 silently 改变同一进程中其他依赖库的行为。
+- 当依赖库的行为与文档/直觉不符时，应优先检查**导入顺序和导入副作用**，而非假设底层库有状态错误。
+- 引入依赖前应确认其实际使用路径；长期不触发且存在副作用的 fallback 代码应当及时清理，避免成为"隐患代码"。
+
+### 26.9 历史演进与性能数据
+
+**旧架构（UZN 方案，已删除）**：
+- `unified_zone_recognition.py`，2037 行
+- 从全页面角度统一识别 diagram 和 table 区域
+- 代码复杂、性能极差、提取质量差
+
+**当前架构（GapsFirstScanner）**：
+- `gaps_first_scanner.py`，~600 行
+- Caption-driven 线性提取，hard separator + zone 模型
+- 已删除死代码：`_find_figure_regions`、`_detect_and_convert_tables`、`_strip_zone_text_blocks`、`_build_images_from_uzn`
+
+**性能基准**（4 文档，GapsFirstScanner）：
+
+| 文档 | 页数 | process_page | 每页耗时 | 图片 | 表格 |
+|------|------|-------------|----------|------|------|
+| TI TMS320F28335 | 219 | 30.6s | 140ms | 85 | 128 |
+| AMBA CHI | 585 | 20.0s | 34ms | 218 | 14 |
+| SPRUI07 | 868 | 76.4s | 88ms | 586 | 442 |
+| DC_UG | 748 | 8.1s | 11ms | 1 | 61 |
+
+**早期 Milestone 数据**（旧 PDFParser，lines_strict）：
+
+| 文档 | 页数 | 改进前 | 版本 A（lines_strict） | 表格数 |
+|------|------|--------|----------------------|--------|
+| TI TMS320F28335 | 219 | 10.3s / 0表格 | 46.2s / 68表格 | 68 |
+| AMBA CHI | 585 | 8.7s / 0表格 | 93.3s / 22表格 | 22 |
+
+**注意**：GapsFirstScanner 的数据与旧 PDFParser **不可直接比较**，因为：
+1. 架构完全不同（UZN vs Caption-driven）
+2. 图片提取逻辑完全不同（旧版提取大量位域图/装饰线，新版只提取有 Caption 的图）
+3. 表格检测范围不同（旧版全页扫描，新版 zone 级扫描）
+
+### 26.10 多进程并行化结论
+
+- 8 workers 加速比：TI 2.07x / AMBA 1.61x
+- 但 find_tables 流程仅占解析总时间的 18-30%，Amdahl 定律限制整体收益仅 ~1.3x
+- **即使 find_tables 无限加速，TI 仍需 28s+，AMBA 仍需 75s+**
+- **否决实施**：代码复杂度增加不值得有限的收益
+
+## 27. 为什么需要 EntityChunkBridge 双向桥接索引？
+
+**选择**：在 `KnowledgeBaseService` 内部维护一个纯内存的 `_EntityChunkBridge`，建立 `block_db_id ↔ (entity_type, entity_name)` 的双向多对多映射。零 schema 变更、零数据模型变更，从 SQLite `content_blocks.metadata["extracted_entities"]` 构建。
+
+**原因**：
+- **补齐单向关联的缺失**：原有架构中 block → entity 的关联已存在（通过 `metadata.extracted_entities`），但 entity → block 的反向查询缺失。`graph_provenance` 此前通过逐文档遍历所有 blocks 做暴力扫描（O(N)），不可扩展
+- **打通不同粒度空间**：FAISS 向量索引操作的是 block 粒度（文本片段 + embedding），NetworkX 图谱操作的是 entity 粒度（结构化实体 + 关系）。桥接索引使两者可以双向导航
+- **支持策略层灵活组合**：机制层只提供原子操作（`_chunk_to_entities` / `_entity_to_chunks` / `_get_chunk` / `_semantic_hits` / `_get_subgraph`），策略层可自由组合出任意跨粒度查询（语义→图谱→语义闭环、路径文本证据链等）
+
+**实现**：
+```python
+_forward:  dict[int, set[_EntityRef]]     # block_id → {EntityRef}
+_reverse:  dict[_EntityRef, set[int]]     # EntityRef → {block_id}
+```
+
+**生命周期**：
+- `KnowledgeBaseService.__init__` → `bridge.rebuild()` 全量构建
+- `ingest_document` / `reprocess_document` 完成后 → `_sync_bridge_for_doc()` 增量同步
+- `attach()` 幂等设计：同一 block 重复 attach 会先 detach 旧绑定，避免索引累积
+- `detach()` 双向清理：同时清除 `_forward` 和 `_reverse`，空集合自动删除
+
+**不同粒度关联矩阵**：
+
+| 方向 | 粒度 | 已有/新增 | 机制 |
+|------|------|----------|------|
+| block → entity | 向量→图谱 | 已有 | `metadata.extracted_entities` |
+| entity → block | 图谱→向量 | **新增** | `_entity_to_chunks()` O(1) |
+| document → entity | 文档→图谱 | 已有 | `GraphEntity.source_doc_ids` |
+| entity → document | 图谱→文档 | 已有 | `GraphEntity.source_doc_ids` |
+| chapter → entity | 章节→图谱 | 已有 | `GraphEntity.source_chapter` |
+| block → subgraph | 向量→子图 | 已有 | `search_with_graph()` |
+| subgraph → block | 子图→向量 | **可组合** | 子图实体 → `_entity_to_chunks()` |
+
+**权衡**：
+- 内存索引，重启需重建（但 `KnowledgeBaseService` 为长生命周期单例，初始化成本可忽略：几百文档 × 几十实体）
+- 不解决"实体级语义搜索"（如搜索 "GPIO" 也匹配 "General Purpose Input Output"），那是实体 embedding 的范畴，不在本次机制设计范围内
+
+---
+
+## 28. 联合查询与 Agent 自主推理
+
+**设计**：`search_with_graph()` 使用原子操作组合实现语义搜索与图谱查询的联合。
+
+**原子操作层（机制，无策略参数）**：
+- `_semantic_hits(query, top_k)` → FAISS 搜索，返回 `[(block_db_id, score), ...]`
+- `_get_chunk(block_db_id)` → 深拷贝获取 Chunk 对象（内存表示）
+- `_chunk_to_entities(block_db_id)` → 桥接索引正向查询，返回 `set[_EntityRef]`
+- `_entity_to_chunks(entity_type, name)` → 桥接索引反向查询，返回 `set[block_db_id]`
+- `get_entity(type, name)` / `get_subgraph(type, name, depth)` → 图谱空间查询
+
+**策略组合示例**：
+
+```
+search_with_graph（语义→图谱）:
+  _semantic_hits → _get_chunk → _chunk_to_entities → get_subgraph
+
+graph_provenance 优化（图谱→向量）:
+  _entity_to_chunks → _get_chunk（替换原有 O(N) 扫描）
+
+语义→图谱→语义闭环（可扩展策略）:
+  _semantic_hits → _chunk_to_entities → get_subgraph → 子图实体 _entity_to_chunks → _get_chunk
+```
+
+**block+实体联合返回**：`get_content_with_entities(block_db_id)` 使用 `_get_chunk` + `_chunk_to_entities` + `get_entity` + `get_entity_relations`，返回 block 内容 + 全局图中最新状态的关联实体/关系（深拷贝隔离）。
+
+**Agent 自主推理能力**：
+- Agent 可先用 `search_with_graph` 找到相关文本和图谱实体
+- 再用 `graph_neighbors`/`graph_path`/`graph_subgraph` 做多跳推理
+- 通过 `find_chunks_by_entity` 从任意实体反向查找支撑它的原始文本 blocks
+- 发现错误时用 `graph_feedback` 标记，`feedback_score` 实时汇总到实体属性
+- 发现缺失/错误关联时用 `graph_upsert_entity`/`graph_upsert_relation`/`graph_feedback` 动态修正
+
+---
+
+## 29. 反馈与数据质量闭环
+
+**设计**：`feedback` 表 + `graph_feedback` 工具建立数据质量闭环。
+
+**机制**：
+- 用户对实体/关系提交 `rating`（+1 正确 / -1 错误）+ `comment`
+- `get_entity_feedback_score()` 汇总评分，同步更新到 `GraphEntity.feedback_score`
+- `confidence` 字段标记 LLM 提取置信度（默认 1.0）
+- `verified` 字段标记人工验证状态
+- 低 confidence 或负 feedback_score 的实体可被 Agent 优先复核
+
+---
+
+## 30. IC 设计关系类型扩展
+
+**新增关系类型**（覆盖 STA、CDC、电源域、参数化等场景）：
+
+| 关系类型 | 语义 |
+|---------|------|
+| `DRIVES` | Signal/Module → Signal（驱动关系） |
+| `DRIVEN_BY` | Signal → Signal/Module（被驱动关系） |
+| `TIMING_PATH` | Entity → Entity（时序路径，STA 分析） |
+| `CLOCK_GATED_BY` | Module/Signal → Signal（时钟门控控制） |
+| `RESET_BY` | Module/Signal → Signal（复位来源） |
+| `PARAMETERIZED_BY` | Module → Parameter（参数化配置） |
+| `INSTANCE_OF` | Module → Module（实例化：instance → definition） |
+
+---
+
+## 31. 已知限制与权衡汇总
 
 | 限制 | 原因 | 缓解措施 |
 |------|------|----------|
@@ -1354,7 +1632,7 @@ Step 1: 内容分类（8 种类型）
 
 ---
 
-## 技术栈速查
+## 32. 技术栈速查
 
 | 层级 | 依赖 | 版本要求 |
 |------|------|----------|

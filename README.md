@@ -7,9 +7,12 @@
 - **智能文档解析**：PDF 通过 BigModel Expert API 解析为 Markdown 文本 + 图片，保留完整格式；失败时自动 fallback 到本地 PDFParser
 - **知识图谱构建**：自动提取实体（Feature、Module、Register、Signal、Instruction、Interrupt、PipelineStage、Peripheral 等）和关系（IMPLEMENTS、CONTAINS、HAS_REGISTER、INSTRUCTION_READS_REGISTER、MODULE_IMPLEMENTS_INSTRUCTION、INTERRUPT_TRIGGERS 等），构建可查询的跨层级知识图谱（RTL ↔ ISA）
 - **向量语义检索**：基于 FAISS 的语义向量索引，支持相似度搜索
-- **Batch API 架构**：所有 LLM 调用通过 Batch API 提交，成本为同步 API 的 50%，支持超大 JSONL 自动拆分并行处理
+- **混合检索与重排序**：BM25 稀疏索引（支持 CJK 2-gram）与 FAISS 稠密检索通过 RRF 融合；LLM cross-encoder 对候选结果重排序，提升复杂查询精度
+- **Agentic 搜索**：`AgenticSearchPlanner` 将复杂问题分解为 `SearchStep` 列表，支持多跳检索策略；Agent 通过 `~/.agents/skills/agentic-search/SKILL.md` 编排执行
+- **Batch API 架构**：Batch API 优先：提取类 LLM 调用通过 Batch API 提交以降低成本；辅助 LLM 调用（重排序、Agentic 规划、评估 judge）使用同步 API。支持超大 JSONL 自动拆分并行处理
 - **章节级增量更新**：文档修订后，按章节 `content_hash` 指纹比较，未变章节复用实体缓存与 embedding，仅对变更/新增章节进行 LLM 提取，万页级文档变更一页时成本降低 99%+
 - **Multimodal 图片理解**：LLM 直接分析文档中的图片（时序图、架构框图、寄存器表等），生成文字描述用于向量化
+- **评估框架**：`EvalQuestion`/`EvalDataset` 数据模型 + SQLite 持久化；支持 hit rate、MRR、NDCG 等检索指标，以及 Faithfulness、Context Precision、Context Recall 等 LLM-as-judge 指标
 
 ---
 
@@ -102,7 +105,6 @@ flowchart TB
     S4E --> G1
     S4H --> S5A
     S5E --> S6A
-    S5F -.-> S6E
     S6H --> G1
 ```
 
@@ -159,14 +161,20 @@ work-docs-library/
 │   │   ├── graph_store.py        # 图谱存储（NetworkX）
 │   │   ├── db.py                 # SQLite 数据库操作
 │   │   ├── vector_index.py       # FAISS 向量索引管理
-│   │   ├── models.py             # 数据模型 (Document/Chunk)
+│   │   ├── sparse_index.py       # BM25 稀疏索引（CJK 2-gram 分词）
+│   │   ├── hybrid_retriever.py   # RRF 融合稠密 + 稀疏检索
+│   │   ├── reranker.py           # LLM cross-encoder 重排序
+│   │   ├── agentic_search.py     # Agentic 搜索规划器（SearchStep 分解）
+│   │   ├── evaluation.py         # 评估框架（检索指标 + LLM-as-judge）
+│   │   ├── models.py             # 数据模型 (Document/Chunk/EvalQuestion/EvalDataset)
 │   │   ├── enums.py              # StrEnum 定义 (ChunkStatus/DocumentStatus/ChunkType)
-│   │   └── knowledge_base_service.py  # 统一服务层封装
+│   │   ├── knowledge_base_service.py  # 统一服务层封装
+│   │   └── status_collector.py   # 结构化状态收集与仪表盘数据聚合
 │   ├── parsers/                  # IO / 解析层
 │   │   ├── pdf_parser.py         # PDF 本地解析器（fallback，输出与 BigModel 一致）
 │   │   ├── office_parser.py      # DOCX / XLSX 解析器（代码存在，尚未接入 pipeline）
 │   │   └── image_utils.py        # 图片压缩工具
-│   └── tests/                    # pytest 测试集（429 个用例）
+│   └── tests/                    # pytest 测试集（491 个用例）
 ├── knowledge_base/               # 运行时自动生成
 │   ├── workdocs.db               # SQLite 元数据
 │   ├── faiss.index               # FAISS 向量索引（IndexIDMap2，直接存储 block_db_id）
@@ -176,6 +184,8 @@ work-docs-library/
 ├── .venv/                        # Python 虚拟环境
 └── .gitignore
 ```
+
+> 用户级 Skill：`~/.agents/skills/agentic-search/SKILL.md` 提供多跳 Agentic 搜索工作流，由外部 Agent 编排调用，不在项目 `skills/` 目录内。
 
 ---
 
@@ -246,6 +256,7 @@ mcp__workdocs__ingest {"path": "path/to/document.pdf"}
 当需要审查或修正中间产物时，可使用六阶段流程。每个阶段的产物均持久化到磁盘，支持人工编辑后重新触发下游阶段。
 
 > 阶段工具（`doc_parse`、`doc_build_batches` 等）以及 `reprocess`、`rebuild_global_graph` 属于数据改写/管理操作，**不通过 MCP 暴露给 Agent**。它们通过 `scripts/admin_tools.py` 提供命令行入口，或可直接调用 `KnowledgeBaseService` Python API。
+> （内部函数名 `doc_parse` 对应 admin 命令 `stage1_parse`，`doc_build_batches` 对应 `stage2_build_jsonl`，`doc_submit_batches` 对应 `stage3_submit_batches`，`doc_ingest_results` 对应 `stage4_ingest_results`，`doc_build_embed_jsonl` 对应 `stage5_build_embed_jsonl`，`doc_submit_embed_batches` 对应 `stage6_submit_embed_batches`。）
 
 #### 阶段1: 解析（PDF → Markdown）
 
@@ -348,7 +359,27 @@ python scripts/admin_tools.py stage6_submit_embed_batches --params '{"doc_id":"{
 mcp__workdocs__semantic_search {"text": "AH bus arbitration", "top_k": 5}
 ```
 
-### 4. 按章节查询
+### 4. 混合检索与重排序
+
+```text
+# 稠密向量 + BM25 稀疏检索，RRF 融合
+mcp__workdocs__search_hybrid {"text": "AH bus arbitration priority", "top_k": 5}
+
+# 混合检索候选 + LLM cross-encoder 重排序（更精准，成本更高）
+mcp__workdocs__search_reranked {"text": "AH bus arbitration priority", "top_k": 5, "candidate_k": 20}
+```
+
+### 5. Agentic 搜索规划
+
+将复杂问题交给 `agentic_plan` 分解为可执行的 `SearchStep` 列表，由 Agent 在 Skill 编排下逐条执行：
+
+```text
+mcp__workdocs__agentic_plan {"question": "Which modules implement the GPIO peripheral and what registers do they contain?"}
+```
+
+返回的 `steps` 可包含 `semantic` / `hybrid` / `reranked` / `graph` / `chapter` / `metadata` / `synthesize` 等类型。详见 `~/.agents/skills/agentic-search/SKILL.md`。
+
+### 6. 按章节查询
 
 支持子串匹配和递归子标题查询：
 
@@ -363,13 +394,13 @@ mcp__workdocs__query {"doc_id": "<DOC_HASH>", "chapter_regex": "^2\\."}
 mcp__workdocs__query {"doc_id": "<DOC_HASH>", "chapter": "2.1", "include_children": true}
 ```
 
-### 5. 查看已导入文档
+### 7. 查看已导入文档
 
 ```text
 mcp__workdocs__status {}
 ```
 
-### 6. 图谱查询
+### 8. 图谱查询
 
 图谱数据以 JSON 格式持久化，可直接读取：
 
@@ -386,22 +417,35 @@ print(f'entities={len(g.get(\"nodes\", []))}, relations={len(g.get(\"edges\", []
 "
 ```
 
+### 9. 运行评估
+
+```bash
+# 先通过 KnowledgeDB API 创建 EvalDataset，然后运行评估
+python scripts/admin_tools.py run_eval --params '{"dataset_name":"my_eval","retriever":"hybrid","top_k":10}'
+```
+
+- 评估命令属于数据改写/管理操作，**不通过 MCP 暴露给 Agent**，仅通过 `scripts/admin_tools.py` 提供。
+- 当前支持 `evaluate` / `run_eval` 两个兼容别名。
+
 ---
 
 ## Plugin 工具说明
 
-本插件遵循最新 Kimi Code 插件规范：
+本插件遵循最新 Kimi Code 插件规范，并秉持 **AI Agent Native Plugin 原则**：复杂策略（如 Agentic 搜索、评估流程）由外部 Agent 通过 Skill 编排，插件内部只提供原子机制（搜索、读取、评分、记录），从而将 LLM 成本留给外部 Agent 决策，而不是在插件内部隐藏多轮推理。
 
 - **Manifest**：`kimi.plugin.json` 声明了一个 MCP server (`workdocs`) 和会话启动 Skill (`using-workdocs`)。
 - **MCP 工具**：仅暴露适合 Agent 自主调用的 **读取 + 导入** 类工具，调用格式为 `mcp__workdocs__<tool_name>`。
-- **管理工具**：数据改写/阶段调试类功能不通过 MCP 暴露，保留在 `scripts/admin_tools.py`（阶段 2）中供手动维护。
+- **管理工具**：数据改写/阶段调试类功能不通过 MCP 暴露，保留在 `scripts/admin_tools.py` 中供手动维护（覆盖全部 pipeline 阶段与管理命令）。
 
-### MCP 工具（11 个）
+### MCP 工具（14 个）
 
 | MCP 工具名 | 作用 |
 |-----------|------|
 | `mcp__workdocs__ingest` | 一键导入 PDF/目录，自动完成解析→Batch→入库→向量化 |
 | `mcp__workdocs__semantic_search` | 语义向量搜索；`graph_depth>0` 时联合图谱扩展 |
+| `mcp__workdocs__search_hybrid` | 混合检索：BM25 稀疏检索 + FAISS 稠密检索，RRF 融合排序 |
+| `mcp__workdocs__search_reranked` | 混合检索候选 + LLM cross-encoder 重排序（更精准，成本更高） |
+| `mcp__workdocs__agentic_plan` | 将复杂问题分解为 `SearchStep` 列表，供外部 Agent 编排多跳检索 |
 | `mcp__workdocs__query` | 按章节、关键词、概念查询 content_block |
 | `mcp__workdocs__status` | 列出所有已导入文档或查看指定文档进度 |
 | `mcp__workdocs__toc` | 查看文档目录 |
@@ -415,7 +459,7 @@ print(f'entities={len(g.get(\"nodes\", []))}, relations={len(g.get(\"edges\", []
 ### 不暴露为 MCP 的内部功能
 
 以下功能直接改写知识库数据或属于人工阶段调试，不进入 MCP 工具面：
-`doc_parse`、`doc_build_batches`、`doc_submit_batches`、`doc_ingest_results`、`doc_build_embed_jsonl`、`doc_submit_embed_batches`、`reprocess`、`graph_upsert_entity`、`graph_delete_entity`、`graph_upsert_relation`、`graph_delete_relation`、`graph_feedback`、`rebuild_global_graph`。
+`doc_parse`（对应 `stage1_parse`）、`doc_build_batches`（对应 `stage2_build_jsonl`）、`doc_submit_batches`（对应 `stage3_submit_batches`）、`doc_ingest_results`（对应 `stage4_ingest_results`）、`doc_build_embed_jsonl`（对应 `stage5_build_embed_jsonl`）、`doc_submit_embed_batches`（对应 `stage6_submit_embed_batches`）、`reprocess`、`evaluate` / `run_eval`、`graph_upsert_entity`、`graph_delete_entity`、`graph_upsert_relation`、`graph_delete_relation`、`graph_feedback`、`rebuild_global_graph`。
 
 ---
 
@@ -424,14 +468,16 @@ print(f'entities={len(g.get(\"nodes\", []))}, relations={len(g.get(\"edges\", []
 ### 配置优先级架构
 
 ```
-1. 环境变量（.env 文件或系统环境变量，如 WORKDOCS_LLM_API_KEY）— 用户手动配置
+1. 环境变量（系统环境变量，如 `WORKDOCS_LLM_API_KEY`）— 运行时注入，优先级最高
    ↓
-2. 代码硬编码默认值
+2. `.env` 文件（`scripts/.env`）— 用户手动配置
+   ↓
+3. 代码硬编码默认值
 ```
 
 所有配置均通过 `WORKDOCS_*` 环境变量管理：
-- **`.env`**：用户手动配置，优先级最高，适合存放 API Key 等凭证，gitignored，不进入版本控制。
-- **环境变量**：CI/容器/Kimi Code CLI 运行时注入，可临时覆盖 `.env`。
+- **环境变量**：CI/容器/Kimi Code CLI 运行时注入，优先级最高，可临时覆盖 `.env`。
+- **`.env`**：用户手动配置（`scripts/.env`），适合存放 API Key 等凭证，gitignored，不进入版本控制。当环境变量未设置时生效。
 - **代码默认值**：当 `.env` 和环境变量均未设置时回退。
 
 > 注意：新版 `kimi.plugin.json` 不再使用旧 `plugin.json` 的 `inject`/`configFile` 字段。`config.json` 已移除，请使用 `scripts/.env`。
@@ -504,6 +550,8 @@ print(f'entities={len(g.get(\"nodes\", []))}, relations={len(g.get(\"edges\", []
 | `WORKDOCS_PLUGIN_GRAPH_MAX_DEPTH` | `3` | 图谱查询默认最大深度 |
 | `WORKDOCS_PLUGIN_SUBGRAPH_DEPTH` | `1` | 子图扩展默认深度 |
 | `WORKDOCS_PLUGIN_DEFAULT_LIMIT` | `100` | 默认分页限制 |
+| `WORKDOCS_PLUGIN_BM25_TOP_K` | `50` | 混合检索中 BM25 稀疏检索默认召回条数 |
+| `WORKDOCS_PLUGIN_HYBRID_RRF_K` | `60` | RRF 融合常数 k，控制排名衰减速度 |
 | **Pipeline / Graph** | | | |
 | `WORKDOCS_GRAPH_MAX_PATH_DEPTH` | `6` | 图谱路径搜索最大深度 |
 | `WORKDOCS_GRAPH_OUTPUT_DIR` | `graphs` | 图谱 JSON 输出目录 |
@@ -562,12 +610,26 @@ export WORKDOCS_LLM_TIMEOUT=300
 | `core/graph_store.py` | GraphEntity / GraphRelation / NetworkXGraphStore：实体关系图谱 |
 | `core/db.py` | KnowledgeDB：SQLite 增删改查 |
 | `core/vector_index.py` | VectorIndex：FAISS 向量索引管理 |
-| `core/models.py` | Chunk、Document 数据模型 |
+| `core/models.py` | Chunk、Document、EvalQuestion、EvalDataset 数据模型 |
+
+### 检索与评估
+| 模块 | 职责 |
+|------|------|
+| `core/sparse_index.py` | `BM25SparseIndex`：基于 content_blocks 的内存 BM25 稀疏索引，CJK 2-gram + 英文标识符分词 |
+| `core/hybrid_retriever.py` | `RRFFusionRetriever`：稠密向量检索与 BM25 稀疏检索的 RRF 融合 |
+| `core/reranker.py` | `LLMReranker`：使用 LLM 对 query-passage 进行 0-10 分相关度重排序 |
+| `core/agentic_search.py` | `AgenticSearchPlanner` + `SearchStep`：将复杂问题分解为可执行检索步骤（不执行，供 Skill 编排） |
+| `core/evaluation.py` | `EvalHarness` + LLM-as-judge 指标（Faithfulness / Context Precision / Context Recall）+ 检索指标（hit rate / MRR / NDCG） |
 
 ### 配置
 | 模块 | 职责 |
 |------|------|
-| `core/config.py` | 统一配置中心，`.env` / 环境变量 → 默认值 两层优先级 |
+| `core/config.py` | 统一配置中心，环境变量 → `.env` → 默认值 三层优先级 |
+
+### 状态与监控
+| 模块 | 职责 |
+|------|------|
+| `core/status_collector.py` | 结构化状态收集与仪表盘数据聚合，支持 documents/blocks/graphs 等多 scope 统计 |
 
 ---
 
@@ -588,7 +650,7 @@ export WORKDOCS_LLM_TIMEOUT=300
 | `chapters` | JSON 序列化的章节列表 |
 | `extracted_at` | 处理时间戳（ISO 格式） |
 | `file_hash` | 内容哈希 |
-| `status` | `pending` → `done` / `failed` |
+| `status` | `pending` → `processing` → `batch_submitted` → `done` / `failed` |
 
 #### `content_blocks` — 内容块（方案C：存储粒度）
 | 字段 | 说明 |
@@ -701,7 +763,7 @@ cd /path/to/work-docs-library
 PYTHONPATH=scripts ./.venv/bin/python -m pytest scripts/tests/ -v
 ```
 
-**当前状态：429 passed, 0 skipped, 0 failed。**
+**当前状态：491 passed, 0 skipped, 0 failed。**
 
 ### 测试分类与审计
 
@@ -726,13 +788,13 @@ PYTHONPATH=scripts ./.venv/bin/python -m pytest \
 | 分类 | 文件 | 用例数 | 价值 | 说明 |
 |------|------|--------|------|------|
 | **核心基础设施** | `test_graph_store.py` | 77 | 🔴 高 | 图谱存储 CRUD、路径搜索、属性索引、持久化 |
-| | `test_vector_index.py` | 16 | 🔴 高 | FAISS IndexIDMap2 增删查、事务、迁移 |
+| | `test_vector_index.py` | 14 | 🔴 高 | FAISS IndexIDMap2 增删查、事务 |
 | | `test_db.py` | 15 | 🔴 高 | SQLite CRUD、事务、冲突日志、反馈 |
 | | `test_knowledge_base_service.py` | 21 | 🔴 高 | 统一服务层、实体-Chunk 桥接 |
 | | `test_knowledge_base_service_queries.py` | 3 | 🔴 高 | 语义-图谱联合查询（核心卖点） |
 | **Pipeline 集成** | `test_pdf_parser.py` | 71 | 🔴 高 | PDF 解析、图片提取、表格检测、14 个真实页面 fixture |
 | | `test_pipeline_stages.py` | 31 | 🔴 高 | 六阶段 pipeline 拆分、增量更新、fallback |
-| | `test_plugin_router.py` | 46 | 🔴 高 | Plugin 工具路由、参数校验、路径沙箱 |
+| | `test_plugin_router.py` | 55 | 🔴 高 | Plugin 工具路由、参数校验、路径沙箱 |
 | **回归测试** | `test_audit_issues.py` | 10 | 🔴 高 | 生产 bug/审计问题的定向回归（FAISS 重复、深拷贝污染、路径沙箱、FAISS/SQLite 事务一致性等） |
 | **模块单元测试** | `test_batch_builder.py` | 14 | 🟡 中 | Batch 文本切分保护（代码块/表格/段落边界） |
 | | `test_batch_clients.py` | 19 | 🟡 中 | Batch API 客户端 JSONL/提交/轮询/超时 |
@@ -745,11 +807,18 @@ PYTHONPATH=scripts ./.venv/bin/python -m pytest \
 | | `test_office_parser.py` | 3 | 🟡 中 | DOCX/XLSX 解析（尚未接入 pipeline） |
 | | `test_borderless_table_extractor.py` | 3 | 🟡 中 | AMBA 风格无边框表格提取 |
 | | `test_table_utils.py` | 4 | 🟡 中 | Markdown 表格规范化 |
+| | `test_parsed_docs_jsonl.py` | 2 | 🟡 中 | 真实文档端到端 JSONL 生成 |
+| **检索与评估** | `test_sparse_index.py` | 9 | 🟡 中 | BM25 稀疏索引构建与 CJK/英文分词测试 |
+| | `test_hybrid_retriever.py` | 3 | 🟡 中 | RRF 融合检索（稠密 + 稀疏）测试 |
+| | `test_reranker.py` | 9 | 🟡 中 | LLM 重排序解析与排序测试 |
+| | `test_agentic_search.py` | 11 | 🟡 中 | Agentic 搜索规划器步骤解析测试 |
+| | `test_evaluation.py` | 21 | 🟡 中 | 检索指标（hit rate/MRR/NDCG）与 LLM-as-judge 指标测试 |
 | **接口测试** | `test_mcp_server.py` | 10 | 🟡 中 | MCP Server 工具暴露与调用协议测试 |
+| | `test_status_tool.py` | 13 | 🟡 中 | 结构化状态仪表盘各 scope 测试 |
 
 #### 当前状态
 
-核心测试集已稳定在 **429 个用例**（0 skipped）。
+核心测试集已稳定在 **491 个用例**（0 skipped）。
 
 ### 常用测试文档
 
@@ -777,81 +846,16 @@ WORKDOCS_PARSER_API_KEY=your-api-key
 
 `scripts/prompts/` 目录下的文本文件被代码**运行时读取**，无需重启即可生效。修改提示词后，重新执行 `stage2_build_jsonl` → `stage3_submit_batches` → `stage4_ingest_results` 即可看到效果，无需重启 Kimi CLI。
 
-### `entity_extraction_system.txt` — 实体提取 system 提示词
+当前包含的提示词文件：
 
-**被谁读取**：`EntityExtractor._load_prompt("entity_extraction_system")`
-
-**作用**：定义 LLM 的身份、实体/关系类型、输出格式、**三步提取流程**和**质量约束**。
-
-**当前设计要点**：
-
-#### 三步提取流程
-
-为减少过度提取和跨类型误提取，Prompt 要求 LLM 按以下三步执行：
-
-1. **Step 1 — 内容分类**：先将 block 内容归类为 9 种类型之一（寄存器字段描述表格、信号/参数表格、代码示例、架构描述、协议状态机、勘误/电气规格、概述/介绍、指令参考、其他）
-2. **Step 2 — 按类型提取**：仅在对应类型范围内提取实体
-   - RegisterField **只能从寄存器字段描述表格**中提取
-   - 代码示例中**禁止提取任何实体**（零容忍）
-   - 禁止将描述性短语（如 "Compare A"、"Phase registers"）提取为 Register
-3. **Step 3 — 关系链补全 + 去重**：确保每个非 Document 实体至少一条直接关系，同文档内 Document/Product/Module 去重
-
-#### 代码示例排除规则（零容忍）
-
-以下代码元素**绝对禁止**提取为实体：
-
-| 类型 | 示例 |
+| 文件 | 用途 |
 |------|------|
-| 局部变量 | `epwm1_tz_isr`、`temp_count` |
-| 代码标签 | `Epwm1_tz_isr:` |
-| 汇编地址常量 | `0x007010` |
-| 宏展开值 | `EPWM1_INT` |
-| 寄存器字段访问 | `EPwm1Regs.TBCTL.bit.PRDLD` |
-| 位域赋值 | `.bit.XXX = YYY` |
+| `entity_extraction_system.txt` / `entity_extraction_user.txt` | 实体/关系提取的 system 提示词与 user 模板 |
+| `agentic_search_system.txt` / `agentic_search_user.txt` | Agentic 搜索规划器步骤分解 |
+| `rerank_passage_system.txt` / `rerank_passage_user.txt` | LLM cross-encoder passage 重排序 |
+| `eval_faithfulness_*.txt`、`eval_context_precision_*.txt`、`eval_context_recall_*.txt` | LLM-as-judge 评估指标 |
 
-> **关键洞察**：`EPwm1Regs.TBCTL.bit.PRDLD` 在代码中是**访问语法**，不是 RegisterField 的定义。RegisterField 的定义只存在于寄存器字段描述表格中。
-
-#### 实体类型优先级
-
-同一概念在同一文档中只能属于一个类型：`Module > Register > Signal > Instruction > Parameter > Feature`
-
-#### 属性格式规范
-
-Prompt 中显式规定格式，确保 LLM 输出统一：
-
-| 属性 | 格式 | 示例 |
-|------|------|------|
-| `width` | 纯数字 | `16` |
-| `access` | R/RW/R-0/W1C | `R/W` |
-| `reset_value` | 十六进制字符串 | `"0x0000"` |
-| `address_offset` | 十六进制字符串 | `"0x0002"` |
-| `bits` | 冒号分隔 | `"15:0"` |
-
-### `entity_extraction_user.txt` — 实体提取 user 模板
-
-**被谁读取**：`EntityExtractor._load_prompt("entity_extraction_user")`
-
-**作用**：提供具体任务指令和占位符。
-
-**格式规范**：
-- 必须包含 `{{chapters}}` 占位符，运行时被替换为章节文本
-- 必须包含 `{{images}}` 占位符（当前替换为空字符串，图片通过 multimodal content 直接传入）
-
-### Prompt 迭代与质量评审
-
-**Prompt 版本化管理流程**：
-1. 修改 `scripts/prompts/entity_extraction_system.txt`
-2. 执行 `python scripts/admin_tools.py stage2_build_jsonl --params '{"doc_id":"{doc_id}"}'` → `stage3_submit_batches` → `stage4_ingest_results`
-3. 对比全局节点/边数量变化、具体实体差异
-4. 记录"预期效果 vs 实际效果"，修正 Prompt 表述
-
-**质量评审 checklist**（每次修改后执行）：
-- [ ] 全局节点数变化是否符合预期（减少误提取 → 应下降）
-- [ ] 代码示例中是否仍有 Register/RegisterField 误提取
-- [ ] Register 属性是否完整（address_offset、width、access、reset_value）
-- [ ] bits/reset_value 格式是否统一
-- [ ] 是否有孤立节点（无关系的实体）
-- [ ] 跨文档合并后属性冲突是否合理
+详细 Prompt 设计意图与迭代历史见 `DESIGN.md` 第 22 章。
 
 ---
 

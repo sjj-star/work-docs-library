@@ -20,6 +20,7 @@ The work-docs-library plugin turns technical PDFs into a queryable knowledge bas
 
 - **Import or update documents** → **REQUIRED SUB-SKILL:** `ingesting-workdocs`
 - **Answer technical questions, compare concepts, trace provenance** → **REQUIRED SUB-SKILL:** `exploring-workdocs`
+- **Complex multi-hop questions requiring planned retrieval** → **OPTIONAL SUB-SKILL:** `agentic-search` (user-level skill, located at `~/.agents/skills/agentic-search`). Use it when the question spans multiple documents, requires structured graph traversal, or when single-shot search is insufficient.
 - **Manual maintenance** (entity correction, feedback, global graph rebuild) → not exposed through MCP. Use `scripts/admin_tools.py`.
 
 ## MCP Tools Quick Reference
@@ -29,6 +30,9 @@ The work-docs-library plugin turns technical PDFs into a queryable knowledge bas
 | `mcp__workdocs__ingest` | Import PDF(s) end-to-end |
 | `mcp__workdocs__reprocess` | Re-run pipeline for a doc or failed docs |
 | `mcp__workdocs__semantic_search` | Vector search; set `graph_depth>0` to include graph |
+| `mcp__workdocs__search_hybrid` | BM25 + vector search with RRF fusion |
+| `mcp__workdocs__search_reranked` | Semantic search + LLM cross-encoder reranking |
+| `mcp__workdocs__agentic_plan` | Decompose a complex question into `SearchStep`s |
 | `mcp__workdocs__query` | Find content_blocks by doc/chapter/concept |
 | `mcp__workdocs__get_content` | Read a chapter or block raw content |
 | `mcp__workdocs__status` | List docs or see progress |
