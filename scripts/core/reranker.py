@@ -20,6 +20,63 @@ class Reranker(ABC):
         """Return list of (block_db_id, score) sorted by descending relevance."""
 
 
+class CrossEncoderReranker(Reranker):
+    """使用本地 cross-encoder 模型对 query-passage 对进行相关性打分."""
+
+    DEFAULT_MODEL = "BAAI/bge-reranker-v2-m3"
+
+    def __init__(self, model_name: str | None = None) -> None:
+        """Initialize with an optional cross-encoder model name.
+
+        Args:
+            model_name: Hugging Face model name or local path. Uses a small default
+                open-source model if not provided.
+        """
+        self.model_name = model_name or self.DEFAULT_MODEL
+        self._model: Any = None
+
+    def _load_model(self) -> Any:
+        """Lazy-load the cross-encoder model on first use."""
+        if self._model is None:
+            try:
+                from sentence_transformers import CrossEncoder
+            except ImportError as exc:
+                raise ImportError(
+                    "CrossEncoderReranker requires the 'sentence-transformers' package. "
+                    "Install it with: pip install 'sentence-transformers>=3.0.0'"
+                ) from exc
+            self._model = CrossEncoder(self.model_name)
+        return self._model
+
+    def rank(self, query: str, passages: list[tuple[int, str]]) -> list[tuple[int, float]]:
+        """Score and sort passages by relevance to the query."""
+        if not passages:
+            return []
+
+        model = self._load_model()
+        pairs = [(query, passage) for _, passage in passages]
+        raw_scores = model.predict(pairs)
+
+        # CrossEncoder.predict may return a NumPy array or a plain list.
+        scores: list[float]
+        if hasattr(raw_scores, "tolist"):
+            scores = [float(s) for s in raw_scores.tolist()]
+        else:
+            scores = [float(s) for s in raw_scores]
+
+        if len(scores) != len(passages):
+            raise RuntimeError(
+                f"CrossEncoder returned {len(scores)} scores for {len(passages)} passages"
+            )
+
+        ranked = sorted(
+            zip((pid for pid, _ in passages), scores),
+            key=lambda x: x[1],
+            reverse=True,
+        )
+        return ranked
+
+
 class LLMReranker(Reranker):
     """使用 LLM 判断 query-passage 相关度（0-10），适合 Agent 环境."""
 
@@ -75,13 +132,18 @@ class LLMReranker(Reranker):
             num_passages=str(len(passages)),
         )
 
-        raw = self.client.chat(
-            [
-                {"role": "system", "content": system},
-                {"role": "user", "content": user},
-            ],
-            temperature=0.0,
-        )
+        try:
+            raw = self.client.chat(
+                [
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": user},
+                ],
+                temperature=0.0,
+            )
+        except Exception:
+            logger.exception("LLMReranker failed to score passages; returning neutral scores")
+            return [(pid, 0.0) for pid, _ in passages]
+
         scores = self._parse_scores(raw, len(passages))
         ranked = sorted(
             zip((pid for pid, _ in passages), scores),

@@ -22,6 +22,7 @@ dependencies = [
     "python-dotenv>=1.0.0",
     "networkx>=3.0",
     "rank-bm25>=0.2.2",
+    "sentence-transformers>=3.0.0",
 ]
 
 [tool.ruff]
@@ -72,6 +73,9 @@ reportMissingModuleSource = "warning"
 testpaths = ["scripts/tests"]
 pythonpath = ["scripts"]
 addopts = "-q --tb=short"
+
+[tool.setuptools]
+packages = []
 
 [dependency-groups]
 dev = [

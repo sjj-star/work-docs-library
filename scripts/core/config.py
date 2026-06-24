@@ -119,6 +119,12 @@ class Config:
     PLUGIN_BM25_TOP_K: int = 0  # 将在下方初始化
     PLUGIN_HYBRID_RRF_K: int = 0  # 将在下方初始化
 
+    # Cross-encoder reranker config
+    RERANK_CROSS_ENCODER_MODEL: str = _resolve_config(
+        "WORKDOCS_RERANK_CROSS_ENCODER_MODEL",
+        "BAAI/bge-reranker-v2-m3",
+    )
+
     # --- Pipeline 业务常量 ---
     GRAPH_MAX_PATH_DEPTH: int = 0  # 将在下方初始化
 
