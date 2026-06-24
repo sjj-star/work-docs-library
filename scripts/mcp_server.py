@@ -146,7 +146,24 @@ MCP_TOOL_SCHEMAS: dict[str, dict] = {
         "type": "object",
         "properties": {
             "doc_id": {"type": "string", "description": "文档 ID，提供时返回详情"},
-            "scope": {"type": "string", "description": "all|doc"},
+            "scope": {
+                "type": "string",
+                "description": "状态仪表盘范围",
+                "enum": [
+                    "overview",
+                    "documents",
+                    "vectors",
+                    "graph",
+                    "blocks",
+                    "headings",
+                    "conflicts",
+                    "feedback",
+                    "config",
+                    "quality",
+                    "ingest_pipeline",
+                    "all",
+                ],
+            },
             "top_n": {"type": "integer", "description": "最近处理文档数量"},
         },
     },
@@ -156,6 +173,10 @@ MCP_TOOL_SCHEMAS: dict[str, dict] = {
             "doc_id": {"type": "string", "description": "文档 ID"},
             "match": {"type": "string", "description": "标题模糊匹配关键字"},
         },
+        "anyOf": [
+            {"required": ["doc_id"]},
+            {"required": ["match"]},
+        ],
     },
     "graph_query": {
         "type": "object",

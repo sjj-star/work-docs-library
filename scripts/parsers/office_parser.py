@@ -3,13 +3,15 @@
 import hashlib
 from pathlib import Path
 
-import docx
-import openpyxl
 from core.models import Chapter, Document
 
 
 class OfficeParser:
-    """OfficeParser 类."""
+    """OfficeParser 类.
+
+    DOCX/XLSX 解析当前未接入主 pipeline，需要额外安装 office 依赖：
+        pip install -e ".[office]"
+    """
 
     SUPPORTED = (".docx", ".xlsx")
 
@@ -24,6 +26,12 @@ class OfficeParser:
         raise ValueError(f"Unsupported office file: {suffix}")
 
     def _parse_docx(self, path: str) -> Document:
+        try:
+            import docx
+        except ImportError as exc:
+            raise ImportError(
+                "DOCX parsing requires 'python-docx'. Install with: pip install -e '.[office]'"
+            ) from exc
         document = docx.Document(path)
         title = Path(path).stem
         paragraphs = [p.text.strip() for p in document.paragraphs if p.text.strip()]
@@ -52,6 +60,12 @@ class OfficeParser:
         )
 
     def _parse_xlsx(self, path: str) -> Document:
+        try:
+            import openpyxl
+        except ImportError as exc:
+            raise ImportError(
+                "XLSX parsing requires 'openpyxl'. Install with: pip install -e '.[office]'"
+            ) from exc
         wb = openpyxl.load_workbook(path, data_only=True)
         title = Path(path).stem
         sheets_text = []

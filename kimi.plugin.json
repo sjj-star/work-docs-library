@@ -1,15 +1,15 @@
 {
   "name": "work-docs-library",
   "version": "1.2.0",
-  "description": "技术文档知识库插件：PDF 导入、语义搜索、知识图谱查询",
+  "description": "技术文档知识库插件：PDF 导入、语义/混合/重排序搜索、Agentic 搜索、跨文档知识图谱查询",
   "skills": "./skills/",
   "sessionStart": {
     "skill": "using-workdocs"
   },
   "interface": {
     "displayName": "Work Docs Library",
-    "shortDescription": "技术文档知识库与图谱查询",
-    "longDescription": "支持 PDF 技术文档一键导入、向量语义搜索、跨文档知识图谱构建与查询、实体来源溯源。数据改写类高级维护功能不通过 MCP 暴露，需使用 scripts/admin_tools.py 手动执行。"
+    "shortDescription": "技术文档知识库：语义/混合/重排序搜索 + 知识图谱",
+    "longDescription": "支持 PDF 技术文档一键导入、稠密语义搜索、BM25+向量 RRF 混合检索、LLM/CrossEncoder 重排序、Agentic 多跳搜索规划，以及跨文档知识图谱构建、查询、来源溯源与冲突检测。数据改写类高级维护功能不通过 MCP 暴露，需使用 scripts/admin_tools.py 手动执行。"
   },
   "mcpServers": {
     "workdocs": {
