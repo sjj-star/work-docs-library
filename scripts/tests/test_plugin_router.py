@@ -502,15 +502,15 @@ def test_explore_path(monkeypatch, graph_service):
 # ---------------------------------------------------------------------------
 
 
-def test_kimi_plugin_json_mcp_server_uses_venv_python():
-    """Test kimi.plugin.json declares a venv-python MCP server."""
+def test_kimi_plugin_json_mcp_server_uses_uv_run():
+    """Test kimi.plugin.json declares an uv-run MCP server."""
     plugin_path = _SKILL_ROOT.parent / "kimi.plugin.json"
     data = json.loads(plugin_path.read_text(encoding="utf-8"))
     servers = data.get("mcpServers", {})
     assert "workdocs" in servers, "Missing mcpServer 'workdocs'"
     server = servers["workdocs"]
-    assert server.get("command") == ".venv/bin/python3"
-    assert "scripts/mcp_server.py" in server.get("args", [])
+    assert server.get("command") == "uv"
+    assert server.get("args") == ["run", "--no-sync", "python", "scripts/mcp_server.py"]
 
 
 def test_kimi_plugin_json_valid_schema():
