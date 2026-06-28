@@ -128,9 +128,16 @@ MCP_TOOL_SCHEMAS: dict[str, dict] = {
     },
     "read": {
         "type": "object",
+        "description": (
+            "读取内容。必须提供 chunk_db_id，或提供 doc_id 与 "
+            "chapter/chapter_regex/concept 之一"
+        ),
         "properties": {
             "chunk_db_id": {"type": "integer", "description": "Block 数据库 ID"},
-            "doc_id": {"type": "string", "description": "文档 ID"},
+            "doc_id": {
+                "type": "string",
+                "description": "文档 ID（与 chapter/chapter_regex/concept 组合使用）",
+            },
             "chapter": {"type": "string", "description": "章节标题子串匹配"},
             "chapter_regex": {"type": "string", "description": "章节标题正则匹配"},
             "concept": {"type": "string", "description": "概念名匹配"},
@@ -144,12 +151,6 @@ MCP_TOOL_SCHEMAS: dict[str, dict] = {
                 "description": "可选会话跟踪 ID，用于 status scope=trace 回放路径",
             },
         },
-        "anyOf": [
-            {"required": ["chunk_db_id"]},
-            {"required": ["doc_id", "chapter"]},
-            {"required": ["doc_id", "chapter_regex"]},
-            {"required": ["doc_id", "concept"]},
-        ],
     },
     "status": {
         "type": "object",
