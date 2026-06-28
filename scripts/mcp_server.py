@@ -11,44 +11,26 @@ from typing import Any
 
 from core.config import Config
 from plugin_router import (
-    tool_agentic_plan,
-    tool_config,
-    tool_get_content,
-    tool_graph_conflicts,
-    tool_graph_path,
-    tool_graph_provenance,
-    tool_graph_query,
+    tool_explore,
     tool_ingest,
-    tool_query,
-    tool_search_hybrid,
-    tool_search_reranked,
-    tool_semantic_search,
+    tool_read,
+    tool_search,
     tool_status,
-    tool_toc,
 )
 
 Config.setup_logging()
 logger = logging.getLogger("mcp_server")
 
-# 仅暴露适合 Agent 自主调用的读取/导入类工具
+# 仅暴露适合 Agent 自主调用的 5 个公共工具
 MCP_TOOL_MAP: dict[str, Any] = {
     "ingest": tool_ingest,
-    "semantic_search": tool_semantic_search,
-    "search_hybrid": tool_search_hybrid,
-    "search_reranked": tool_search_reranked,
-    "agentic_plan": tool_agentic_plan,
-    "query": tool_query,
-    "get_content": tool_get_content,
+    "search": tool_search,
+    "explore": tool_explore,
+    "read": tool_read,
     "status": tool_status,
-    "toc": tool_toc,
-    "graph_query": tool_graph_query,
-    "graph_path": tool_graph_path,
-    "graph_provenance": tool_graph_provenance,
-    "graph_conflicts": tool_graph_conflicts,
-    "config": tool_config,
 }
 
-# 与旧 plugin.json 保持一致的参数 schema
+# 与 MCP 新接口对齐的参数 schema
 MCP_TOOL_SCHEMAS: dict[str, dict] = {
     "ingest": {
         "type": "object",
@@ -58,7 +40,7 @@ MCP_TOOL_SCHEMAS: dict[str, dict] = {
         },
         "required": ["path"],
     },
-    "semantic_search": {
+    "search": {
         "type": "object",
         "properties": {
             "text": {"type": "string", "description": "搜索文本"},
@@ -66,81 +48,96 @@ MCP_TOOL_SCHEMAS: dict[str, dict] = {
                 "type": "integer",
                 "description": "返回结果数量",
                 "default": Config.PLUGIN_SEARCH_TOP_K,
+            },
+            "mode": {
+                "type": "string",
+                "description": "搜索模式：semantic / hybrid / reranked",
+                "enum": ["semantic", "hybrid", "reranked"],
+                "default": "hybrid",
+            },
+            "include_graph": {
+                "type": "boolean",
+                "description": "是否扩展关联知识图谱",
+                "default": True,
             },
             "graph_depth": {
                 "type": "integer",
-                "description": "图谱扩展深度，0=纯语义搜索",
-                "default": 0,
+                "description": "图谱扩展深度",
+                "default": Config.PLUGIN_SUBGRAPH_DEPTH,
+            },
+            "rerank_candidate_k": {
+                "type": "integer",
+                "description": "reranked 模式候选集大小（可选）",
             },
         },
         "required": ["text"],
     },
-    "search_hybrid": {
+    "explore": {
         "type": "object",
         "properties": {
-            "text": {"type": "string", "description": "搜索文本"},
-            "top_k": {
+            "mode": {
+                "type": "string",
+                "description": "探索模式",
+                "enum": ["entity", "neighbors", "subgraph", "path", "provenance", "conflicts"],
+            },
+            "entity_type": {"type": "string", "description": "实体类型"},
+            "name": {"type": "string", "description": "实体名称"},
+            "name_pattern": {"type": "string", "description": "名称模糊匹配"},
+            "doc_id": {"type": "string", "description": "限定文档 ID"},
+            "rel_type": {"type": "string", "description": "关系类型过滤"},
+            "direction": {
+                "type": "string",
+                "description": "邻居方向",
+                "enum": ["out", "in", "both"],
+                "default": "out",
+            },
+            "depth": {
                 "type": "integer",
-                "description": "返回结果数量",
-                "default": Config.PLUGIN_SEARCH_TOP_K,
+                "description": "邻居/子图深度",
+                "default": Config.PLUGIN_SUBGRAPH_DEPTH,
+            },
+            "rel_types": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "子图关系类型过滤列表",
+            },
+            "from_type": {"type": "string", "description": "路径起点实体类型"},
+            "from_name": {"type": "string", "description": "路径起点实体名称"},
+            "to_type": {"type": "string", "description": "路径终点实体类型"},
+            "to_name": {"type": "string", "description": "路径终点实体名称"},
+            "max_depth": {
+                "type": "integer",
+                "description": "路径最大搜索深度",
+                "default": Config.PLUGIN_GRAPH_MAX_DEPTH,
+            },
+            "limit": {
+                "type": "integer",
+                "description": "最大返回数量",
+                "default": Config.PLUGIN_DEFAULT_LIMIT,
             },
         },
-        "required": ["text"],
+        "required": ["mode"],
     },
-    "search_reranked": {
+    "read": {
         "type": "object",
         "properties": {
-            "text": {"type": "string", "description": "搜索文本"},
-            "top_k": {
-                "type": "integer",
-                "description": "返回结果数量",
-                "default": Config.PLUGIN_SEARCH_TOP_K,
-            },
-            "candidate_k": {
-                "type": "integer",
-                "description": "候选结果数量",
-            },
-        },
-        "required": ["text"],
-    },
-    "agentic_plan": {
-        "type": "object",
-        "properties": {
-            "question": {"type": "string", "description": "问题文本"},
-            "context": {
-                "type": "object",
-                "description": "额外上下文",
-                "default": {},
-            },
-        },
-        "required": ["question"],
-    },
-    "query": {
-        "type": "object",
-        "properties": {
+            "chunk_db_id": {"type": "integer", "description": "Block 数据库 ID"},
             "doc_id": {"type": "string", "description": "文档 ID"},
             "chapter": {"type": "string", "description": "章节标题子串匹配"},
             "chapter_regex": {"type": "string", "description": "章节标题正则匹配"},
-            "concept": {"type": "string", "description": "概念名查询"},
-            "top_k": {
-                "type": "integer",
-                "description": "返回结果数量",
-                "default": Config.PLUGIN_QUERY_TOP_K,
-            },
-        },
-    },
-    "get_content": {
-        "type": "object",
-        "properties": {
-            "doc_id": {"type": "string", "description": "文档 ID（查询 chapter 时必填）"},
-            "chapter": {"type": "string", "description": "章节标题子串匹配"},
-            "chunk_db_id": {"type": "integer", "description": "Block 数据库 ID"},
+            "concept": {"type": "string", "description": "概念名匹配"},
             "with_entities": {
                 "type": "boolean",
-                "description": "是否同时返回关联图谱实体",
-                "default": False,
+                "description": "是否同时返回关联图谱实体/关系",
+                "default": True,
             },
         },
+        "anyOf": [
+            {"required": ["chunk_db_id"]},
+            {"required": ["doc_id", "chapter"]},
+            {"required": ["doc_id", "chapter_regex"]},
+            {"required": ["doc_id", "concept"]},
+        ],
     },
     "status": {
         "type": "object",
@@ -161,83 +158,13 @@ MCP_TOOL_SCHEMAS: dict[str, dict] = {
                     "config",
                     "quality",
                     "ingest_pipeline",
+                    "toc",
                     "all",
                 ],
+                "default": "overview",
             },
-            "top_n": {"type": "integer", "description": "最近处理文档数量"},
+            "top_n": {"type": "integer", "description": "最近处理文档数量", "default": 20},
         },
-    },
-    "toc": {
-        "type": "object",
-        "properties": {
-            "doc_id": {"type": "string", "description": "文档 ID"},
-            "match": {"type": "string", "description": "标题模糊匹配关键字"},
-        },
-        "anyOf": [
-            {"required": ["doc_id"]},
-            {"required": ["match"]},
-        ],
-    },
-    "graph_query": {
-        "type": "object",
-        "properties": {
-            "entity_type": {"type": "string", "description": "实体类型"},
-            "name": {"type": "string", "description": "精确名称匹配"},
-            "name_pattern": {"type": "string", "description": "名称模糊匹配"},
-            "doc_id": {"type": "string", "description": "限定文档 ID 属性快照"},
-            "depth": {"type": "integer", "description": "查询深度", "default": 0},
-            "rel_type": {"type": "string", "description": "关系类型过滤"},
-            "direction": {"type": "string", "description": "方向 out/in/both", "default": "out"},
-            "rel_types": {
-                "type": "array",
-                "items": {"type": "string"},
-                "description": "关系类型列表",
-            },
-        },
-    },
-    "graph_path": {
-        "type": "object",
-        "properties": {
-            "from_type": {"type": "string", "description": "起点实体类型"},
-            "from_name": {"type": "string", "description": "起点实体名称"},
-            "to_type": {"type": "string", "description": "终点实体类型"},
-            "to_name": {"type": "string", "description": "终点实体名称"},
-            "max_depth": {
-                "type": "integer",
-                "description": "最大搜索深度",
-                "default": Config.PLUGIN_GRAPH_MAX_DEPTH,
-            },
-            "depth": {
-                "type": "integer",
-                "description": "max_depth 的兼容别名（已弃用，建议优先使用 max_depth）",
-            },
-        },
-        "required": ["from_type", "from_name", "to_type", "to_name"],
-    },
-    "graph_provenance": {
-        "type": "object",
-        "properties": {
-            "entity_type": {"type": "string", "description": "实体类型"},
-            "name": {"type": "string", "description": "实体名称"},
-            "doc_id": {"type": "string", "description": "可选，限定文档"},
-        },
-        "required": ["entity_type", "name"],
-    },
-    "graph_conflicts": {
-        "type": "object",
-        "properties": {
-            "entity_type": {"type": "string", "description": "实体类型过滤"},
-            "name": {"type": "string", "description": "实体名称过滤"},
-            "limit": {
-                "type": "integer",
-                "description": "最大返回数量",
-                "default": Config.PLUGIN_DEFAULT_LIMIT,
-            },
-        },
-    },
-    "config": {
-        "type": "object",
-        "properties": {},
     },
 }
 

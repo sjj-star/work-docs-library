@@ -2100,7 +2100,6 @@ class DocGraphPipeline:
                     heading_level=hm["heading_level"],
                     parent_heading=hm.get("parent_heading") or None,
                     block_db_ids=db_ids,
-                    content_summary=hm.get("content_summary") or None,
                 )
 
         # 5. 无内容时的兜底处理

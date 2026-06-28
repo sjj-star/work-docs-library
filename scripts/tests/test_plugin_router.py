@@ -11,7 +11,6 @@ from pathlib import Path
 import fitz
 import plugin_router
 import pytest
-from core.agentic_search import SearchStep
 from core.config import Config
 from core.db import KnowledgeDB
 from core.models import Chunk
@@ -233,12 +232,41 @@ def test_reprocess_doc_graph_pipeline(patched_config, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# get_content tool
+# read tool
 # ---------------------------------------------------------------------------
 
 
-def test_get_content_by_chapter(patched_config, monkeypatch):
-    """Test get content by chapter."""
+def _fetch_chunk_db_id(doc_id: str) -> int:
+    import sqlite3
+
+    with sqlite3.connect(str(Config.DB_PATH)) as conn:
+        row = conn.execute(
+            "SELECT id FROM content_blocks WHERE doc_id = ? LIMIT 1", (doc_id,)
+        ).fetchone()
+        return row[0]
+
+
+def test_read_by_chunk_db_id(patched_config, monkeypatch):
+    """Test read by chunk db id."""
+    _mock_llm_and_embedder(monkeypatch)
+
+    pdf = patched_config / "doc.pdf"
+    _make_pdf(pdf, ["Single page"])
+
+    result = plugin_router.tool_ingest({"path": str(pdf)})
+    doc_id = result["doc_ids"][0]
+    chunk_db_id = _fetch_chunk_db_id(doc_id)
+
+    result = plugin_router.tool_read({"chunk_db_id": chunk_db_id})
+    assert result["success"] is True
+    assert result["query_type"] == "chunk"
+    assert "Single page" in result["content"]
+    assert result["total_chars"] > 0
+    assert len(result["chunks"]) > 0
+
+
+def test_read_by_chunk_db_id_with_entities(patched_config, monkeypatch):
+    """Test read by chunk db id returns entity/relation lists."""
     _mock_llm_and_embedder(monkeypatch)
 
     pdf = patched_config / "doc.pdf"
@@ -246,23 +274,18 @@ def test_get_content_by_chapter(patched_config, monkeypatch):
 
     result = plugin_router.tool_ingest({"path": str(pdf)})
     doc_id = result["doc_ids"][0]
+    chunk_db_id = _fetch_chunk_db_id(doc_id)
 
-    # Query by chunk_db_id to get content (chapter titles may be empty for untitled docs)
-    import sqlite3
-
-    with sqlite3.connect(str(Config.DB_PATH)) as conn:
-        row = conn.execute("SELECT id FROM content_blocks WHERE doc_id = ?", (doc_id,)).fetchone()
-        chunk_db_id = row[0]
-    result = plugin_router.tool_get_content({"chunk_db_id": chunk_db_id})
+    result = plugin_router.tool_read({"chunk_db_id": chunk_db_id})
     assert result["success"] is True
     assert result["query_type"] == "chunk"
     assert "Alpha" in result["content"]
-    assert result["total_chars"] > 0
-    assert len(result["chunks"]) > 0
+    assert "entities" in result
+    assert "relations" in result
 
 
-def test_get_content_by_chapter_empty_title(patched_config, monkeypatch):
-    """Test get content by chapter with empty title returns no match."""
+def test_read_by_chapter_empty_title(patched_config, monkeypatch):
+    """Test read by chapter with empty title returns no match."""
     _mock_llm_and_embedder(monkeypatch)
 
     pdf = patched_config / "doc.pdf"
@@ -271,203 +294,191 @@ def test_get_content_by_chapter_empty_title(patched_config, monkeypatch):
     result = plugin_router.tool_ingest({"path": str(pdf)})
     doc_id = result["doc_ids"][0]
 
-    # Query by empty chapter title: 新架构下精确匹配，空标题无记录应返回失败
-    result = plugin_router.tool_get_content({"doc_id": doc_id, "chapter": ""})
+    result = plugin_router.tool_read({"doc_id": doc_id, "chapter": ""})
     assert result["success"] is False
 
 
-def test_get_content_by_chunk_db_id(patched_config, monkeypatch):
-    """Test get content by chunk db id."""
-    _mock_llm_and_embedder(monkeypatch)
-
-    pdf = patched_config / "doc.pdf"
-    _make_pdf(pdf, ["Single page"])
-
-    result = plugin_router.tool_ingest({"path": str(pdf)})
-    doc_id = result["doc_ids"][0]
-
-    import sqlite3
-
-    with sqlite3.connect(str(Config.DB_PATH)) as conn:
-        row = conn.execute("SELECT id FROM content_blocks WHERE doc_id = ?", (doc_id,)).fetchone()
-        chunk_db_id = row[0]
-
-    result = plugin_router.tool_get_content({"chunk_db_id": chunk_db_id})
-    assert result["success"] is True
-    assert result["query_type"] == "chunk"
-    assert "Single page" in result["content"]
-    assert result["total_chars"] > 0
-
-
-def test_get_content_missing_params():
-    """Test get content missing params."""
-    result = plugin_router.tool_get_content({})
+def test_read_missing_params():
+    """Test read missing params."""
+    result = plugin_router.tool_read({})
     assert result["success"] is False
     assert "chunk_db_id" in result["error"]
 
 
 # ---------------------------------------------------------------------------
-# search_hybrid / search_reranked / agentic_plan tools
+# search tool
 # ---------------------------------------------------------------------------
 
 
-def test_search_hybrid_success(patched_config, monkeypatch):
-    """tool_search_hybrid 应返回混合检索结果."""
+def _fake_search_result():
+    return {
+        "chunks": [
+            {
+                "score": 0.9,
+                "chunk": Chunk(
+                    doc_id="doc1",
+                    chunk_id="c1",
+                    chunk_type="text",
+                    chapter_title="Chapter 1",
+                    content="SPI interface description",
+                ),
+            }
+        ],
+        "entities": [],
+        "relations": [],
+        "source_documents": [{"doc_id": "doc1", "title": "Doc 1", "total_pages": 10}],
+    }
 
-    class FakeSvc:
-        def search_hybrid(self, text, top_k=5):
-            return [
-                {
-                    "score": 0.9,
-                    "chunk": Chunk(
-                        doc_id="doc1",
-                        chunk_id="c1",
-                        chunk_type="text",
-                        chapter_title="Chapter 1",
-                        content="SPI interface description",
-                    ),
-                }
-            ]
 
-    monkeypatch.setattr(plugin_router, "_get_service", lambda: FakeSvc())
-    result = plugin_router.tool_search_hybrid({"text": "SPI"})
+class FakeQueryService:
+    """Fake QueryService for tool_search tests."""
+
+    def __init__(self, svc=None):
+        self._svc = svc
+
+    def search(self, text, top_k=5, mode="hybrid", include_graph=True,
+               graph_depth=1, rerank_candidate_k=None):
+        assert text == "SPI"
+        assert mode == "hybrid"
+        return _fake_search_result()
+
+
+class FakeQueryServiceRerank:
+    def search(self, text, top_k=5, mode="hybrid", include_graph=True,
+               graph_depth=1, rerank_candidate_k=None):
+        assert mode == "reranked"
+        assert rerank_candidate_k == 20
+        return _fake_search_result()
+
+
+class FakeQueryServiceException:
+    def search(self, **kwargs):
+        raise KeyError("missing key")
+
+
+def test_search_success(patched_config, monkeypatch):
+    """tool_search 应返回统一搜索结果."""
+    monkeypatch.setattr(plugin_router, "_get_query_service", lambda: FakeQueryService())
+    result = plugin_router.tool_search({"text": "SPI", "mode": "hybrid"})
     assert result["success"] is True
     assert result["text"] == "SPI"
-    assert len(result["results"]) == 1
-    assert result["results"][0]["score"] == 0.9
-    assert result["results"][0]["doc_id"] == "doc1"
-    assert "SPI interface description" in result["results"][0]["content_preview"]
+    assert result["mode"] == "hybrid"
+    assert len(result["chunks"]) == 1
+    assert result["chunks"][0]["score"] == 0.9
+    assert result["chunks"][0]["doc_id"] == "doc1"
+    assert "SPI interface description" in result["chunks"][0]["content_preview"]
+    assert result["source_documents"][0]["doc_id"] == "doc1"
 
 
-def test_search_hybrid_missing_text():
-    """tool_search_hybrid 缺少 text 时返回错误."""
-    result = plugin_router.tool_search_hybrid({})
+def test_search_missing_text():
+    """tool_search 缺少 text 时返回错误."""
+    result = plugin_router.tool_search({})
     assert result["success"] is False
     assert "text" in result["error"]
 
 
-def test_search_reranked_success(patched_config, monkeypatch):
-    """tool_search_reranked 应返回重排序结果."""
-
-    class FakeSvc:
-        def search_reranked(self, text, top_k=5, candidate_k=None):
-            assert candidate_k == 20
-            return [
-                {
-                    "score": 0.95,
-                    "chunk": Chunk(
-                        doc_id="doc2",
-                        chunk_id="c2",
-                        chunk_type="text",
-                        chapter_title="Chapter 2",
-                        content="I2C bus protocol",
-                    ),
-                }
-            ]
-
-    monkeypatch.setattr(plugin_router, "_get_service", lambda: FakeSvc())
-    result = plugin_router.tool_search_reranked({"text": "I2C", "top_k": 3, "candidate_k": 20})
-    assert result["success"] is True
-    assert result["text"] == "I2C"
-    assert len(result["results"]) == 1
-    assert result["results"][0]["score"] == 0.95
-
-
-def test_search_reranked_missing_text():
-    """tool_search_reranked 缺少 text 时返回错误."""
-    result = plugin_router.tool_search_reranked({})
+def test_search_invalid_mode():
+    """tool_search 不支持的模式返回错误."""
+    result = plugin_router.tool_search({"text": "SPI", "mode": "magic"})
     assert result["success"] is False
-    assert "text" in result["error"]
+    assert "magic" in result["error"]
 
 
-def test_search_reranked_default_candidate_k(patched_config, monkeypatch):
-    """tool_search_reranked 不传 candidate_k 时默认为 None."""
-
-    class FakeSvc:
-        def search_reranked(self, text, top_k=5, candidate_k=None):
-            assert candidate_k is None
-            return []
-
-    monkeypatch.setattr(plugin_router, "_get_service", lambda: FakeSvc())
-    result = plugin_router.tool_search_reranked({"text": "UART"})
+def test_search_reranked_passes_candidate_k(patched_config, monkeypatch):
+    """tool_search reranked 模式应传递 rerank_candidate_k."""
+    monkeypatch.setattr(plugin_router, "_get_query_service", lambda: FakeQueryServiceRerank())
+    result = plugin_router.tool_search(
+        {"text": "SPI", "mode": "reranked", "rerank_candidate_k": 20}
+    )
     assert result["success"] is True
-    assert result["results"] == []
+    assert result["mode"] == "reranked"
 
 
-def test_agentic_plan_success(monkeypatch):
-    """tool_agentic_plan 应返回搜索步骤列表."""
-
-    class FakePlanner:
-        def plan(self, question, context=None):
-            return [
-                SearchStep(
-                    step_type="semantic",
-                    query="SPI protocol",
-                    params={"top_k": 5},
-                    reason="Find SPI references",
-                ),
-                SearchStep(
-                    step_type="graph",
-                    query="SPI registers",
-                    params={"entity_type": "Register"},
-                    reason="Locate related registers",
-                ),
-            ]
-
-    monkeypatch.setattr(plugin_router, "AgenticSearchPlanner", FakePlanner)
-    result = plugin_router.tool_agentic_plan({"question": "What is SPI?"})
-    assert result["success"] is True
-    assert result["question"] == "What is SPI?"
-    assert len(result["steps"]) == 2
-    assert result["steps"][0]["step_type"] == "semantic"
-    assert result["steps"][0]["query"] == "SPI protocol"
-    assert result["steps"][1]["params"]["entity_type"] == "Register"
-
-
-def test_agentic_plan_missing_question():
-    """tool_agentic_plan 缺少 question 时返回错误."""
-    result = plugin_router.tool_agentic_plan({})
-    assert result["success"] is False
-    assert "question" in result["error"]
-
-
-def test_search_hybrid_arbitrary_exception(patched_config, monkeypatch):
-    """tool_search_hybrid 应捕获任意异常并返回 success=False."""
-
-    class FakeSvc:
-        def search_hybrid(self, text, top_k=5):
-            raise KeyError("missing key")
-
-    monkeypatch.setattr(plugin_router, "_get_service", lambda: FakeSvc())
-    result = plugin_router.tool_search_hybrid({"text": "SPI"})
+def test_search_arbitrary_exception(patched_config, monkeypatch):
+    """tool_search 应捕获任意异常并返回 success=False."""
+    monkeypatch.setattr(plugin_router, "_get_query_service", lambda: FakeQueryServiceException())
+    result = plugin_router.tool_search({"text": "SPI"})
     assert result["success"] is False
     assert "missing key" in result["error"]
 
 
-def test_search_reranked_arbitrary_exception(patched_config, monkeypatch):
-    """tool_search_reranked 应捕获任意异常并返回 success=False."""
+# ---------------------------------------------------------------------------
+# explore tool
+# ---------------------------------------------------------------------------
 
-    class FakeSvc:
-        def search_reranked(self, text, top_k=5, candidate_k=None):
-            raise ConnectionError("network down")
 
-    monkeypatch.setattr(plugin_router, "_get_service", lambda: FakeSvc())
-    result = plugin_router.tool_search_reranked({"text": "I2C"})
+def test_explore_missing_mode():
+    result = plugin_router.tool_explore({})
     assert result["success"] is False
-    assert "network down" in result["error"]
+    assert "mode" in result["error"]
 
 
-def test_agentic_plan_empty_steps(monkeypatch):
-    """tool_agentic_plan 对非空 question 返回空步骤时应返回错误."""
-
-    class FakePlanner:
-        def plan(self, question, context=None):
-            return []
-
-    monkeypatch.setattr(plugin_router, "AgenticSearchPlanner", FakePlanner)
-    result = plugin_router.tool_agentic_plan({"question": "What is SPI?"})
+def test_explore_invalid_mode():
+    result = plugin_router.tool_explore({"mode": "magic"})
     assert result["success"] is False
-    assert "no steps" in result["error"].lower()
+    assert "magic" in result["error"]
+
+
+def test_explore_entity(monkeypatch, graph_service):
+    """tool_explore entity 模式查询实体."""
+    monkeypatch.setattr(plugin_router, "_get_service", lambda: graph_service)
+
+    result = plugin_router.tool_explore({"mode": "entity", "entity_type": "Module", "name": "TOP"})
+    assert result["success"] is True
+    assert result["mode"] == "entity"
+    assert result["count"] == 1
+    assert result["entities"][0]["name"] == "TOP"
+
+
+def test_explore_neighbors(monkeypatch, graph_service):
+    """tool_explore neighbors 模式查询邻居."""
+    monkeypatch.setattr(plugin_router, "_get_service", lambda: graph_service)
+
+    result = plugin_router.tool_explore(
+        {"mode": "neighbors", "entity_type": "Module", "name": "TOP", "direction": "out"}
+    )
+    assert result["success"] is True
+    assert result["mode"] == "neighbors"
+    assert result["neighbor_count"] == 2
+    names = {n["entity"]["name"] for n in result["neighbors"]}
+    assert names == {"SUB", "CLK"}
+
+
+def test_explore_subgraph(monkeypatch, graph_service):
+    """tool_explore subgraph 模式提取子图."""
+    monkeypatch.setattr(plugin_router, "_get_service", lambda: graph_service)
+
+    result = plugin_router.tool_explore(
+        {"mode": "subgraph", "entity_type": "Module", "name": "TOP", "depth": 2}
+    )
+    assert result["success"] is True
+    assert result["mode"] == "subgraph"
+    assert result["subgraph"]["node_count"] == 4
+    names = {e["name"] for e in result["subgraph"]["entities"]}
+    assert names == {"TOP", "SUB", "CLK", "REG"}
+
+
+def test_explore_path(monkeypatch, graph_service):
+    """tool_explore path 模式查找路径."""
+    monkeypatch.setattr(plugin_router, "_get_service", lambda: graph_service)
+
+    result = plugin_router.tool_explore(
+        {
+            "mode": "path",
+            "from_type": "Module",
+            "from_name": "TOP",
+            "to_type": "Register",
+            "to_name": "REG",
+        }
+    )
+    assert result["success"] is True
+    assert result["mode"] == "path"
+    assert result["path_count"] == 1
+    path = result["paths"][0]
+    assert len(path) == 3
+    assert path[0]["name"] == "TOP"
+    assert path[1]["name"] == "SUB"
+    assert path[2]["name"] == "REG"
 
 
 # ---------------------------------------------------------------------------
@@ -504,19 +515,10 @@ def test_kimi_plugin_json_valid_schema():
 
     assert set(mcp.MCP_TOOL_MAP.keys()) == {
         "ingest",
-        "semantic_search",
-        "search_hybrid",
-        "search_reranked",
-        "agentic_plan",
-        "query",
-        "get_content",
+        "search",
+        "explore",
+        "read",
         "status",
-        "toc",
-        "graph_query",
-        "graph_path",
-        "graph_provenance",
-        "graph_conflicts",
-        "config",
     }
 
 
@@ -717,149 +719,9 @@ def graph_service(monkeypatch, tmp_path):
     return svc
 
 
-def test_graph_query_exact_match(monkeypatch, graph_service):
-    """graph_query 精确匹配实体."""
-    monkeypatch.setattr(plugin_router, "_get_service", lambda: graph_service)
-
-    result = plugin_router.tool_graph_query({"entity_type": "Module", "name": "TOP"})
-    assert result["success"] is True
-    assert result.get("count") == 1
-    assert result["entities"][0]["name"] == "TOP"
-
-
-def test_graph_query_name_pattern(monkeypatch, graph_service):
-    """graph_query 按名称模糊匹配."""
-    monkeypatch.setattr(plugin_router, "_get_service", lambda: graph_service)
-
-    result = plugin_router.tool_graph_query({"name_pattern": "CL"})
-    assert result["success"] is True
-    assert result["count"] == 1
-    assert result["entities"][0]["name"] == "CLK"
-
-
-def test_graph_query_by_type(monkeypatch, graph_service):
-    """graph_query 按类型列出所有实体."""
-    monkeypatch.setattr(plugin_router, "_get_service", lambda: graph_service)
-
-    result = plugin_router.tool_graph_query({"entity_type": "Module"})
-    assert result["success"] is True
-    assert result["count"] == 2
-    names = {e["name"] for e in result["entities"]}
-    assert names == {"TOP", "SUB"}
-
-
-def test_graph_query_neighbors(monkeypatch, graph_service):
-    """graph_query depth=1 查询邻居节点."""
-    monkeypatch.setattr(plugin_router, "_get_service", lambda: graph_service)
-
-    result = plugin_router.tool_graph_query(
-        {"entity_type": "Module", "name": "TOP", "depth": 1, "direction": "out"}
-    )
-    assert result["success"] is True
-    assert result["count"] == 1
-    assert result["neighbor_count"] == 2
-    names = {n["entity"]["name"] for n in result["neighbors"]}
-    assert names == {"SUB", "CLK"}
-
-
-def test_graph_query_neighbors_filtered(monkeypatch, graph_service):
-    """graph_query 按关系类型过滤邻居."""
-    monkeypatch.setattr(plugin_router, "_get_service", lambda: graph_service)
-
-    result = plugin_router.tool_graph_query(
-        {"entity_type": "Module", "name": "TOP", "depth": 1, "rel_type": "CONTAINS"}
-    )
-    assert result["success"] is True
-    assert result["neighbor_count"] == 1
-    assert result["neighbors"][0]["entity"]["name"] == "SUB"
-
-
-def test_graph_path_found(monkeypatch, graph_service):
-    """graph_path 找到路径."""
-    monkeypatch.setattr(plugin_router, "_get_service", lambda: graph_service)
-
-    result = plugin_router.tool_graph_path(
-        {
-            "from_type": "Module",
-            "from_name": "TOP",
-            "to_type": "Register",
-            "to_name": "REG",
-        }
-    )
-    assert result["success"] is True
-    assert result["path_count"] == 1
-    path = result["paths"][0]
-    assert len(path) == 3
-    assert path[0]["name"] == "TOP"
-    assert path[1]["name"] == "SUB"
-    assert path[2]["name"] == "REG"
-
-
-def test_graph_path_not_found(monkeypatch, graph_service):
-    """graph_path 找不到路径."""
-    monkeypatch.setattr(plugin_router, "_get_service", lambda: graph_service)
-
-    result = plugin_router.tool_graph_path(
-        {
-            "from_type": "Signal",
-            "from_name": "CLK",
-            "to_type": "Register",
-            "to_name": "REG",
-        }
-    )
-    assert result["success"] is True
-    assert result["path_count"] == 0
-
-
-def test_graph_path_depth_alias(monkeypatch, graph_service):
-    """graph_path 接受 depth 作为 max_depth 的兼容别名."""
-    monkeypatch.setattr(plugin_router, "_get_service", lambda: graph_service)
-
-    # depth=1 不足以覆盖 TOP -> SUB -> REG 的两跳路径
-    result = plugin_router.tool_graph_path(
-        {
-            "from_type": "Module",
-            "from_name": "TOP",
-            "to_type": "Register",
-            "to_name": "REG",
-            "depth": 1,
-        }
-    )
-    assert result["success"] is True
-    assert result["max_depth"] == 1
-    assert result["path_count"] == 0
-
-    # depth=2 应能找到两跳路径
-    result = plugin_router.tool_graph_path(
-        {
-            "from_type": "Module",
-            "from_name": "TOP",
-            "to_type": "Register",
-            "to_name": "REG",
-            "depth": 2,
-        }
-    )
-    assert result["success"] is True
-    assert result["max_depth"] == 2
-    assert result["path_count"] == 1
-
-
-def test_graph_query_subgraph(monkeypatch, graph_service):
-    """graph_query depth>1 提取子图."""
-    monkeypatch.setattr(plugin_router, "_get_service", lambda: graph_service)
-
-    result = plugin_router.tool_graph_query({"entity_type": "Module", "name": "TOP", "depth": 2})
-    assert result["success"] is True
-    assert result["count"] == 1
-    assert result["subgraph"]["node_count"] == 4
-    names = {e["name"] for e in result["subgraph"]["entities"]}
-    assert names == {"TOP", "SUB", "CLK", "REG"}
-
-
 def test_graph_tools_missing_params():
     """图谱工具缺少必需参数时返回错误."""
-    assert plugin_router.tool_graph_query({})["success"] is True  # 无参数返回全部实体
-    assert plugin_router.tool_graph_path({})["success"] is False
+    assert plugin_router.tool_explore({})["success"] is False
     assert plugin_router.tool_graph_upsert_entity({})["success"] is False
 
 

@@ -27,6 +27,3 @@ class ChunkType(StrEnum):
     """Chunk 内容类型."""
 
     TEXT = "text"
-    TABLE = "table"
-    IMAGE_DESC = "image_desc"
-    SUMMARY = "summary"

@@ -23,28 +23,34 @@ The work-docs-library plugin turns technical PDFs into a queryable knowledge bas
 - **Complex multi-hop questions requiring planned retrieval** → **OPTIONAL SUB-SKILL:** `agentic-search` (user-level skill, located at `~/.agents/skills/agentic-search`). Use it when the question spans multiple documents, requires structured graph traversal, or when single-shot search is insufficient.
 - **Manual maintenance** (entity correction, reprocessing, feedback, global graph rebuild) → not exposed through MCP. Use `scripts/admin_tools.py`.
 
-## MCP Tools Quick Reference (14 tools)
+## MCP Tools Quick Reference (5 tools)
 
 | Tool | Purpose |
 |------|---------|
-| `mcp__workdocs__ingest` | Import PDF(s) end-to-end |
-| `mcp__workdocs__semantic_search` | Vector search; set `graph_depth>0` to include graph |
-| `mcp__workdocs__search_hybrid` | BM25 + vector search with RRF fusion |
-| `mcp__workdocs__search_reranked` | Hybrid search + LLM / cross-encoder reranking |
-| `mcp__workdocs__agentic_plan` | Decompose a complex question into `SearchStep`s |
-| `mcp__workdocs__query` | Find content_blocks by doc/chapter/concept |
-| `mcp__workdocs__get_content` | Read a chapter or block raw content |
-| `mcp__workdocs__status` | Status dashboard: supports `scope=overview/documents/vectors/graph/blocks/headings/conflicts/feedback/config/quality/ingest_pipeline/all` |
-| `mcp__workdocs__toc` | Show document outline |
-| `mcp__workdocs__graph_query` | Query entity / neighbors / subgraph |
-| `mcp__workdocs__graph_path` | Find path between two entities |
-| `mcp__workdocs__graph_provenance` | Trace entity to source doc/chunk |
-| `mcp__workdocs__graph_conflicts` | View property conflict logs |
-| `mcp__workdocs__config` | Show effective config (masked) |
+| `mcp__workdocs__search` | Search the knowledge base. `mode=semantic` for vector search, `mode=hybrid` for BM25 + vector RRF, `mode=reranked` for hybrid + LLM cross-encoder reranking. |
+| `mcp__workdocs__explore` | Explore the knowledge graph. `mode=entity` / `neighbors` / `subgraph` / `path` / `provenance` / `conflicts`. |
+| `mcp__workdocs__read` | Read source content: a chapter, a content block, or a list of blocks by doc/chapter/concept. |
+| `mcp__workdocs__ingest` | Import PDF(s) end-to-end. |
+| `mcp__workdocs__status` | Status dashboard. `scope=overview/documents/vectors/graph/blocks/headings/conflicts/feedback/config/quality/ingest_pipeline/toc/all`. |
+
+> **Note:** `config` and `toc` are now scopes of `status`, not standalone tools.
+
+## Agent Cognitive Model
+
+Map the user's intent to one of the five atomic tools:
+
+- **Text question** → `search`
+- **Entity / relationship / path / provenance / conflict** → `explore`
+- **Read source evidence** → `read`
+- **Ingest or update documents** → `ingest`
+- **Check progress / config / TOC** → `status`
+
+No LLM synthesis or smart routing happens inside the plugin. The Agent/Skill performs all intelligent dynamic analysis by calling the atomic tools and composing their structured outputs.
 
 ## Rules
 
 - Do NOT call `graph_upsert_entity`, `graph_delete_entity`, `graph_upsert_relation`, `graph_delete_relation`, `graph_feedback`, `rebuild_global_graph`, or `reprocess` through MCP. They are not exposed as MCP tools; use `scripts/admin_tools.py` instead.
+- Do NOT expect the plugin to synthesize answers or choose search modes for you. Select `search.mode` and `explore.mode` explicitly based on the user's question.
 - Always confirm the ingest path with the user when unsure; all paths are sandboxed.
 - For long-running `ingest` calls, use background tasks with a timeout of at least 1800 seconds and poll `status`.
 
@@ -52,5 +58,6 @@ The work-docs-library plugin turns technical PDFs into a queryable knowledge bas
 
 - Assuming ingestion succeeds immediately. Always poll `status` after `ingest`.
 - Searching with only one phrasing. Try synonyms and technical abbreviations.
-- Trusting graph relations without calling `graph_provenance`.
-- Forgetting to check `graph_conflicts` when answers from different documents disagree.
+- Trusting graph relations without tracing provenance via `explore` `mode=provenance`.
+- Forgetting to check `explore` `mode=conflicts` when answers from different documents disagree.
+- Using `search` when the user is asking about a named entity or relationship; prefer `explore` for entity-centric questions.

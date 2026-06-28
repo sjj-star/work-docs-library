@@ -12,10 +12,10 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
-from core.agentic_search import AgenticSearchPlanner
 from core.config import Config
 from core.graph_store import GraphEntity, GraphRelation
 from core.knowledge_base_service import KnowledgeBaseService
+from core.query_service import QueryService
 from core.status_collector import StatusCollector
 
 _SKILL_ROOT = Path(__file__).resolve().parent.parent
@@ -41,6 +41,19 @@ logger = logging.getLogger("plugin_router")
 
 #: 评估工具支持的检索器类型。
 _EVALUATION_RETRIEVERS: set[str] = {"semantic", "hybrid", "reranked"}
+
+#: MCP 搜索工具支持的模式。
+_SEARCH_MODES: set[str] = {"semantic", "hybrid", "reranked"}
+
+#: MCP 探索工具支持的模式。
+_EXPLORE_MODES: set[str] = {
+    "entity",
+    "neighbors",
+    "subgraph",
+    "path",
+    "provenance",
+    "conflicts",
+}
 
 
 # ---------------------------------------------------------------------------
@@ -103,6 +116,11 @@ def _get_service() -> KnowledgeBaseService:
     """获取 KnowledgeBaseService 实例（确保目录存在）."""
     Config.ensure_dirs()
     return KnowledgeBaseService()
+
+
+def _get_query_service() -> QueryService:
+    """获取 QueryService 实例（底层使用 KnowledgeBaseService）."""
+    return QueryService(_get_service())
 
 
 def _resolve_allowed_path(path: str | Path | None, base_dirs: list[Path] | None = None) -> Path:
@@ -398,7 +416,7 @@ def tool_status(params: dict) -> dict:
         doc_id: 可选，提供时返回该文档的详细状态和进度统计（与 scope=overview 兼容）
         scope: 状态维度，可选值：
             overview（默认）, documents, vectors, graph, blocks, headings,
-            conflicts, feedback, config, quality, ingest_pipeline, all
+            conflicts, feedback, config, quality, ingest_pipeline, toc, all
         top_n: 列表类数据默认返回条数（默认 20）
     """
     svc = _get_service()
@@ -438,44 +456,9 @@ def tool_status(params: dict) -> dict:
             ],
         }
 
-    collector = StatusCollector(svc)
-    try:
-        if scope == "documents":
-            return collector.collect_documents_status(top_n)
-        if scope == "vectors":
-            return collector.collect_vectors_status()
-        if scope == "graph":
-            return collector.collect_graph_status()
-        if scope == "blocks":
-            return collector.collect_blocks_status(top_n)
-        if scope == "headings":
-            return collector.collect_headings_status()
-        if scope == "conflicts":
-            return collector.collect_conflicts_status(top_n)
-        if scope == "feedback":
-            return collector.collect_feedback_status(top_n)
-        if scope == "config":
-            return collector.collect_config_status()
-        if scope == "quality":
-            return collector.collect_quality_status()
-        if scope == "ingest_pipeline":
-            return collector.collect_ingest_pipeline_status()
-        if scope == "all":
-            return collector.collect_all(top_n)
-    except Exception as e:
-        logger.exception("status scope=%s failed", scope)
-        return {"success": False, "error": f"Status collection failed for scope '{scope}': {e}"}
-
-    return {"success": False, "error": f"Unknown scope: {scope}"}
-
-
-def tool_toc(params: dict) -> dict:
-    """获取文档目录或按标题搜索."""
-    svc = _get_service()
-    doc_id = params.get("doc_id")
-    match = params.get("match")
-
-    if doc_id:
+    if scope == "toc":
+        if not doc_id:
+            return {"success": False, "error": "Missing required parameter: doc_id for scope=toc"}
         doc = svc.get_document(doc_id)
         if not doc:
             return {"success": False, "error": f"Document {doc_id} not found."}
@@ -496,349 +479,167 @@ def tool_toc(params: dict) -> dict:
                 for ch in chapters
             ],
         }
-    elif match:
-        docs = svc.db.search_documents_by_title(match)
-        return {
-            "success": True,
-            "match": match,
-            "documents": [
-                {
-                    "doc_id": d.doc_id,
-                    "title": d.title,
-                    "status": d.status,
-                    "total_pages": d.total_pages,
-                }
-                for d in docs
-                if d
-            ],
-        }
-    else:
-        return {"success": False, "error": "Provide either doc_id or match."}
+
+    if scope == "config":
+        return tool_config({})
+
+    collector = StatusCollector(svc)
+    try:
+        if scope == "documents":
+            return collector.collect_documents_status(top_n)
+        if scope == "vectors":
+            return collector.collect_vectors_status()
+        if scope == "graph":
+            return collector.collect_graph_status()
+        if scope == "blocks":
+            return collector.collect_blocks_status(top_n)
+        if scope == "headings":
+            return collector.collect_headings_status()
+        if scope == "conflicts":
+            return collector.collect_conflicts_status(top_n)
+        if scope == "feedback":
+            return collector.collect_feedback_status(top_n)
+        if scope == "quality":
+            return collector.collect_quality_status()
+        if scope == "ingest_pipeline":
+            return collector.collect_ingest_pipeline_status()
+        if scope == "all":
+            return collector.collect_all(top_n)
+    except Exception as e:
+        logger.exception("status scope=%s failed", scope)
+        return {"success": False, "error": f"Status collection failed for scope '{scope}': {e}"}
+
+    return {"success": False, "error": f"Unknown scope: {scope}"}
 
 
 # ---------------------------------------------------------------------------
-# 内容查询工具
+# 查询工具（新 MCP 接口）
 # ---------------------------------------------------------------------------
 
 
-def tool_semantic_search(params: dict) -> dict:
-    """语义向量搜索（可选联合知识图谱扩展）.
+def tool_search(params: dict) -> dict:
+    """统一搜索入口：语义 / 混合 / 重排序，可选联合知识图谱.
 
     参数:
         text: 搜索文本（required）
-        top_k: 返回结果数量（默认 5）
-        graph_depth: 图谱扩展深度，0 为纯语义搜索（默认），>0 时扩展关联图谱
+        top_k: 返回结果数量（默认 PLUGIN_SEARCH_TOP_K）
+        mode: 搜索模式，semantic | hybrid | reranked（默认 hybrid）
+        include_graph: 是否扩展关联图谱（默认 true）
+        graph_depth: 图谱扩展深度（默认 PLUGIN_SUBGRAPH_DEPTH）
+        rerank_candidate_k: reranked 模式候选集大小（可选）
     """
     text = params.get("text")
     if not text:
         return {"success": False, "error": "Missing required parameter: text"}
+
+    mode = params.get("mode", "hybrid")
+    if mode not in _SEARCH_MODES:
+        return {"success": False, "error": f"Unsupported search mode: {mode}"}
+
     top_k = params.get("top_k", Config.PLUGIN_SEARCH_TOP_K)
-    graph_depth = params.get("graph_depth", 0)
+    include_graph = params.get("include_graph", True)
+    graph_depth = params.get("graph_depth", Config.PLUGIN_SUBGRAPH_DEPTH)
+    rerank_candidate_k = params.get("rerank_candidate_k")
 
-    svc = _get_service()
+    qs = _get_query_service()
     try:
-        if graph_depth > 0:
-            result = svc.search_with_graph(str(text), top_k=top_k, graph_depth=graph_depth)
-            return {
-                "success": True,
-                "text": text,
-                "graph_depth": graph_depth,
-                "chunks": [
-                    {"score": c["score"], **_chunk_to_dict(c["chunk"])} for c in result["chunks"]
-                ],
-                "related_entities": result["related_entities"],
-                "subgraphs": result["subgraphs"],
-            }
-        else:
-            results = svc.search_semantic(str(text), top_k=top_k)
-            return {
-                "success": True,
-                "text": text,
-                "results": [{"score": r["score"], **_chunk_to_dict(r["chunk"])} for r in results],
-            }
-    except RuntimeError as e:
-        return {"success": False, "error": str(e)}
-
-
-def tool_search_hybrid(params: dict) -> dict:
-    """混合检索：BM25 + FAISS 向量，RRF 融合.
-
-    参数:
-        text: 搜索文本（required）
-        top_k: 返回结果数量（默认 5）
-    """
-    text = params.get("text")
-    if not text:
-        return {"success": False, "error": "Missing required parameter: text"}
-    top_k = params.get("top_k", Config.PLUGIN_SEARCH_TOP_K)
-
-    svc = _get_service()
-    try:
-        results = svc.search_hybrid(str(text), top_k=top_k)
-        return {
-            "success": True,
-            "text": text,
-            "results": [{"score": r["score"], **_chunk_to_dict(r["chunk"])} for r in results],
-        }
+        result = qs.search(
+            text=str(text),
+            top_k=top_k,
+            mode=mode,
+            include_graph=include_graph,
+            graph_depth=graph_depth,
+            rerank_candidate_k=rerank_candidate_k,
+        )
     except Exception as e:
+        logger.exception("search failed")
         return {"success": False, "error": str(e)}
 
+    return {
+        "success": True,
+        "text": text,
+        "mode": mode,
+        "chunks": [
+            {"score": c["score"], **_chunk_to_dict(c["chunk"])} for c in result["chunks"]
+        ],
+        "entities": [_entity_to_dict(e) for e in result["entities"]],
+        "relations": [_relation_to_dict(r) for r in result["relations"]],
+        "source_documents": result["source_documents"],
+    }
 
-def tool_search_reranked(params: dict) -> dict:
-    """语义检索 + 重排序.
+
+def tool_explore(params: dict) -> dict:
+    """统一图谱探索入口.
 
     参数:
-        text: 搜索文本（required）
-        top_k: 返回结果数量（默认 5）
-        candidate_k: 候选结果数量（可选，默认不扩展）
+        mode: 探索模式（required）
+            entity | neighbors | subgraph | path | provenance | conflicts
+        其余参数按模式传递.
     """
-    text = params.get("text")
-    if not text:
-        return {"success": False, "error": "Missing required parameter: text"}
-    top_k = params.get("top_k", Config.PLUGIN_SEARCH_TOP_K)
-    candidate_k = params.get("candidate_k")
+    mode = params.get("mode")
+    if not mode:
+        return {"success": False, "error": "Missing required parameter: mode"}
+    if mode not in _EXPLORE_MODES:
+        return {"success": False, "error": f"Unsupported explore mode: {mode}"}
 
-    svc = _get_service()
+    qs = _get_query_service()
     try:
-        results = svc.search_reranked(str(text), top_k=top_k, candidate_k=candidate_k)
-        return {
-            "success": True,
-            "text": text,
-            "results": [{"score": r["score"], **_chunk_to_dict(r["chunk"])} for r in results],
-        }
+        return qs.explore(**params)
+    except ValueError as e:
+        return {"success": False, "error": str(e)}
     except Exception as e:
+        logger.exception("explore failed")
         return {"success": False, "error": str(e)}
 
 
-def tool_agentic_plan(params: dict) -> dict:
-    """把复杂问题分解为多个搜索步骤.
+def tool_read(params: dict) -> dict:
+    """统一内容读取入口（按 chunk_db_id 或章节/概念查询）.
 
     参数:
-        question: 问题文本（required）
-        context: 额外上下文（可选，默认 {}）
-    """
-    question = params.get("question")
-    if not question:
-        return {"success": False, "error": "Missing required parameter: question"}
-    context = params.get("context") or {}
-
-    try:
-        planner = AgenticSearchPlanner()
-        steps = planner.plan(str(question), context=context)
-        if question and not steps:
-            return {"success": False, "error": "Planner returned no steps"}
-        return {
-            "success": True,
-            "question": question,
-            "steps": [step.to_dict() for step in steps],
-        }
-    except Exception as e:
-        logger.exception("agentic_plan failed")
-        return {"success": False, "error": str(e)}
-
-
-def tool_query(params: dict) -> dict:
-    """结构化 chunk 查询.
-
-    参数:
-        doc_id: 文档 ID（chapter/concept 查询必需）
+        chunk_db_id: 直接按 block DB ID 查询
+        doc_id: 文档 ID（chapter/chapter_regex/concept 查询必需）
         chapter: 章节标题子串匹配
         chapter_regex: 章节标题正则匹配
-        concept: 概念名匹配（需 doc_id）
-        top_k: 最大返回数量（默认 10）
+        concept: 概念名匹配
+        with_entities: 是否同时返回关联实体/关系（默认 true）
     """
+    chunk_db_id = params.get("chunk_db_id")
     doc_id = params.get("doc_id")
     chapter = params.get("chapter")
     chapter_regex = params.get("chapter_regex")
     concept = params.get("concept")
-    top_k = params.get("top_k", Config.PLUGIN_QUERY_TOP_K)
+    with_entities = params.get("with_entities", True)
 
-    svc = _get_service()
+    if (
+        chunk_db_id is None
+        and chapter is None
+        and chapter_regex is None
+        and concept is None
+    ):
+        return {
+            "success": False,
+            "error": "Provide chunk_db_id, or doc_id with chapter/chapter_regex/concept",
+        }
+
+    qs = _get_query_service()
     try:
-        chunks = svc.query_chunks(
+        result = qs.read(
             doc_id=doc_id,
             chapter=chapter,
             chapter_regex=chapter_regex,
             concept=concept,
-            top_k=top_k,
-        )
-    except ValueError as e:
-        return {"success": False, "error": str(e)}
-
-    return {"success": True, "results": [_chunk_to_dict(ck) for ck in chunks]}
-
-
-def tool_get_content(params: dict) -> dict:
-    """获取 chunk 完整内容（可选关联图谱实体）.
-
-    参数:
-        doc_id: 文档 ID（查询 chapter 时必填）
-        chapter: 章节标题子串匹配
-        chunk_db_id: Chunk 数据库 ID
-        with_entities: 是否同时返回关联的图谱实体和关系（默认 false）
-    """
-    doc_id = params.get("doc_id")
-    chapter = params.get("chapter")
-    chunk_db_id = params.get("chunk_db_id")
-    with_entities = params.get("with_entities", False)
-
-    svc = _get_service()
-
-    if with_entities:
-        if chunk_db_id is None:
-            return {"success": False, "error": "chunk_db_id is required when with_entities=true"}
-        try:
-            result = svc.get_content_with_entities(int(chunk_db_id), doc_id)
-        except ValueError as e:
-            return {"success": False, "error": str(e)}
-        return {
-            "success": True,
-            "chunk": _chunk_to_dict(result["chunk"]),
-            "entities": [_entity_to_dict(e) for e in result["entities"]],
-            "relations": [_relation_to_dict(r) for r in result["relations"]],
-        }
-
-    try:
-        result = svc.get_chunk_content(
             chunk_db_id=chunk_db_id,
-            doc_id=doc_id,
-            chapter=chapter,
+            with_entities=with_entities,
         )
     except ValueError as e:
         return {"success": False, "error": str(e)}
+    except Exception as e:
+        logger.exception("read failed")
+        return {"success": False, "error": str(e)}
 
-    chunks = result["chunks"]
-    chunk_meta = [
-        {
-            "chunk_db_id": ck.id,
-            "chunk_id": ck.chunk_id,
-            "chapter_title": ck.chapter_title,
-        }
-        for ck in chunks
-    ]
-
-    first = chunks[0]
-    return {
-        "success": True,
-        "query_type": result["query_type"],
-        "doc_id": first.doc_id,
-        "chapter_title": first.chapter_title,
-        "content": result["content"],
-        "total_chars": len(result["content"]),
-        "chunks": chunk_meta,
-    }
-
-
-# ---------------------------------------------------------------------------
-# 图谱查询工具
-# ---------------------------------------------------------------------------
-
-
-def tool_graph_query(params: dict) -> dict:
-    """查询知识图谱实体（支持深度扩展邻居和子图）.
-
-    参数:
-        entity_type: 实体类型（如 Module, Signal, Register）
-        name: 精确名称匹配（需配合 entity_type）
-        name_pattern: 名称模糊匹配（子串，大小写不敏感）
-        doc_id: 可选，指定文档 ID 以获取该文档中的原始属性快照
-        depth: 查询深度（默认 0）
-            0 = 仅返回实体信息
-            1 = 同时返回邻居节点
-            >1 = 同时返回子图
-        rel_type: 关系类型过滤（depth>=1 时生效）
-        direction: 方向 out/in/both（depth>=1 时生效，默认 out）
-        rel_types: 关系类型过滤列表（depth>1 时生效）
-    """
-    entity_type = params.get("entity_type")
-    name = params.get("name")
-    name_pattern = params.get("name_pattern")
-    doc_id = params.get("doc_id")
-    depth = params.get("depth", 0)
-    rel_type = params.get("rel_type")
-    direction = params.get("direction", "out")
-    rel_types = set(params.get("rel_types", [])) if params.get("rel_types") else None
-
-    svc = _get_service()
-
-    # 精确查询
-    if name and entity_type:
-        entity = svc.get_entity(entity_type, name)
-        if not entity:
-            return {"success": True, "count": 0, "entities": []}
-        if doc_id:
-            entity = svc._apply_doc_properties(entity, doc_id)
-
-        result = {
-            "success": True,
-            "count": 1,
-            "entities": [_entity_to_dict(entity)],
-        }
-
-        if depth >= 1:
-            neighbors = svc.get_neighbors(entity_type, name, rel_type, direction, doc_id)
-            result["neighbors"] = [
-                {
-                    "entity": _entity_to_dict(nentity),
-                    "relation": rel,
-                    "relation_properties": rel_props,
-                }
-                for nentity, rel, rel_props in neighbors
-            ]
-            result["neighbor_count"] = len(neighbors)
-
-        if depth > 1:
-            subgraph = svc.get_subgraph(entity_type, name, depth, rel_types)
-            result["subgraph"] = {
-                "depth": depth,
-                "node_count": subgraph.node_count,
-                "edge_count": subgraph.edge_count,
-                "entities": [_entity_to_dict(e) for e in subgraph.entities()],
-                "relations": [_relation_to_dict(r) for r in subgraph.relations()],
-            }
-
-        return result
-
-    # 搜索查询
-    entities = svc.find_entities(entity_type=entity_type, name_pattern=name_pattern, doc_id=doc_id)
-    return {
-        "success": True,
-        "count": len(entities),
-        "entities": [_entity_to_dict(e) for e in entities],
-    }
-
-
-def tool_graph_path(params: dict) -> dict:
-    """查找知识图谱中两实体间的路径.
-
-    参数:
-        from_type, from_name: 起点实体
-        to_type, to_name: 终点实体
-        max_depth: 最大搜索深度（默认 3）
-    """
-    from_type = params.get("from_type")
-    from_name = params.get("from_name")
-    to_type = params.get("to_type")
-    to_name = params.get("to_name")
-    if not all([from_type, from_name, to_type, to_name]):
-        return {"success": False, "error": "Missing from/to entity parameters"}
-
-    max_depth = params.get("max_depth", params.get("depth", Config.PLUGIN_GRAPH_MAX_DEPTH))
-    svc = _get_service()
-    paths = svc.find_path(str(from_type), str(from_name), str(to_type), str(to_name), max_depth)
-
-    def _parse_nid(nid: str) -> dict:
-        parts = nid.split("::", 1)
-        return {"entity_type": parts[0], "name": parts[1] if len(parts) > 1 else nid}
-
-    return {
-        "success": True,
-        "from_entity": {"entity_type": from_type, "name": from_name},
-        "to_entity": {"entity_type": to_type, "name": to_name},
-        "max_depth": max_depth,
-        "path_count": len(paths),
-        "paths": [[_parse_nid(nid) for nid in p] for p in paths],
-    }
+    result["entities"] = [_entity_to_dict(e) for e in result.get("entities", [])]
+    result["relations"] = [_relation_to_dict(r) for r in result.get("relations", [])]
+    return {"success": True, **result}
 
 
 # ---------------------------------------------------------------------------
@@ -1240,25 +1041,22 @@ def tool_config(params: dict) -> dict:
 # ---------------------------------------------------------------------------
 
 TOOL_MAP = {
-    "config": tool_config,
+    # MCP 公共工具（5 个）
     "ingest": tool_ingest,
+    "search": tool_search,
+    "explore": tool_explore,
+    "read": tool_read,
+    "status": tool_status,
+    # 内部/管理工具（不暴露为 MCP）
+    "config": tool_config,
     "doc_parse": tool_doc_parse,
     "doc_build_batches": tool_doc_build_batches,
     "doc_submit_batches": tool_doc_submit_batches,
     "doc_ingest_results": tool_doc_ingest_results,
     "doc_build_embed_jsonl": tool_doc_build_embed_jsonl,
     "doc_submit_embed_batches": tool_doc_submit_embed_batches,
-    "semantic_search": tool_semantic_search,
-    "search_hybrid": tool_search_hybrid,
-    "search_reranked": tool_search_reranked,
-    "agentic_plan": tool_agentic_plan,
-    "query": tool_query,
-    "status": tool_status,
-    "toc": tool_toc,
     "reprocess": tool_reprocess,
-    "get_content": tool_get_content,
-    "graph_query": tool_graph_query,
-    "graph_path": tool_graph_path,
+    "evaluate": tool_evaluate,
     "graph_upsert_entity": tool_graph_upsert_entity,
     "graph_delete_entity": tool_graph_delete_entity,
     "graph_upsert_relation": tool_graph_upsert_relation,
@@ -1267,5 +1065,4 @@ TOOL_MAP = {
     "graph_conflicts": tool_graph_conflicts,
     "graph_provenance": tool_graph_provenance,
     "rebuild_global_graph": tool_rebuild_global_graph,
-    "evaluate": tool_evaluate,
 }

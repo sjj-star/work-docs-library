@@ -221,23 +221,23 @@ def test_bridge_rebuild_from_db(tmp_path, monkeypatch):
     )
 
     # 重建后验证
-    svc._bridge.rebuild(svc.db)
+    svc.bridge.rebuild(svc.db)
 
     # 正向查询
-    assert svc._bridge.get_entities(id1) == {
+    assert svc.bridge.get_entities(id1) == {
         _EntityRef("Register", "A"),
         _EntityRef("Module", "M1"),
     }
-    assert svc._bridge.get_entities(id2) == {
+    assert svc.bridge.get_entities(id2) == {
         _EntityRef("Register", "B"),
         _EntityRef("Module", "M1"),
     }
 
     # 反向查询
-    assert svc._bridge.get_chunks(_EntityRef("Register", "A")) == {id1}
-    assert svc._bridge.get_chunks(_EntityRef("Register", "B")) == {id2}
-    assert svc._bridge.get_chunks(_EntityRef("Module", "M1")) == {id1, id2}
-    assert svc._bridge.get_chunks(_EntityRef("Signal", "X")) == set()
+    assert svc.bridge.get_chunks(_EntityRef("Register", "A")) == {id1}
+    assert svc.bridge.get_chunks(_EntityRef("Register", "B")) == {id2}
+    assert svc.bridge.get_chunks(_EntityRef("Module", "M1")) == {id1, id2}
+    assert svc.bridge.get_chunks(_EntityRef("Signal", "X")) == set()
 
 
 def test_bridge_attach_detach_idempotent():
@@ -365,7 +365,7 @@ def test_find_chunks_by_entity(tmp_path, monkeypatch):
 
 
 def test_chunk_to_entities_and_entity_to_chunks(tmp_path, monkeypatch):
-    """原子操作 _chunk_to_entities 和 _entity_to_chunks 正确工作."""
+    """原子操作 bridge.get_entities 和 _entity_to_chunks 正确工作."""
     monkeypatch.setattr("core.config.Config.DB_PATH", tmp_path / "test.db")
     monkeypatch.setattr("core.config.Config.FAISS_INDEX_PATH", tmp_path / "faiss.index")
 
@@ -378,9 +378,9 @@ def test_chunk_to_entities_and_entity_to_chunks(tmp_path, monkeypatch):
     )
     svc._sync_bridge_for_doc("d1")
 
-    from core.knowledge_base_service import _EntityRef
+    from core.bridge import _EntityRef
 
-    assert svc._chunk_to_entities(id1) == {_EntityRef("Register", "A")}
+    assert svc.bridge.get_entities(id1) == {_EntityRef("Register", "A")}
     assert svc._entity_to_chunks("Register", "A") == {id1}
     assert svc._entity_to_chunks("Register", "B") == set()
 
@@ -476,14 +476,14 @@ def test_bridge_rebuild_with_content_blocks(tmp_path, monkeypatch):
     )
 
     # 重建后验证
-    svc._bridge.rebuild(svc.db)
+    svc.bridge.rebuild(svc.db)
 
     # content_blocks 的映射应被加载
-    assert svc._bridge.get_entities(block_id) == {
+    assert svc.bridge.get_entities(block_id) == {
         _EntityRef("Register", "A"),
         _EntityRef("Module", "M1"),
     }
-    assert svc._bridge.get_chunks(_EntityRef("Register", "A")) == {block_id}
+    assert svc.bridge.get_chunks(_EntityRef("Register", "A")) == {block_id}
 
 
 def test_sparse_index_cache_invalidated_after_db_insert(tmp_path, monkeypatch):

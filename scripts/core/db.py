@@ -67,7 +67,6 @@ class KnowledgeDB:
             heading_level INTEGER NOT NULL,
             parent_heading TEXT,
             block_db_ids TEXT NOT NULL,
-            content_summary TEXT,
             FOREIGN KEY (doc_id) REFERENCES documents(doc_id)
         );
         CREATE INDEX IF NOT EXISTS idx_headings_doc ON heading_maps(doc_id);
@@ -243,7 +242,6 @@ class KnowledgeDB:
         heading_level: int,
         parent_heading: str | None,
         block_db_ids: list[int],
-        content_summary: str | None = None,
     ) -> int:
         """插入 heading_map，返回 db_id."""
         with self._connect() as conn:
@@ -251,9 +249,9 @@ class KnowledgeDB:
                 """
                 INSERT INTO heading_maps (
                     doc_id, heading_title, heading_level,
-                    parent_heading, block_db_ids, content_summary
+                    parent_heading, block_db_ids
                 )
-                VALUES (?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?)
                 """,
                 (
                     doc_id,
@@ -261,7 +259,6 @@ class KnowledgeDB:
                     heading_level,
                     parent_heading or "",
                     json.dumps(block_db_ids, ensure_ascii=False),
-                    content_summary or "",
                 ),
             )
             assert cur.lastrowid is not None

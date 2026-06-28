@@ -41,7 +41,7 @@ class Config:
     FAISS_INDEX_PATH: Path = _SKILL_ROOT / "knowledge_base" / "faiss.index"
     PROMPT_DIR: Path = _SKILL_ROOT / "scripts" / "prompts"
 
-    # LLM 对话模型配置（总结用）
+    # LLM 对话模型配置（重排序 / Agentic 规划 / 评估 Judge / Chat 模式实体提取）
     LLM_API_KEY: str = _resolve_config("WORKDOCS_LLM_API_KEY", "")
     LLM_BASE_URL: str = _resolve_config("WORKDOCS_LLM_BASE_URL", "https://api.moonshot.cn/v1")
     LLM_MODEL: str = _resolve_config("WORKDOCS_LLM_MODEL", "kimi-k2.5")

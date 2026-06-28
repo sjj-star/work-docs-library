@@ -119,6 +119,72 @@ flowchart TB
 7. **跨粒度桥接索引**：`KnowledgeBaseService` 内部维护 `_EntityChunkBridge`，在 `__init__` 时从所有 content_blocks 的 `metadata.extracted_entities` 全量构建 `block_db_id ↔ (entity_type, entity_name)` 双向映射。`ingest_document` / `reprocess_document` 完成后自动同步。提供 O(1) 的正向查询（block→entities）和反向查询（entity→blocks），打通向量空间与图谱空间
 8. **全局图谱重建**：`KnowledgeBaseService.ingest_document()` 完成后**全量重建**全局图 `graphs/global.json`（`clear()` + 遍历所有子图重新加载），确保无幽灵残留，实现**跨文档知识互通**
 
+### 查询数据流
+
+```mermaid
+flowchart LR
+    Q[(用户查询)] --> SEARCH[search]
+    Q --> EXPLORE[explore]
+    Q --> READ[read]
+    Q --> STATUS[status]
+    Q --> AGENT[agentic-search Skill]
+
+    SEARCH --> EMB[Embedding API]
+    EMB --> FAISS[(FAISS)]
+    SEARCH --> BM25[BM25 Sparse Index]
+    EXPLORE --> GRAPH[(NetworkX 全局图)]
+    READ --> SQLITE[(SQLite)]
+    STATUS --> SQLITE
+    STATUS --> GRAPH
+    STATUS --> FAISS
+    AGENT --> SEARCH
+    AGENT --> EXPLORE
+    AGENT --> READ
+
+    FAISS --> BRIDGE[_EntityChunkBridge]
+    GRAPH --> BRIDGE
+    BRIDGE --> SG[语义-图谱联合查询]
+
+    subgraph search_modes["search modes"]
+        SEM[semantic]
+        HYB[hybrid]
+        RER[reranked]
+    end
+    SEARCH --> search_modes
+```
+
+**查询流程说明：**
+
+1. **`search` — 统一检索入口**
+   - `mode=semantic`：通过 `EmbeddingClient` 对 query 编码，`VectorIndex.search` 在 FAISS 中检索最近邻，返回 `block_db_id` 与 dense score。
+   - `mode=hybrid`：同时触发稠密检索（FAISS，top 50）与 BM25 稀疏检索（`BM25SparseIndex`，CJK 2-gram + 英文标识符分词，top 50）。`RRFFusionRetriever` 使用 RRF 公式 `score = Σ 1/(k+rank)`（默认 `k=60`）融合两份结果，按 fused score 返回 top_k blocks。
+   - `mode=reranked`：先执行 hybrid 检索获取候选 passage 集合（`candidate_k` 默认 `top_k*4`），再通过 `LLMReranker` 或本地 `CrossEncoderReranker` 对 `(query, passage)` 打分，按 relevance score 降序返回 top_k；LLM/CrossEncoder 失败时回退到 hybrid 结果。
+   - 三种模式均可通过 `graph_depth>0` 经 `_EntityChunkBridge` 扩展相关实体与子图。
+
+2. **`explore` — 统一图谱入口**
+   - `mode=entity`：按 `entity_type`/`name`/`name_pattern` 定位实体。
+   - `mode=neighbors`：返回实体的邻居关系。
+   - `mode=subgraph`：返回以实体为中心的子图。
+   - `mode=path`：在 `NetworkX` 全局图中搜索两实体间的有向路径（默认 `max_depth=3`，兼容 `depth` 别名）。
+   - `mode=provenance`：追溯实体到源 doc/chunk。
+   - `mode=conflicts`：查看同名实体属性冲突日志。
+
+3. **`read` — 内容读取**
+   - 通过 `heading_maps` 索引按 `doc_id`/`chapter`/`chapter_regex`/`concept` 快速定位 blocks，或按 `chunk_db_id` 读取单个 block。
+   - 返回完整未截断内容；设置 `with_entities=True` 时通过桥接索引返回关联实体/关系。
+
+4. **`status` — 状态与元数据**
+   - 查询文档状态、配置、目录、向量/图谱统计、冲突日志等。
+   - `scope=toc` 查看文档目录；`scope=config` 查看脱敏配置。
+
+5. **Agentic 搜索规划**
+   - 复杂多跳问题通过外部 `agentic-search` Skill 编排：由 LLM 将问题分解为 `SearchStep` 列表（`semantic`/`hybrid`/`reranked`/`graph`/`chapter`/`metadata`/`synthesize`）。
+   - 外部 Agent / Skill 按步骤调用 `search` / `explore` / `read` 等原子 MCP 工具，逐步收集证据并综合回答。
+
+6. **语义-图谱联合查询**
+   - `search` 命中 blocks 后，通过 `_EntityChunkBridge` 获取 block 提及的实体。
+   - 对每个相关实体调用 `GraphStore.get_subgraph()`，返回 `{chunks, related_entities, subgraphs}`，实现向量空间与图谱空间的互通。
+
 ### 输入文档约束
 
 本工具对被处理的 Markdown 文档（由 BigModel Expert 解析生成）有以下约束：
@@ -152,18 +218,19 @@ flowchart TB
 
 4. **来源可溯源**
    - 每个 entity/relation 都记录 `source_doc_ids` 与 `source_chapter`。
-   - 回答用户时应优先调用 `graph_provenance` 或 `get_content` 确认来源，避免仅依赖图谱关系。
+   - 回答用户时应优先调用 `explore` `mode=provenance` 或 `read` 确认来源，避免仅依赖图谱关系。
 
 ### Agent 使用建议
 
 | 场景 | 推荐工具/Skill | 注意事项 |
 |------|---------------|---------|
-| 一次性事实查询 | `semantic_search` 或 `search_hybrid` | 关键词明确用 `search_hybrid`；概念/语义模糊用 `semantic_search` |
-| 需要高精度排序 | `search_reranked` | 成本更高，仅在对 recall/precision 敏感时使用 |
-| 跨文档、多跳、关系问题 | `agentic-search` Skill | 先 `agentic_plan` 获得 SearchStep，再逐步执行 |
-| 关系/路径问题 | `graph_query` / `graph_path` | 调用后使用 `graph_provenance` 验证来源 |
+| 一次性事实查询 | `search` | 关键词明确用 `mode=hybrid`；概念/语义模糊用 `mode=semantic` |
+| 需要高精度排序 | `search` `mode=reranked` | 成本更高，仅在对 recall/precision 敏感时使用 |
+| 跨文档、多跳、关系问题 | `agentic-search` Skill | 由外部 Skill 编排 `search` / `explore` / `read` 多步执行 |
+| 实体/关系/路径/来源/冲突 | `explore` | `mode=entity`/`neighbors`/`subgraph`/`path`/`provenance`/`conflicts` |
 | 导入/更新文档 | `ingesting-workdocs` Skill | `ingest` 是长流程，必须用 background task + 轮询 `status` |
-| 答案冲突 | `graph_conflicts` | 检查同名实体属性覆盖日志 |
+| 读取原始证据 | `read` | 按 doc/chapter 或 `chunk_db_id` 读取完整内容 |
+| 查看配置/目录/状态 | `status` | `scope=config`/`toc`/`documents`/`quality` 等 |
 
 ## Skill 层级与调用路径
 
@@ -181,8 +248,8 @@ flowchart TB
 ```
 using-workdocs（判断意图）
   ├── 导入/更新 → ingesting-workdocs → mcp__workdocs__ingest + status 轮询
-  ├── 技术问答 → exploring-workdocs → semantic_search / search_hybrid / graph_query
-  └── 复杂多跳 → agentic-search → agentic_plan → 逐步执行 SearchStep → 综合回答
+  ├── 技术问答 → exploring-workdocs → search / explore / read
+  └── 复杂多跳 → agentic-search → 分解 SearchStep → 逐步执行 search / explore / read → 综合回答
 ```
 
 ---
@@ -232,7 +299,7 @@ work-docs-library/
 │   │   ├── pdf_parser.py         # PDF 本地解析器（fallback，输出与 BigModel 一致）
 │   │   ├── office_parser.py      # DOCX / XLSX 解析器（代码存在，尚未接入 pipeline）
 │   │   └── image_utils.py        # 图片压缩工具
-│   └── tests/                    # pytest 测试集（514 个用例）
+│   └── tests/                    # pytest 测试集（506 个用例）
 ├── knowledge_base/               # 运行时自动生成
 │   ├── workdocs.db               # SQLite 元数据
 │   ├── faiss.index               # FAISS 向量索引（IndexIDMap2，直接存储 block_db_id）
@@ -414,42 +481,46 @@ python scripts/admin_tools.py stage6_submit_embed_batches --params '{"doc_id":"{
 ### 3. 语义搜索
 
 ```text
-mcp__workdocs__semantic_search {"text": "AH bus arbitration", "top_k": 5}
+mcp__workdocs__search {"mode": "semantic", "text": "AH bus arbitration", "top_k": 5}
 ```
 
 ### 4. 混合检索与重排序
 
 ```text
 # 稠密向量 + BM25 稀疏检索，RRF 融合
-mcp__workdocs__search_hybrid {"text": "AH bus arbitration priority", "top_k": 5}
+mcp__workdocs__search {"mode": "hybrid", "text": "AH bus arbitration priority", "top_k": 5}
 
 # 混合检索候选 + LLM cross-encoder 重排序（更精准，成本更高）
-mcp__workdocs__search_reranked {"text": "AH bus arbitration priority", "top_k": 5, "candidate_k": 20}
+mcp__workdocs__search {"mode": "reranked", "text": "AH bus arbitration priority", "top_k": 5, "candidate_k": 20}
 ```
 
 ### 5. Agentic 搜索规划
 
-将复杂问题交给 `agentic_plan` 分解为可执行的 `SearchStep` 列表，由 Agent 在 Skill 编排下逐条执行：
+复杂多跳问题由外部 `agentic-search` Skill 编排，将问题分解为可执行的 `SearchStep` 列表，再由 Agent 逐条调用原子 MCP 工具完成：
 
 ```text
-mcp__workdocs__agentic_plan {"question": "Which modules implement the GPIO peripheral and what registers do they contain?"}
+# 由 agentic-search Skill 内部处理
+# 典型步骤：search(mode=semantic) → explore(mode=neighbors) → read → synthesize
 ```
 
-返回的 `steps` 可包含 `semantic` / `hybrid` / `reranked` / `graph` / `chapter` / `metadata` / `synthesize` 等类型。详见 `~/.agents/skills/agentic-search/SKILL.md`。
+`SearchStep` 可包含 `semantic` / `hybrid` / `reranked` / `graph` / `chapter` / `metadata` / `synthesize` 等类型，执行时映射到 `search` / `explore` / `read` / `status`。详见 `~/.agents/skills/agentic-search/SKILL.md`。
 
-### 6. 按章节查询
+### 6. 读取内容
 
-支持子串匹配和递归子标题查询：
+支持按章节子串、正则、概念或单个 block 读取完整内容：
 
 ```text
 # 子串匹配："CPU" 可匹配 "2.1 CPU Architecture"
-mcp__workdocs__query {"doc_id": "<DOC_HASH>", "chapter": "CPU"}
+mcp__workdocs__read {"doc_id": "<DOC_HASH>", "chapter": "CPU"}
 
 # 正则匹配（利用 heading_maps 索引，避免全表扫描）
-mcp__workdocs__query {"doc_id": "<DOC_HASH>", "chapter_regex": "^2\\."}
+mcp__workdocs__read {"doc_id": "<DOC_HASH>", "chapter_regex": "^2\\."}
 
 # 按概念查询（匹配 heading_maps 中的标题关键词）
-mcp__workdocs__query {"doc_id": "<DOC_HASH>", "concept": "CPU Architecture"}
+mcp__workdocs__read {"doc_id": "<DOC_HASH>", "concept": "CPU Architecture"}
+
+# 按 block id 读取
+mcp__workdocs__read {"chunk_db_id": 42}
 ```
 
 ### 7. 查看已导入文档
@@ -460,7 +531,26 @@ mcp__workdocs__status {}
 
 ### 8. 图谱查询
 
-图谱数据以 JSON 格式持久化，可直接读取：
+通过 `mcp__workdocs__explore` 查询实体、邻居、路径、来源与冲突：
+
+```text
+# 查询实体
+mcp__workdocs__explore {"mode": "entity", "entity_type": "Module", "name": "GPIO"}
+
+# 查询邻居
+mcp__workdocs__explore {"mode": "neighbors", "entity_type": "Module", "name": "GPIO", "depth": 1}
+
+# 查询两实体间路径
+mcp__workdocs__explore {"mode": "path", "from_type": "Module", "from_name": "GPIO", "to_type": "Register", "to_name": "GPADIR"}
+
+# 来源溯源
+mcp__workdocs__explore {"mode": "provenance", "entity_type": "Module", "name": "GPIO"}
+
+# 属性冲突
+mcp__workdocs__explore {"mode": "conflicts", "entity_type": "Module", "name": "GPIO"}
+```
+
+图谱数据也以 JSON 格式持久化，可直接读取：
 
 ```bash
 # 查看生成的图谱文件
@@ -495,24 +585,15 @@ python scripts/admin_tools.py run_eval --params '{"dataset_name":"my_eval","retr
 - **MCP 工具**：仅暴露适合 Agent 自主调用的 **读取 + 导入** 类工具，调用格式为 `mcp__workdocs__<tool_name>`。
 - **管理工具**：数据改写/阶段调试类功能不通过 MCP 暴露，保留在 `scripts/admin_tools.py` 中供手动维护（覆盖全部 pipeline 阶段与管理命令）。
 
-### MCP 工具（14 个）
+### MCP 工具（5 个）
 
 | MCP 工具名 | 作用 |
 |-----------|------|
+| `mcp__workdocs__search` | 统一检索入口：`mode=semantic`（语义向量）、`mode=hybrid`（BM25 + FAISS RRF）、`mode=reranked`（hybrid + LLM cross-encoder 重排序）。`graph_depth>0` 时联合图谱扩展 |
+| `mcp__workdocs__explore` | 统一图谱入口：`mode=entity`/`neighbors`/`subgraph`/`path`/`provenance`/`conflicts` |
+| `mcp__workdocs__read` | 按章节、关键词、概念或 `chunk_db_id` 读取 content_block 完整内容，可选返回关联图谱实体/关系 |
 | `mcp__workdocs__ingest` | 一键导入 PDF/目录，自动完成解析→Batch→入库→向量化 |
-| `mcp__workdocs__semantic_search` | 语义向量搜索；`graph_depth>0` 时联合图谱扩展 |
-| `mcp__workdocs__search_hybrid` | 混合检索：BM25 稀疏检索 + FAISS 稠密检索，RRF 融合排序 |
-| `mcp__workdocs__search_reranked` | 混合检索候选 + LLM cross-encoder 重排序（更精准，成本更高） |
-| `mcp__workdocs__agentic_plan` | 将复杂问题分解为 `SearchStep` 列表，供外部 Agent 编排多跳检索 |
-| `mcp__workdocs__query` | 按章节、关键词、概念查询 content_block |
-| `mcp__workdocs__status` | 列出所有已导入文档或查看指定文档进度 |
-| `mcp__workdocs__toc` | 查看文档目录 |
-| `mcp__workdocs__get_content` | 获取完整未截断内容，可选同时返回关联图谱实体/关系 |
-| `mcp__workdocs__graph_query` | 查询图谱实体/邻居/子图 |
-| `mcp__workdocs__graph_path` | 查找两实体间路径 |
-| `mcp__workdocs__graph_provenance` | 实体来源溯源 |
-| `mcp__workdocs__graph_conflicts` | 查询属性冲突日志 |
-| `mcp__workdocs__config` | 打印当前生效配置（强制脱敏） |
+| `mcp__workdocs__status` | 状态仪表盘：`scope=overview`/`documents`/`vectors`/`graph`/`blocks`/`headings`/`conflicts`/`feedback`/`config`/`quality`/`ingest_pipeline`/`toc`/`all` |
 
 ### 不暴露为 MCP 的内部功能
 
@@ -821,7 +902,7 @@ cd /path/to/work-docs-library
 PYTHONPATH=scripts ./.venv/bin/python -m pytest scripts/tests/ -v
 ```
 
-**当前状态：514 passed, 0 skipped, 0 failed。**
+**当前状态：506 passed, 0 skipped, 0 failed。**
 
 ### 测试分类与审计
 
@@ -876,7 +957,7 @@ PYTHONPATH=scripts ./.venv/bin/python -m pytest \
 
 #### 当前状态
 
-核心测试集已稳定在 **514 个用例**（0 skipped）。
+核心测试集已稳定在 **506 个用例**（0 skipped）。
 
 ### 常用测试文档
 

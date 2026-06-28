@@ -77,7 +77,7 @@ def status_svc(monkeypatch):
     service.db.upsert_document(doc_b)
 
     # 添加 heading_map
-    service.db.insert_heading_map("doc-a", "Ch1", 2, None, [1, 2, 3], "summary")
+    service.db.insert_heading_map("doc-a", "Ch1", 2, None, [1, 2, 3])
 
     # 让 plugin_router 的工具函数使用本 fixture 中的服务
     monkeypatch.setattr(plugin_router, "_get_service", lambda: service)
@@ -158,10 +158,12 @@ def test_status_config_scope_masked(status_svc):
     """Config scope 返回脱敏配置."""
     result = plugin_router.tool_status({"scope": "config"})
     assert result["success"] is True
-    cfg = result["config"]
-    for key in cfg:
-        if "key" in key.lower() or "token" in key.lower() or "secret" in key.lower():
-            assert cfg[key] in ("***", "") or cfg[key] is None
+    assert "config_groups" in result
+    # 敏感 key 应被脱敏
+    for group in result["config_groups"].values():
+        for key, val in group.items():
+            if "key" in key.lower() or "token" in key.lower() or "secret" in key.lower():
+                assert val in ("***", "") or val is None
 
 
 def test_status_quality_scope(status_svc):

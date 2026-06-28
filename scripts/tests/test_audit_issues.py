@@ -6,7 +6,7 @@
 import pytest
 from core.config import Config
 from core.db import KnowledgeDB
-from core.graph_store import GraphEntity, GraphRelation, NetworkXGraphStore
+from core.graph_store import GraphEntity, NetworkXGraphStore
 from core.knowledge_base_service import KnowledgeBaseService, _EntityRef
 from core.models import Document
 from core.vector_index import VectorIndex
@@ -92,7 +92,7 @@ def test_bridge_sync_failure_graceful(tmp_path, monkeypatch):
         seq_index=0,
         metadata={"extracted_entities": [{"type": "Module", "name": "M1"}]},
     )
-    kb._bridge.attach(db_id, {_EntityRef("Module", "M1")})
+    kb.bridge.attach(db_id, {_EntityRef("Module", "M1")})
 
     # 模拟 _sync_bridge_for_doc 失败
     call_count = 0
@@ -189,31 +189,6 @@ def test_apply_doc_properties_deep_copy():
 
     # 修复后：原始实体不应被污染
     assert "doc2" not in entity.source_doc_ids, "浅拷贝导致全局图节点被污染"
-
-
-def test_apply_doc_properties_to_relation_deep_copy():
-    """复现 _apply_doc_properties_to_relation 浅拷贝污染问题.
-
-    修复后：应使用 copy.deepcopy，避免调用方修改返回结果污染原始关系。
-    """
-    relation = GraphRelation(
-        rel_type="CONTAINS",
-        from_type="Module",
-        from_name="M1",
-        to_type="Register",
-        to_name="R1",
-        properties={"addr": "0x1000"},
-        doc_properties={"doc1": {"addr": "0x2000"}},
-        source_doc_ids={"doc1"},
-    )
-
-    result = KnowledgeBaseService._apply_doc_properties_to_relation(relation, "doc1")
-
-    # 修改返回结果
-    result.source_doc_ids.add("doc2")
-
-    # 修复后：原始关系不应被污染
-    assert "doc2" not in relation.source_doc_ids, "浅拷贝导致全局图边被污染"
 
 
 def test_remove_document_contributions_cleans_doc_properties():

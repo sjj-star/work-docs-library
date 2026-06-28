@@ -18,7 +18,7 @@ Ingestion parses PDFs, extracts chapters, builds LLM batches, runs entity/relati
 ## Workflow
 
 1. **Check configuration**
-   - Call `mcp__workdocs__config` to confirm LLM and embedding are configured.
+   - Call `mcp__workdocs__status` with `{"scope": "config"}` to confirm LLM and embedding are configured.
 
 2. **Confirm the path**
    - Resolve the user-provided path relative to the current working directory.
@@ -27,6 +27,7 @@ Ingestion parses PDFs, extracts chapters, builds LLM batches, runs entity/relati
 3. **Check existing state**
    - Call `mcp__workdocs__status` (no params) to list existing documents.
    - If you already know the doc_id, call `mcp__workdocs__status` with `{"doc_id": "..."}` to see whether it is `done`, `processing`, or `failed`.
+   - To view a document outline, call `mcp__workdocs__status` with `{"doc_id": "...", "scope": "toc"}`.
 
 4. **Choose the action**
    - New PDF or directory → `mcp__workdocs__ingest` with `{"path": "..."}`.
@@ -66,6 +67,12 @@ Ingestion parses PDFs, extracts chapters, builds LLM batches, runs entity/relati
 
 // Poll progress
 {"doc_id": "spi"}
+
+// View TOC
+{"doc_id": "spi", "scope": "toc"}
+
+// Check config
+{"scope": "config"}
 ```
 
 ## Red Flags

@@ -44,7 +44,7 @@ class TestJsonRpcProtocol:
         tools = captured[0]["result"]["tools"]
         names = {t["name"] for t in tools}
         assert names == set(mcp.MCP_TOOL_MAP.keys())
-        assert len(tools) == 14
+        assert len(tools) == 5
         for tool in tools:
             assert "description" in tool
             assert tool["inputSchema"]["type"] == "object"
@@ -140,7 +140,7 @@ class TestStdioLoop:
         assert len(responses) == 2
         assert responses[0]["id"] == 1
         assert responses[1]["id"] == 2
-        assert len(responses[1]["result"]["tools"]) == 14
+        assert len(responses[1]["result"]["tools"]) == 5
 
 
 class TestIntegration:
@@ -179,13 +179,13 @@ class TestIntegration:
                     "jsonrpc": "2.0",
                     "id": 3,
                     "method": "tools/call",
-                    "params": {"name": "config", "arguments": {}},
+                    "params": {"name": "status", "arguments": {"scope": "overview"}},
                 },
             )
             called = _recv(proc, timeout=5)
             result = json.loads(called["result"]["content"][0]["text"])
             assert result["success"] is True
-            assert "config_groups" in result
+            assert "documents" in result
         finally:
             assert proc.stdin is not None
             proc.stdin.close()

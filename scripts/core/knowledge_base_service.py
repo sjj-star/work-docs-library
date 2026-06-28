@@ -8,87 +8,21 @@ import copy
 import logging
 import shutil
 from collections.abc import Callable
-from typing import Any, NamedTuple
+from typing import Any
 
+from .bridge import EntityChunkBridge as _EntityChunkBridge
+from .bridge import _EntityRef
 from .config import Config
 from .db import KnowledgeDB
 from .doc_graph_pipeline import DocGraphPipeline
 from .embedding_client import EmbeddingClient
-from .graph_store import GraphEntity, GraphRelation, NetworkXGraphStore, SubGraphView
+from .graph_store import GraphEntity, NetworkXGraphStore, SubGraphView
 from .models import Chunk, Document
 from .reranker import LLMReranker
 from .sparse_index import BM25SparseIndex
 from .vector_index import VectorIndex
 
 logger = logging.getLogger(__name__)
-
-
-class _EntityRef(NamedTuple):
-    """实体引用 — 不可变、可哈希，用作桥接索引的 key."""
-
-    entity_type: str
-    entity_name: str
-
-
-class _EntityChunkBridge:
-    """实体与 Chunk 的双向桥接索引.
-
-    纯机制层：无策略参数，只维护 chunk_db_id ↔ _EntityRef 的多对多映射.
-    生命周期由 KnowledgeBaseService 管理.
-    """
-
-    def __init__(self) -> None:
-        self._forward: dict[int, set[_EntityRef]] = {}
-        self._reverse: dict[_EntityRef, set[int]] = {}
-
-    @staticmethod
-    def _extract_refs(chunk: Chunk | dict) -> set[_EntityRef]:
-        """从 chunk 或 block metadata 提取实体引用."""
-        refs: set[_EntityRef] = set()
-        meta = chunk.metadata if isinstance(chunk, Chunk) else chunk.get("metadata", {})
-        for me in meta.get("extracted_entities", []):
-            et = me.get("type", "")
-            en = me.get("name", "")
-            if et and en:
-                refs.add(_EntityRef(et, en))
-        return refs
-
-    def rebuild(self, db: KnowledgeDB) -> None:
-        """全量重建：遍历 SQLite 所有 content_blocks 的 metadata."""
-        self._forward.clear()
-        self._reverse.clear()
-        for doc in db.list_documents():
-            for block in db.query_blocks_by_doc(doc.doc_id):
-                self.attach(block["id"], self._extract_refs(block))
-        logger.info(
-            f"Bridge 重建完成 | entities={len(self._reverse)} | blocks={len(self._forward)}"
-        )
-
-    def attach(self, chunk_db_id: int, entity_refs: set[_EntityRef]) -> None:
-        """绑定 chunk 与实体引用（幂等：同一 chunk 重复 attach 不会累积）."""
-        self.detach(chunk_db_id)
-        if not entity_refs:
-            return
-        self._forward[chunk_db_id] = set(entity_refs)
-        for ref in entity_refs:
-            self._reverse.setdefault(ref, set()).add(chunk_db_id)
-
-    def detach(self, chunk_db_id: int) -> None:
-        """解绑 chunk 与所有实体引用."""
-        old_refs = self._forward.pop(chunk_db_id, set())
-        for ref in old_refs:
-            if ref in self._reverse:
-                self._reverse[ref].discard(chunk_db_id)
-                if not self._reverse[ref]:
-                    del self._reverse[ref]
-
-    def get_entities(self, chunk_db_id: int) -> set[_EntityRef]:
-        """正向查询：chunk 中提及的实体（O(1)）."""
-        return set(self._forward.get(chunk_db_id, set()))
-
-    def get_chunks(self, entity_ref: _EntityRef) -> set[int]:
-        """反向查询：提及该实体的所有 blocks（O(1)）."""
-        return set(self._reverse.get(entity_ref, set()))
 
 
 class KnowledgeBaseService:
@@ -114,8 +48,8 @@ class KnowledgeBaseService:
         self._embedder: EmbeddingClient | None = None
         self._sparse_index: BM25SparseIndex | None = None
         self._reranker: LLMReranker | None = None
-        self._bridge = _EntityChunkBridge()
-        self._bridge.rebuild(self.db)
+        self.bridge = _EntityChunkBridge()
+        self.bridge.rebuild(self.db)
         if graph_store is None:
             self._load_all_graphs()
 
@@ -386,14 +320,14 @@ class KnowledgeBaseService:
         在 ingest / reprocess 完成后调用，确保 bridge 与 SQLite 一致.
         """
         # 先 detach 该文档所有已索引的 blocks
-        for db_id in list(self._bridge._forward.keys()):
+        for db_id in list(self.bridge.get_chunk_ids()):
             block = self.db.get_block_by_db_id(db_id)
             if block and block.get("doc_id") == doc_id:
-                self._bridge.detach(db_id)
+                self.bridge.detach(db_id)
         # 再 attach 该文档当前的所有 content_blocks
         for block in self.db.query_blocks_by_doc(doc_id):
-            refs = self._bridge._extract_refs(block)
-            self._bridge.attach(block["id"], refs)
+            refs = self.bridge.extract_refs(block)
+            self.bridge.attach(block["id"], refs)
         logger.debug(f"Bridge 已同步 | doc_id={doc_id}")
 
     # ------------------------------------------------------------------
@@ -697,19 +631,6 @@ class KnowledgeBaseService:
             entity.properties = dict(entity.doc_properties[doc_id])
         return entity
 
-    @staticmethod
-    def _apply_doc_properties_to_relation(
-        relation: GraphRelation, doc_id: str | None
-    ) -> GraphRelation:
-        """如果指定了 doc_id，用 doc_properties 中的快照替换 properties.
-
-        返回深拷贝，避免修改内存中的全局图边。
-        """
-        if doc_id and relation.doc_properties and doc_id in relation.doc_properties:
-            relation = copy.deepcopy(relation)
-            relation.properties = dict(relation.doc_properties[doc_id])
-        return relation
-
     def find_entities(
         self,
         entity_type: str | None = None,
@@ -785,13 +706,9 @@ class KnowledgeBaseService:
 
     # -- 跨粒度桥接原子操作（机制层，无策略参数）--
 
-    def _chunk_to_entities(self, chunk_db_id: int) -> set[_EntityRef]:
-        """正向查询：chunk 中提及的实体引用（O(1)）."""
-        return self._bridge.get_entities(chunk_db_id)
-
     def _entity_to_chunks(self, entity_type: str, entity_name: str) -> set[int]:
         """反向查询：提及该实体的所有 chunk_db_id（O(1)）."""
-        return self._bridge.get_chunks(_EntityRef(entity_type, entity_name))
+        return self.bridge.get_chunks(_EntityRef(entity_type, entity_name))
 
     def _get_chunk(self, chunk_db_id: int) -> Chunk | None:
         """按 ID 获取 content_block（深拷贝隔离）."""
@@ -809,12 +726,6 @@ class KnowledgeBaseService:
             )
             return copy.deepcopy(chunk)
         return None
-
-    def _semantic_hits(self, query_text: str, top_k: int) -> list[tuple[int, float]]:
-        """语义搜索原子操作：返回 [(chunk_db_id, score), ...]."""
-        embedder = self._get_embedder()
-        emb = embedder.embed([str(query_text)])[0]
-        return self.vec.search(emb, top_k=top_k)
 
     def find_chunks_by_entity(
         self, entity_type: str, name: str, doc_id: str | None = None
@@ -1007,115 +918,6 @@ class KnowledgeBaseService:
     ) -> list[dict]:
         """查询冲突日志."""
         return self.db.query_conflict_logs(entity_type, name, limit)
-
-    # -- 语义-图谱联合查询 --
-
-    def search_with_graph(
-        self,
-        text: str,
-        top_k: int = Config.PLUGIN_SEARCH_TOP_K,
-        graph_depth: int = Config.PLUGIN_SUBGRAPH_DEPTH,
-    ) -> dict:
-        """语义搜索 + 图谱联合查询.
-
-        使用原子操作组合：_semantic_hits → _get_chunk → _chunk_to_entities → get_subgraph.
-
-        Returns:
-            {"chunks": [...], "related_entities": [...], "subgraphs": [...]}
-        """
-        hits = self._semantic_hits(text, top_k)
-
-        chunks: list[dict] = []
-        related_entities: list[dict] = []
-        subgraphs: list[dict] = []
-        seen_entities: set[str] = set()
-
-        for db_id, score in hits:
-            chunk = self._get_chunk(db_id)
-            if not chunk:
-                continue
-            chunks.append({"score": round(float(score), 4), "chunk": chunk})
-
-            # 通过桥接索引获取实体引用（替代直接读取 metadata）
-            for ref in self._chunk_to_entities(db_id):
-                eid = f"{ref.entity_type}::{ref.entity_name}"
-                if eid in seen_entities:
-                    continue
-                seen_entities.add(eid)
-
-                entity = self.graph.get_entity(ref.entity_type, ref.entity_name)
-                if entity:
-                    related_entities.append(entity.to_dict())
-                    if graph_depth > 0:
-                        sg = self.graph.get_subgraph(
-                            ref.entity_type, ref.entity_name, depth=graph_depth
-                        )
-                        subgraphs.append(
-                            {
-                                "center": {"type": ref.entity_type, "name": ref.entity_name},
-                                "depth": graph_depth,
-                                "node_count": sg.node_count,
-                                "edge_count": sg.edge_count,
-                                "text_context": sg.to_text_context(),
-                            }
-                        )
-
-        return {
-            "chunks": chunks,
-            "related_entities": related_entities,
-            "subgraphs": subgraphs,
-        }
-
-    def get_content_with_entities(
-        self,
-        chunk_db_id: int,
-        doc_id: str | None = None,
-    ) -> dict:
-        """获取 chunk 内容及其关联的图谱实体.
-
-        使用原子操作组合：_get_chunk → _chunk_to_entities → get_entity → get_entity_relations.
-
-        Args:
-            chunk_db_id: Chunk 数据库 ID
-            doc_id: 可选，指定文档 ID 以获取该文档中的原始属性快照
-
-        Returns:
-            {"chunk": Chunk, "entities": [GraphEntity,...], "relations": [GraphRelation,...]}
-        """
-        chunk = self._get_chunk(chunk_db_id)
-        if not chunk:
-            raise ValueError(f"Block {chunk_db_id} not found")
-
-        entities: list[GraphEntity] = []
-        relations: list[GraphRelation] = []
-        seen: set[str] = set()
-
-        # 通过桥接索引获取实体引用（替代直接读取 metadata）
-        for ref in self._chunk_to_entities(chunk_db_id):
-            eid = f"{ref.entity_type}::{ref.entity_name}"
-            if eid not in seen:
-                seen.add(eid)
-                global_e = self.graph.get_entity(ref.entity_type, ref.entity_name)
-                if global_e:
-                    self._apply_doc_properties(global_e, doc_id)
-                    entities.append(global_e)
-
-        # 从全局图查询关联关系的最新状态
-        seen_rel: set[str] = set()
-        for entity in entities:
-            for rel in self.graph.get_entity_relations(
-                entity.entity_type, entity.name, direction="both"
-            ):
-                rel_key = (
-                    f"{rel.from_type}::{rel.from_name}--"
-                    f"{rel.rel_type}--{rel.to_type}::{rel.to_name}"
-                )
-                if rel_key not in seen_rel:
-                    seen_rel.add(rel_key)
-                    self._apply_doc_properties_to_relation(rel, doc_id)
-                    relations.append(rel)
-
-        return {"chunk": chunk, "entities": entities, "relations": relations}
 
     # -- 反馈 --
 

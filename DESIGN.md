@@ -435,7 +435,7 @@ Sub-block 继承父 section 的属性，但有自己的 `db_id`：
 | `query_by_heading("CPU")` | `heading_maps` 表 `heading_title LIKE '%CPU%'` 子串匹配 | 匹配的 section 的所有 content_blocks（按 heading_level 排序） |
 | `query_by_heading_recursive("2.1")` | 先匹配标题，再递归收集 `parent_heading = 目标标题` 的所有子标题 | 该 section 及其所有子章节的 content_blocks |
 | `chapter_regex("^2\\.")` | 先查 heading_maps 缩小范围，内存中正则过滤 | 匹配标题对应的 content_blocks |
-| `semantic_search("GPIO")` | FAISS 搜索 | 匹配的 content_blocks |
+| `search("GPIO", mode="semantic")` | FAISS 搜索 | 匹配的 content_blocks |
 
 **关键设计**：
 - `query_by_heading` 支持 `LIKE` 子串匹配，用户输入 "CPU" 可匹配 "2.1 CPU Architecture"
@@ -451,7 +451,7 @@ content_blocks 表的 `db_id` 从 1 开始自增。`VectorIndex` 底层使用 `f
 # stage6 入库：block db_id 直接作为 FAISS 存储 ID
 faiss_id = block_db_id  # db_id=1 → faiss_id=1
 
-# semantic_search 查询：IndexIDMap2 直接返回 block_db_id
+# search(mode="semantic") 查询：IndexIDMap2 直接返回 block_db_id
 block_db_id = faiss_id
 ```
 
@@ -510,11 +510,11 @@ score(d) = Σ 1 / (k + rank_d)
 
 ### 检索能力矩阵
 
-| 检索方式 | 索引 | 特点 | 适用场景 |
+| `search` mode | 索引 | 特点 | 适用场景 |
 |---------|------|------|---------|
-| `semantic_search` | FAISS 稠密向量 | 语义相关性强，对关键词变体鲁棒 | 概念/含义型查询 |
-| `search_hybrid` | FAISS + BM25 RRF | 结合语义与词法，对精确术语更稳 | 含精确型号/寄存器名的查询 |
-| `search_reranked` | hybrid + LLM 精排 | 精度最高，延迟与成本最高 | 答案质量优先、候选少而精的查询 |
+| `"semantic"` | FAISS 稠密向量 | 语义相关性强，对关键词变体鲁棒 | 概念/含义型查询 |
+| `"hybrid"` | FAISS + BM25 RRF | 结合语义与词法，对精确术语更稳 | 含精确型号/寄存器名的查询 |
+| `"reranked"` | hybrid + LLM 精排 | 精度最高，延迟与成本最高 | 答案质量优先、候选少而精的查询 |
 
 ---
 
@@ -579,7 +579,7 @@ def _apply_doc_properties(entity, doc_id):
     return entity
 ```
 
-调用 `graph_query(entity_type="Register", name="TBCTL", doc_id="doc_A")` 时，返回的 `properties` 是 doc_A 的原始快照，而非全局合并值。
+调用 `explore(mode="entity", entity_type="Register", name="TBCTL", doc_id="doc_A")` 时，返回的 `properties` 是 doc_A 的原始快照，而非全局合并值。
 
 **冲突日志表**（`conflict_logs`）：
 ```sql
@@ -597,9 +597,9 @@ CREATE TABLE conflict_logs (
 
 **Agent 推理流程**：
 ```
-graph_query(entity_type="Product", name="TMS320F28379D")
-→ graph_neighbors(Product, rel_type="HAS_MODULE", doc_id="doc_hash")
-→ graph_query(Module("DMA_Controller"), doc_id="doc_hash")
+explore(mode="entity", entity_type="Product", name="TMS320F28379D")
+→ explore(mode="neighbors", entity_type="Product", name="TMS320F28379D", rel_type="HAS_MODULE", doc_id="doc_hash")
+→ explore(mode="entity", entity_type="Module", name="DMA_Controller", doc_id="doc_hash")
 → 获取 doc_properties["doc_hash"]["address_base"] = "0x4000"
 ```
 
@@ -652,6 +652,7 @@ graph_query(entity_type="Product", name="TMS320F28379D")
 **背景**：
 - 2026-04 代码审计发现 21 项缺陷（9 个 P0 数据损坏风险、7 个 P1 可靠性缺陷、5 个 P2 代码质量问题），已全部修复并通过 514 个测试验证。
 - 2026-06 再次审计发现 Critical/High 级安全与数据完整性问题，按「最小紧急修复」方案修复后测试数达到 514 个。
+- 2026-06 接口精简：基于审计发现 Agent 在 14 个 MCP 工具间混淆的问题，将工具面收敛到 5 个，并将 `KnowledgeBaseService` 的查询组合逻辑拆出为 `QueryService`；测试数精简为 506 个。
 
 **关键教训**：
 
@@ -663,7 +664,6 @@ graph_query(entity_type="Product", name="TMS320F28379D")
 | **外部 ZIP 必须校验条目路径** | BigModel 解析结果 ZIP 未过滤 `..` | 拒绝含 `..`、绝对路径、盘符的条目，校验 resolve 后仍在输出目录 |
 | **多存储写入顺序必须避免幽灵记录** | SQLite 先写、FAISS 后写导致 DB 引用缺失向量 | 改为先写 FAISS 再写 SQLite；SQLite 失败时回滚 FAISS |
 | **保存 + 辅助日志必须原子失败处理** | `_save_global_graph()` 成功但冲突日志写入失败 | `save_ok` 跟踪，失败时把回滚状态重新落盘 |
-| **返回全局对象前必须深拷贝（含关系）** | `_apply_doc_properties_to_relation` 使用 `copy.copy` | 统一使用 `copy.deepcopy` |
 | **属性合并必须深拷贝可变值** | `merged_props[k] = v` 直接引用可变对象 | 合并时 `copy.deepcopy(v)`，快照也深拷贝 |
 | **删除文档贡献必须清理 per-doc 快照** | `remove_document_contributions` 保留 `doc_properties[doc_id]` | 保留节点/边时同步 `pop(doc_id, None)` |
 | **资源句柄必须上下文管理** | `PDFParser.parse()` 中 `fitz.open` 异常时不关闭 | `with fitz.open(...) as doc:` |
@@ -680,8 +680,11 @@ graph_query(entity_type="Product", name="TMS320F28379D")
 | **跨阶段产物必须校验一致性** | Stage3/Stage4 增量分析结果不一致 | 持久化 `_incremental.json` + hash 校验 |
 | **配置路径加载/保存必须一致** | `_save_global_graph` 硬编码 `"graphs"` | 统一使用 `Config.GRAPH_OUTPUT_DIR` |
 | **警惕外部库的导入级副作用** | `pymupdf4llm` 导入时激活 ONNX layout，静默改变 `find_tables()` 结果 | 移除 `pymupdf4llm` 依赖及未触发的 fallback 代码 |
+| **MCP 工具面过宽会降低 Agent 调用质量** | 14 个查询类工具导致 Agent 频繁选错检索策略 | 收敛为 5 个原子工具：search/explore/read/ingest/status |
+| **服务层职责过重会阻碍演进** | `KnowledgeBaseService` 同时承载生命周期、持久化、检索、图谱、桥接、重排序等 ~1,200 行 | 拆出 `core/bridge.py` 与 `core/query_service.py`，让服务层回归生命周期与原子能力 |
+| **私有内部类难以独立测试** | `_EntityChunkBridge` 作为 `KnowledgeBaseService` 内部类 | 提升为独立模块 `core/bridge.py`，可单独测试和复用 |
 
-**新增开发原则**：详见本章（审计教训），包含副作用隔离、索引一致性、失败回滚、输入验证、跨阶段校验、配置统一、资源生命周期管理 7 条原则。
+**新增开发原则**：详见本章（审计教训），包含副作用隔离、索引一致性、失败回滚、输入验证、跨阶段校验、配置统一、资源生命周期管理、接口面精简、模块职责单一 10 条原则。
 
 ---
 
@@ -884,7 +887,7 @@ Step 1: 内容分类（8 种类型）
 
 **与 Skill 的边界**：
 - `agentic_search_system.txt` 只负责规划，不执行任何搜索
-- 实际执行由外部 Agent 通过 Skill 编排，调用 `search_hybrid`、`search_reranked`、`graph_query` 等原子 MCP 工具完成
+- 实际执行由外部 Agent 通过 Skill 编排，调用 `search(mode=...)`、`explore(mode=...)`、`read(...)` 等原子 MCP 工具完成
 
 ---
 
@@ -1000,14 +1003,24 @@ CREATE INDEX IF NOT EXISTS idx_eval_q_dataset ON eval_questions(dataset_name);
 
 ### 24.1 机制与策略分离
 
-**设计**：`AgenticSearchPlanner` 只负责把复杂问题分解为 `SearchStep` 列表，不执行任何搜索。执行由外部 Agent 通过 Skill 编排完成。
+**设计**：插件只提供 5 个原子查询工具（`search`、`explore`、`read`、`status`、`ingest`），不暴露 `agentic_plan` 为 MCP 工具。复杂问题的规划与执行完全由外部 Agent/Skill 负责。
 
 **原因**：
-- LLM 调用成本由外部 Agent/Skill 承担，插件内部只提供原子机制
-- 每个 `SearchStep` 都是一次原子 MCP 工具调用（`semantic_search`、`search_hybrid`、`search_reranked`、`graph_query`、`query` 等）
-- 策略（如何组合步骤、何时终止、如何综合）属于 Skill 层，可随使用场景快速迭代而无需修改插件代码
+- 工具面过宽会导致 Agent 在选择检索器时混淆，降低调用质量
+- 插件内部不做 LLM 综合/智能路由，所有策略（如何组合步骤、何时终止、如何综合）留在 Skill 层，可随使用场景快速迭代
+- Agent 调用负担降低后，反而能更稳定地执行多步推理
 
-### 24.2 SearchStep 数据模型
+### 24.2 当前 Agentic 认知模型
+
+| 用户意图 | 首选工具 | 返回内容 |
+|----------|---------|----------|
+| 文本/概念检索 | `search` | chunks + 相关 entities + relations + source_documents |
+| 实体/关系/路径/来源/冲突 | `explore` | 统一包装的图谱结果 |
+| 读取原文 | `read` | 完整内容 + 关联 entities + relations |
+| 查看知识库状态 | `status` | 文档/向量/图谱/目录/配置状态 |
+| 导入文档 | `ingest` | 导入结果 |
+
+### 24.3 SearchStep 数据模型（仅保留为内部规划格式）
 
 ```python
 @dataclass
@@ -1018,42 +1031,25 @@ class SearchStep:
     reason: str = ""
 ```
 
-**字段说明**：
-- `step_type`：严格白名单校验，未知类型丢弃
-- `query`：该步骤的查询文本
-- `params`：可选参数，例如 `{"entity_type": "Module"}`、`{"doc_id": "..."}`
-- `reason`：一句话解释该步骤的必要性，便于 Agent 理解规划逻辑
+`AgenticSearchPlanner` 仍可被 Skill 内部调用，但不再作为 MCP 工具暴露。Skill 读取 `SearchStep` 后，按如下映射调用新 MCP 工具：
 
-### 24.3 与 MCP 工具的映射
-
-| `step_type` | 典型执行工具 |
-|-------------|-------------|
-| `semantic` | `semantic_search` |
-| `hybrid` | `search_hybrid` |
-| `reranked` | `search_reranked` |
-| `graph` | `graph_query` / `graph_neighbors` / `graph_path` |
-| `chapter` | `query`（chapter 参数） |
-| `metadata` | `query`（doc_id/chapter 过滤） |
+| `step_type` | 执行 MCP 工具 |
+|-------------|--------------|
+| `semantic` / `hybrid` / `reranked` | `search(mode=step_type)` |
+| `graph` | `explore(mode=...)` |
+| `chapter` / `metadata` | `read(...)` |
 | `synthesize` | 由 Skill 在 Agent 侧完成，不调用插件工具 |
 
-### 24.4 MCP 工具与 Skill
+### 24.4 MCP 工具面
 
-**新增 MCP 工具**：
-- `agentic_plan(question, context)` → 返回 `SearchStep` 列表
-- `search_hybrid(text, top_k)` → 返回 hybrid 检索结果
-- `search_reranked(text, top_k, candidate_k)` → 返回 reranked 检索结果
+**当前 MCP 工具**：`ingest`、`search`、`explore`、`read`、`status`（共 5 个）。
 
-**MCP 工具总数**：本周期完成后，MCP 工具面从 11 个扩展到 **14 个**。
-
-**Skill 文件**：`~/.agents/skills/agentic-search/SKILL.md`
-- 定义复杂问题的标准处理流程
-- 示范如何调用 `agentic_plan` 后逐步执行 `SearchStep`
-- 规定证据综合、来源引用与失败降级策略
+**不再暴露为 MCP 的工具**：`semantic_search`、`search_hybrid`、`search_reranked`、`graph_query`、`graph_path`、`graph_provenance`、`graph_conflicts`、`query`、`get_content`、`toc`、`config`、`agentic_plan`。这些能力仍可通过 admin 脚本或 `QueryService` 内部使用，但不再出现在 Agent 可见的 MCP 工具列表中。
 
 ### 24.5 安全与失败处理
 
 - `AgenticSearchPlanner.plan()` 捕获所有异常并返回空列表，避免规划失败阻塞 Agent
-- 返回空列表时，Skill 应降级为单步 `semantic_search` 或 `search_hybrid`
+- 返回空列表时，Skill 应降级为单步 `search`
 - 所有提示词替换使用 `string.Template.safe_substitute`，防止输入中的 `$` 破坏模板
 
 ---
@@ -1086,6 +1082,46 @@ class SearchStep:
 **接口边界**：
 - 机制层：`AgenticSearchPlanner.plan(question, context) -> list[SearchStep]`
 - 策略层：Skill 读取 `SearchStep` 列表，调用对应 MCP 工具，收集结果后生成答案
+
+### 25.3 MCP 接口精简为 5 个原子工具
+
+**决策**：MCP 工具面从 14 个收敛到 5 个：`ingest`、`search`、`explore`、`read`、`status`。
+
+**原因**：
+- 上次审计发现 Agent 在 `semantic_search` / `search_hybrid` / `search_reranked` 之间频繁混淆，选错检索策略导致成本或精度失衡
+- 图谱工具参数差异大（`graph_query` 有 7 个可选参数，`graph_path` 要求 4 个必填实体参数），Agent 容易遗漏或选错
+- 工具面过宽增加了单次 Agent 会话的认知负荷，反而降低了复杂任务的执行质量
+- 收敛后 Agent 的认知模型清晰：文本→`search`、实体/关系→`explore`、读原文→`read`
+
+**合并策略**：
+- 同类语义合并为参数：`search(mode={semantic|hybrid|reranked})`
+- 同类图谱操作合并为参数：`explore(mode={entity|neighbors|subgraph|path|provenance|conflicts})`
+- 内容读取合并为统一入口：`read(chunk_db_id|doc_id+chapter|doc_id+chapter_regex|doc_id+concept)`
+- 状态/元数据合并：`status(scope={overview|documents|vectors|graph|blocks|headings|conflicts|feedback|config|quality|ingest_pipeline|toc|all})`
+
+**权衡**：
+- `explore` 的 JSON schema 因 `mode` 不同而动态变化，需用 `oneOf` 表达
+- 破坏性变更要求同步重写 Skill 文档与 README
+- 收益：Agent 调用准确率与可维护性显著提升
+
+### 25.4 查询层从 KnowledgeBaseService 拆出
+
+**决策**：新增 `core/query_service.py` 中的 `QueryService`，把 `search` / `explore` / `read` 的组合逻辑从 `KnowledgeBaseService` 迁出。
+
+**原因**：
+- `KnowledgeBaseService` 已膨胀到 ~1,200 行，同时承担生命周期、持久化、向量检索、图谱查询、桥接索引、稀疏索引、重排序器、状态管理
+- MCP 接口收敛后，查询组合逻辑集中出现，若继续放在 `KnowledgeBaseService` 会进一步加剧职责混乱
+- 拆出后 `KnowledgeBaseService` 回归「资源生命周期管理器 + 底层原子能力提供者」，`QueryService` 成为「查询组合与上下文聚合层」
+
+**模块边界**：
+- `KnowledgeBaseService`：初始化/关闭、文档导入、全局图管理、图谱 CRUD、底层检索/图谱/内容原子方法
+- `QueryService`：依赖注入 `KnowledgeBaseService`，提供 `search` / `explore` / `read` 三个入口，聚合 chunks + entities + relations + source_documents
+- `EntityChunkBridge`（`core/bridge.py`）：纯机制层，维护 `chunk_db_id ↔ (entity_type, entity_name)` 双向索引
+
+**权衡**：
+- 引入一个额外模块，但每个模块职责单一、可独立测试
+- `QueryService` 不直接操作 DB/Vector/Graph，避免与 `KnowledgeBaseService` 形成循环依赖
+- 为后续扩展（如添加 `cross_doc_compare`、`evidence_chain` 等策略）提供了清晰的接入点
 
 ---
 
@@ -1509,21 +1545,22 @@ if v_lines <= 1 and h_lines >= 6 and text >= 5: return "horizontal"
 
 ## 27. 为什么需要 EntityChunkBridge 双向桥接索引？
 
-**选择**：在 `KnowledgeBaseService` 内部维护一个纯内存的 `_EntityChunkBridge`，建立 `block_db_id ↔ (entity_type, entity_name)` 的双向多对多映射。零 schema 变更、零数据模型变更，从 SQLite `content_blocks.metadata["extracted_entities"]` 构建。
+**选择**：使用独立模块 `core/bridge.py` 维护纯内存的 `EntityChunkBridge`，建立 `block_db_id ↔ (entity_type, entity_name)` 的双向多对多映射。零 schema 变更、零数据模型变更，从 SQLite `content_blocks.metadata["extracted_entities"]` 构建。
 
 **原因**：
-- **补齐单向关联的缺失**：原有架构中 block → entity 的关联已存在（通过 `metadata.extracted_entities`），但 entity → block 的反向查询缺失。`graph_provenance` 此前通过逐文档遍历所有 blocks 做暴力扫描（O(N)），不可扩展
+- **补齐单向关联的缺失**：原有架构中 block → entity 的关联已存在（通过 `metadata.extracted_entities`），但 entity → block 的反向查询缺失。`explore(mode=provenance)` 此前通过逐文档遍历所有 blocks 做暴力扫描（O(N)），不可扩展
 - **打通不同粒度空间**：FAISS 向量索引操作的是 block 粒度（文本片段 + embedding），NetworkX 图谱操作的是 entity 粒度（结构化实体 + 关系）。桥接索引使两者可以双向导航
-- **支持策略层灵活组合**：机制层只提供原子操作（`_chunk_to_entities` / `_entity_to_chunks` / `_get_chunk` / `_semantic_hits` / `_get_subgraph`），策略层可自由组合出任意跨粒度查询（语义→图谱→语义闭环、路径文本证据链等）
+- **支持策略层灵活组合**：机制层只提供原子操作（`get_entities` / `get_chunks` / `get_subgraph`），策略层可自由组合出任意跨粒度查询（语义→图谱→语义闭环、路径文本证据链等）
 
 **实现**：
 ```python
+# core/bridge.py
 _forward:  dict[int, set[_EntityRef]]     # block_id → {EntityRef}
 _reverse:  dict[_EntityRef, set[int]]     # EntityRef → {block_id}
 ```
 
 **生命周期**：
-- `KnowledgeBaseService.__init__` → `bridge.rebuild()` 全量构建
+- `KnowledgeBaseService.__init__` → `bridge.rebuild(db)` 全量构建
 - `ingest_document` / `reprocess_document` 完成后 → `_sync_bridge_for_doc()` 增量同步
 - `attach()` 幂等设计：同一 block 重复 attach 会先 detach 旧绑定，避免索引累积
 - `detach()` 双向清理：同时清除 `_forward` 和 `_reverse`，空集合自动删除
@@ -1533,12 +1570,17 @@ _reverse:  dict[_EntityRef, set[int]]     # EntityRef → {block_id}
 | 方向 | 粒度 | 已有/新增 | 机制 |
 |------|------|----------|------|
 | block → entity | 向量→图谱 | 已有 | `metadata.extracted_entities` |
-| entity → block | 图谱→向量 | **新增** | `_entity_to_chunks()` O(1) |
+| entity → block | 图谱→向量 | **新增** | `bridge.get_chunks()` O(1) |
 | document → entity | 文档→图谱 | 已有 | `GraphEntity.source_doc_ids` |
 | entity → document | 图谱→文档 | 已有 | `GraphEntity.source_doc_ids` |
 | chapter → entity | 章节→图谱 | 已有 | `GraphEntity.source_chapter` |
-| block → subgraph | 向量→子图 | 已有 | `search_with_graph()` |
-| subgraph → block | 子图→向量 | **可组合** | 子图实体 → `_entity_to_chunks()` |
+| block → subgraph | 向量→子图 | 已有 | `QueryService.search(include_graph=true)` |
+| subgraph → block | 子图→向量 | **可组合** | 子图实体 → `bridge.get_chunks()` |
+
+**为什么拆分为独立模块 `core/bridge.py`**：
+- 桥接索引是纯机制层，不依赖 `KnowledgeBaseService` 的业务逻辑
+- 独立后可单独测试、复用，避免 `KnowledgeBaseService` 继续膨胀
+- `KnowledgeBaseService` 通过 `self.bridge` 属性持有 `EntityChunkBridge` 实例，生命周期仍由 service 管理
 
 **权衡**：
 - 内存索引，重启需重建（但 `KnowledgeBaseService` 为长生命周期单例，初始化成本可忽略：几百文档 × 几十实体）
@@ -1548,36 +1590,43 @@ _reverse:  dict[_EntityRef, set[int]]     # EntityRef → {block_id}
 
 ## 28. 联合查询与 Agent 自主推理
 
-**设计**：`search_with_graph()` 使用原子操作组合实现语义搜索与图谱查询的联合。
+**设计**：`QueryService` 使用 `KnowledgeBaseService` 的原子能力组合实现语义搜索、图谱探索与内容读取的联合。插件本地只返回结构化上下文（chunks + entities + relations + source_documents），不做 LLM 综合；所有智能化动态分析由外部 Agent/Skill 完成。
 
-**原子操作层（机制，无策略参数）**：
-- `_semantic_hits(query, top_k)` → FAISS 搜索，返回 `[(block_db_id, score), ...]`
-- `_get_chunk(block_db_id)` → 深拷贝获取 Chunk 对象（内存表示）
-- `_chunk_to_entities(block_db_id)` → 桥接索引正向查询，返回 `set[_EntityRef]`
-- `_entity_to_chunks(entity_type, name)` → 桥接索引反向查询，返回 `set[block_db_id]`
-- `get_entity(type, name)` / `get_subgraph(type, name, depth)` → 图谱空间查询
+**原子能力层（KnowledgeBaseService / GraphStore / Bridge）**：
+- `search_semantic()` / `search_hybrid()` / `search_reranked()` → 向量/混合检索，返回 `[{score, chunk}, ...]`
+- `get_chunk_content()` / `query_chunks()` → 读取 block/章节内容
+- `bridge.get_entities(block_db_id)` → 桥接索引正向查询，返回 `set[_EntityRef]`
+- `bridge.get_chunks(entity_type, entity_name)` → 桥接索引反向查询，返回 `set[block_db_id]`
+- `graph.get_entity()` / `graph.get_subgraph()` / `graph.find_path()` / `graph.get_neighbors()` → 图谱空间查询
+- `graph.get_entity_relations()` → 查询实体关联关系
 
-**策略组合示例**：
+**查询组合层（QueryService）**：
 
 ```
-search_with_graph（语义→图谱）:
-  _semantic_hits → _get_chunk → _chunk_to_entities → get_subgraph
+search（语义→图谱）:
+  search_hybrid/semantic/reranked → bridge.get_entities → graph.get_subgraph/get_entity_relations
 
-graph_provenance 优化（图谱→向量）:
-  _entity_to_chunks → _get_chunk（替换原有 O(N) 扫描）
+explore(mode=provenance)（图谱→向量）:
+  bridge.get_chunks → query_chunks/get_chunk_content（替换原有 O(N) 扫描）
+
+read(with_entities=true)（block+实体联合返回）:
+  get_chunk_content/query_chunks → bridge.get_entities → graph.get_entity/get_entity_relations
 
 语义→图谱→语义闭环（可扩展策略）:
-  _semantic_hits → _chunk_to_entities → get_subgraph → 子图实体 _entity_to_chunks → _get_chunk
+  search → bridge.get_entities → graph.get_subgraph → 子图实体 bridge.get_chunks → read
 ```
 
-**block+实体联合返回**：`get_content_with_entities(block_db_id)` 使用 `_get_chunk` + `_chunk_to_entities` + `get_entity` + `get_entity_relations`，返回 block 内容 + 全局图中最新状态的关联实体/关系（深拷贝隔离）。
+**MCP 工具面**：
+- `search`：文本驱动检索，返回 chunks + 可选 entities/relations
+- `explore`：图谱探索，按 mode 返回 entity/neighbors/subgraph/path/provenance/conflicts
+- `read`：读取原文，返回 content + 可选 entities/relations
 
 **Agent 自主推理能力**：
-- Agent 可先用 `search_with_graph` 找到相关文本和图谱实体
-- 再用 `graph_neighbors`/`graph_path`/`graph_subgraph` 做多跳推理
-- 通过 `find_chunks_by_entity` 从任意实体反向查找支撑它的原始文本 blocks
-- 发现错误时用 `graph_feedback` 标记，`feedback_score` 实时汇总到实体属性
-- 发现缺失/错误关联时用 `graph_upsert_entity`/`graph_upsert_relation`/`graph_feedback` 动态修正
+- Agent 可先用 `search` 找到相关文本和图谱实体
+- 再用 `explore(mode=subgraph/path/neighbors)` 做多跳推理
+- 通过 `explore(mode=provenance)` 从任意实体反向查找支撑它的原始文本 blocks
+- 发现错误时用 `graph_feedback` 标记（admin 工具），`feedback_score` 实时汇总到实体属性
+- 发现缺失/错误关联时用 `graph_upsert_entity`/`graph_upsert_relation`（admin 工具）动态修正
 
 ---
 
@@ -1628,7 +1677,7 @@ graph_provenance 优化（图谱→向量）:
 | **TABLE_CAPTION_RE 误匹配正文引用句** | `"Table X.X describes..."` 等正文引用句被正则匹配为 caption，导致所在页面触发 find_tables 但无对应表格 | AMBA 文档中发生 191 次误匹配；GapsFirstScanner 的预计算机制使误触发成本从"多次 clip 调用"降至"一次全页扫描"，影响已大幅降低 |
 | **跨页续表碎片化** | `find_tables()` 按页独立处理，无法识别 `"Continued from previous page"` 的跨页上下文 | AMBA 中 93 页跨页续表；GapsFirstScanner 的 zone 模型使续页 caption 能正确定位表格 zone，但 `find_tables` 仍只能提取当前页的部分行 |
 | **冲突日志无关系级记录** | `add_relation` 冲突只记录 property_key，不记录完整关系上下文 | 冲突日志包含 from/to/type 信息，可定位 |
-| **反馈不反向更新 block metadata** | 全局图更新后，block metadata 中的 extracted_entities 仍是处理时快照 | `get_content_with_entities` 查全局图获取最新状态 |
+| **反馈不反向更新 block metadata** | 全局图更新后，block metadata 中的 extracted_entities 仍是处理时快照 | `read(with_entities=true)` / `explore(mode=provenance)` 查全局图获取最新状态 |
 
 ---
 

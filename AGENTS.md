@@ -46,9 +46,7 @@
 ### 设计决策边界
 - 需要新增 LLM 调用流程时，先问：**这个流程应该由外部 Agent 通过 Skill 编排，还是必须由插件内部无干预完成？**
 - 只有当流程需要批处理、离线运行、或无 Agent 在场时，才在插件内部实现 LLM 调用。
-- **当前例外说明**：
-  - `agentic_plan` MCP 工具内部调用 `AgenticSearchPlanner` 完成单步查询分解。这属于“策略进入 Skill、机制留在代码”的边界案例：Skill 负责编排执行，插件负责提供规划机制与标准化输出。若未来需要完全外部化 LLM 成本，可将 prompt 与解析逻辑迁出为 Skill 的一部分，MCP 工具仅做校验。
-  - `search_reranked` MCP 工具内部调用 `LLMReranker` 做单步 passage scoring。该工具本质是“重排序搜索”，为保持外部 Agent 调用简洁，当前将单步 LLM 评分封装在工具内；复杂 rerank 策略仍应由 Skill 编排 `search_hybrid` + 多次评分工具。
+- **当前无例外**：MCP 工具面已精简为 5 个原子工具（`search` / `explore` / `read` / `ingest` / `status`），插件内部不做 LLM 合成或智能路由。`AgenticSearchPlanner` 的查询分解与 `LLMReranker` 的 passage scoring 等 LLM 推理均移至外部 Skill 编排，由外部 Agent 承担 LLM 调用成本。
 
 ---
 
@@ -138,7 +136,7 @@ work-docs-library/
 │   │   ├── pdf_parser.py         # PDF 本地解析器（PyMuPDF + TOC 驱动章节识别 + 表格/图片检测）
 │   │   ├── office_parser.py      # DOCX / XLSX 解析器（代码存在，尚未接入 pipeline）
 │   │   └── image_utils.py        # 图片压缩与三分类（彩色/灰度/黑白）
-│   ├── tests/                    # pytest 测试集（514 passed, 0 skipped）
+│   ├── tests/                    # pytest 测试集（506 passed, 0 skipped）
 │   │   ├── conftest.py           # 三重环境隔离（清除 WORKDOCS_ 环境变量、阻止 load_dotenv、临时目录重定向）
 │   │   ├── fixtures/             # 测试 fixture（PDF 页样本、解析输出样本）
 │   │   └── test_*.py             # 各模块测试文件
@@ -182,7 +180,7 @@ cd /path/to/work-docs-library
 
 ### 测试执行
 ```bash
-# 完整测试集（当前状态：514 passed, 0 skipped, 0 failed）
+# 完整测试集（当前状态：506 passed, 0 skipped, 0 failed）
 cd /path/to/work-docs-library
 PYTHONPATH=scripts ./.venv/bin/python -m pytest scripts/tests/ -v
 
@@ -255,7 +253,7 @@ PYTHONPATH=scripts ./.venv/bin/python -m pytest \
   2. 阻止 `load_dotenv` 重新加载 `.env` 文件
   3. 重定向 Config 默认路径到临时目录（DB、FAISS、Graph 均隔离）
 - **回归即修复**：任何导致测试失败的变更必须当场修复
-- **514 个测试用例必须全部通过**（0 skipped）
+- **506 个测试用例必须全部通过**（0 skipped）
 
 ### 测试文件清单
 | 测试文件 | 用例数 | 说明 |
@@ -281,7 +279,7 @@ PYTHONPATH=scripts ./.venv/bin/python -m pytest \
 | `test_parsed_docs_jsonl.py` | 2 | 真实文档端到端 JSONL 生成测试 |
 | `test_pipeline_stages.py` | 31 | 六阶段 pipeline 拆分测试 |
 | `test_audit_issues.py` | 10 | 生产 bug/审计问题定向回归测试（含 FAISS/SQLite 原子性） |
-| `test_mcp_server.py` | 10 | MCP Server 工具注册与 JSON-RPC 调用测试（含 14 个 MCP 工具白名单校验） |
+| `test_mcp_server.py` | 10 | MCP Server 工具注册与 JSON-RPC 调用测试（含 5 个 MCP 工具白名单校验） |
 | `test_status_tool.py` | 13 | 结构化状态仪表盘各 scope 测试 |
 | `test_evaluation.py` | 21 | 评估框架（EvalDataset/EvalQuestion + LLM-as-judge + EvalHarness） |
 | `test_sparse_index.py` | 9 | BM25 稀疏索引构建与搜索 |
@@ -428,7 +426,7 @@ monkeypatch.setattr(
 - ✅ 零数据丢失：移除所有源数据过滤和截断
 - ✅ Prompt 外部化：所有提示词在 `scripts/prompts/*.txt`
 - ✅ 代码清理：删除 11 个旧文件、4 个旧 prompt 文件、7 个旧测试文件
-- ✅ **API 接口重构**：新增 `KnowledgeBaseService` 统一服务层；Plugin 暴露 14 个 MCP 工具
+- ✅ **API 接口重构**：新增 `KnowledgeBaseService` 统一服务层；Plugin 暴露 5 个原子 MCP 工具（`search` / `explore` / `read` / `ingest` / `status`）
 - ✅ **图谱查询增强**：`GraphStore.find_path()` BFS 路径搜索、`search_entities()` 模糊搜索
 - ✅ **跨文档知识互通**：全局统一图谱 `global.json` + 文档子图快照 `{doc_id}.json`，同名同类型实体自动去重
 - ✅ **章节级增量更新**：`content_hash` 指纹比较，未变章节复用实体缓存与 embedding，仅 LLM 提取变更/新增章节
@@ -456,7 +454,7 @@ monkeypatch.setattr(
 - ✅ **环境隔离三重机制**：彻底根治 `.env` 污染测试环境的问题
 - ✅ **存储粒度与查询粒度解耦（方案C）**：引入 `content_blocks` 表作为存储粒度，`heading_maps` 表作为查询粒度，batch 数量减少 40-50%
 - ✅ **FAISS 索引重构为 IndexIDMap2**：直接使用 block_db_id 作为存储 ID，移除 `_BLOCK_FAISS_OFFSET` 与手动 `_id_map`
-- ✅ **514 个测试全部通过**
+- ✅ **506 个测试全部通过**
 - ✅ **PDF Parser 表格检测增强（Milestone 1-4）**：`find_tables(strategy="lines_strict")`、caption-gated 预筛选、位域图重叠保护、全部 14 个 Magic Number 配置化（已移除 PyMuPDF4LLM fallback）
 - ✅ **PDF Parser 图片检测增强（Milestone 2）**：`page.get_image_info()` 过滤链、双路径提取
 - ✅ **性能基准测试**：TI (219页) 10.3s/0表格 → 46.2s/68表格；AMBA (585页) 8.7s/0表格 → 93.3s/22表格
@@ -483,7 +481,7 @@ monkeypatch.setattr(
 - ✅ **LLM 交叉编码器重排序**：新增 `scripts/core/reranker.py`，`LLMReranker` 通过同步 LLM 调用对候选 passage 打分
 - ✅ **AgenticSearchPlanner 查询分解机制**：新增 `scripts/core/agentic_search.py`，LLM 将自然语言问题分解为 semantic / hybrid / reranked / graph / chapter / metadata / synthesize 多步搜索计划
 - ✅ **Agentic Search Skill**：新增用户级 Skill `~/.agents/skills/agentic-search/SKILL.md`，由外部 Agent 编排查询分解与多步检索
-- ✅ **MCP 工具暴露 `search_hybrid` / `search_reranked` / `agentic_plan`**：MCP 工具面扩展至 14 个工具
+- ✅ **MCP 工具面精简为 5 个原子工具**：`search`（聚合 semantic/hybrid/reranked）、`explore`（聚合 entity/neighbors/subgraph/path/provenance/conflicts）、`read`、`ingest`、`status`
 
 ### 下一阶段（精确到下一步）
 1. **可视化**：图谱可视化导出（Graphviz / D3.js）
@@ -493,7 +491,7 @@ monkeypatch.setattr(
 
 ### 已完成的非表格项
 
-- ✅ **Kimi Code 新插件规范迁移**：旧 `plugin.json` 替换为 `kimi.plugin.json`；新增 `scripts/mcp_server.py` 暴露 14 个 MCP 工具（新增 `search_hybrid` / `search_reranked` / `agentic_plan`）；`scripts/admin_tools.py` 承载数据改写/管理命令；新增 `skills/using-workdocs/SKILL.md`
+- ✅ **Kimi Code 新插件规范迁移**：旧 `plugin.json` 替换为 `kimi.plugin.json`；新增 `scripts/mcp_server.py` 暴露 5 个 MCP 工具；`scripts/admin_tools.py` 承载数据改写/管理命令；新增 `skills/using-workdocs/SKILL.md`
 - ✅ **移除 config.json 配置机制**：配置来源统一为 `.env`/环境变量 → 默认值
 
 ### PDF Parser 表格检测已知问题与下一步方向
