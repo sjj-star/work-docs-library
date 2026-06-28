@@ -9,18 +9,17 @@
 
 ## 项目概述
 
-本项目是一个面向 **IC 前端设计技术文档（PDF）** 的自动化知识提取 Pipeline，以 **Kimi Code CLI Plugin** 形式运行。核心能力包括：
+本项目是面向 **IC 前端设计技术文档（PDF）** 的自动化知识提取 Pipeline，以 **Kimi Code CLI Plugin** 形式运行。
 
-- **智能文档解析**：PDF 通过 BigModel Expert API 解析为 Markdown + 图片；失败时自动 fallback 到本地 PDFParser（PyMuPDF + TOC 驱动）
-- **知识图谱构建**：自动提取结构化实体（Feature、Module、Register、Signal、Instruction、Interrupt、PipelineStage、Peripheral 等）和关系（IMPLEMENTS、CONTAINS、HAS_REGISTER、INSTRUCTION_READS_REGISTER、MODULE_IMPLEMENTS_INSTRUCTION、INTERRUPT_TRIGGERS 等），构建跨文档互通的知识图谱
-- **混合语义检索**：基于 FAISS 的稠密向量检索 + BM25 稀疏索引 RRF 融合，支持 LLM 交叉编码器重排序
-- **Batch API 架构**：LLM 实体提取通过 Batch API 提交（成本为同步 API 的 50%），Embedding 通过同步单文本 API 完成
-- **章节级增量更新**：按章节 `content_hash` 指纹比较，未变章节复用缓存，仅对变更/新增章节进行 LLM 提取
-- **Multimodal 图片理解**：LLM 直接分析文档中的图片，生成文字描述用于向量化
-- **评估框架**：EvalDataset/EvalQuestion + LLM-as-judge + retrieval metrics + EvalHarness
-- **Agentic 查询规划**：通过外部 Skill 编排 `AgenticSearchPlanner` 查询分解与多步检索
+核心能力：
+- **文档解析**：BigModel Expert API + 本地 PyMuPDF fallback，TOC 驱动章节识别
+- **知识图谱**：自动提取实体（Module、Register、Signal、Instruction 等）与关系，构建跨文档互通的 NetworkX 全局图谱
+- **混合检索**：FAISS 稠密向量 + BM25 稀疏索引 RRF 融合，可选重排序
+- **Batch API 架构**：LLM 提取走 Batch API 降低成本，Embedding 走同步单文本 API
+- **增量更新**：按章节 `content_hash` 指纹比较，未变章节复用缓存
+- **Agentic 工作流**：外部 Skill 编排 `search`/`explore`/`read`/`ingest`/`status` 五个原子 MCP 工具完成复杂任务
 
-**目标规模**：数百个文档，每个文档几十到万页级。全局图谱通过 NetworkX 内存存储管理，知识图谱检索与文档内容向量检索互通关联。
+目标规模：数百个文档，每个几十到万页级。详细架构与安装使用见 `README.md` 和 `DESIGN.md`。
 
 ---
 
@@ -30,66 +29,40 @@
 
 ### 核心含义
 1. **LLM 是外部 Agent 的资源，不是插件的固定成本**
-   - 评估框架、智能体检索、查询改写、`AgenticSearchPlanner` 查询分解等需要 LLM 评判或推理的能力，优先以 **Skill 编排 + 原子 MCP 工具** 实现，由外部 Agent 承担 LLM 调用成本，而不是在插件内部启动完整 Agent 运行时。
-   - 新增的 `skills/agentic-search/SKILL.md` 即通过 Skill 编排 `AgenticSearchPlanner` 查询分解策略，由外部 Agent 承担 LLM 推理成本。
+   - 需要 LLM 评判或推理的能力（查询分解、结果综合、评估 judge、ReAct/Self-Ask 步骤）优先以 **Skill 编排 + 原子 MCP 工具** 实现，由外部 Agent 承担 LLM 调用成本，而不是在插件内部启动完整 Agent 运行时。
+   - 示例：`AgenticSearchPlanner` 的查询分解、`LLMReranker` 的 passage scoring 均由外部 Skill 编排，插件只提供可组合的检索/读取/评分机制。
 2. **复杂策略进 Skill，通用机制进代码**
-   - Python 层只提供机制：评估指标计算、检索器接口、单步搜索、chunk 读取、图谱查询。
-   - Skill 层编排策略：评估流程、ReAct/Self-Ask 步骤、查询分解、结果批判。
+   - Python 层只提供机制：检索器接口、chunk 读取、图谱 CRUD、评估指标计算、日志记录。
+   - Skill 层编排策略：何时调用 `search` vs `explore`、如何组合多步结果、是否使用 `reranked`、如何综合答案。
 3. **MCP 工具保持原子性与可组合性**
-   - 每个 MCP 工具应像 Unix 工具一样完成一件事：搜索、读取、评分、记录。
-   - 避免在单个 MCP 工具内部做多轮 LLM 推理或隐藏状态机。
+   - 每个 MCP 工具应像 Unix 工具一样完成一件事。
+   - 当前仅暴露 5 个原子工具：`search` / `explore` / `read` / `ingest` / `status`。不在单个工具内部隐藏多轮 LLM 推理或状态机。
 4. **状态安全优先于智能**
-   - 数据变更类操作保留在 `admin_tools.py`，不暴露为 MCP 写工具，保留人工/审计边界。
-5. **可观测性应面向 Agent 理解**
-   - 评估结果、检索中间步骤、冲突日志、来源信息以结构化 JSON 返回，方便外部 Agent 做下一步决策，而不是仅面向人类阅读。
+   - 数据变更类操作（实体/关系增删改、反馈、重建全局图、reprocess）保留在 `admin_tools.py`，不暴露为 MCP 写工具，保留人工/审计边界。
+5. **可观测性面向 Agent**
+   - 状态、日志、冲突、来源、评估结果均以结构化 JSON 返回，方便外部 Agent 做下一步决策，而不是仅面向人类阅读。
 
 ### 设计决策边界
 - 需要新增 LLM 调用流程时，先问：**这个流程应该由外部 Agent 通过 Skill 编排，还是必须由插件内部无干预完成？**
 - 只有当流程需要批处理、离线运行、或无 Agent 在场时，才在插件内部实现 LLM 调用。
-- **当前无例外**：MCP 工具面已精简为 5 个原子工具（`search` / `explore` / `read` / `ingest` / `status`），插件内部不做 LLM 合成或智能路由。`AgenticSearchPlanner` 的查询分解与 `LLMReranker` 的 passage scoring 等 LLM 推理均移至外部 Skill 编排，由外部 Agent 承担 LLM 调用成本。
+- **当前无例外**：MCP 工具面保持 5 个原子工具；插件内部不做 LLM 合成或智能路由。
 
 ---
 
 ## 技术栈与运行时架构
 
-### 核心依赖
-| 类别 | 技术/库 | 版本要求 |
-|------|--------|---------|
-| 语言 | Python | >= 3.11 |
-| 虚拟环境 | uv / venv | — |
-| PDF 解析 | PyMuPDF, pdfplumber, PyPDF2 | >=1.23, >=0.10, >=3.0 |
-| 向量检索 | FAISS (CPU), NumPy | >=1.7.4, >=1.24 |
-| 图谱存储 | NetworkX | >=3.0 |
-| 元数据存储 | SQLite (标准库 sqlite3) | — |
-| 混合检索 | rank-bm25 | >=0.2.2 |
-| 本地重排序 | sentence-transformers | >=3.0.0 |
-| 图片处理 | Pillow | >=10.0 |
-| HTTP 客户端 | requests | >=2.31 |
-| 环境变量 | python-dotenv | >=1.0 |
-| 测试 | pytest | >=9.0 |
-
-### 可选依赖
-| 类别 | 技术/库 | 版本要求 | 说明 |
-|------|--------|---------|------|
-| Office 文档解析 | python-docx, openpyxl | >=1.1, >=3.1 | 尚未接入主 pipeline，单独使用需 `pip install -e ".[office]"` |
-
-### 四存储系统架构
-| 存储 | 职责 | 持久化文件 | 原子性保证 |
-|------|------|-----------|-----------|
-| **SQLite** | 文档元数据、content_blocks、heading_maps | `knowledge_base/workdocs.db` | 单连接事务 |
-| **FAISS** | 向量索引（语义搜索） | `knowledge_base/faiss.index`（IndexIDMap2） | `fcntl` 进程锁 + 事务 + 临时文件 rename |
-| **NetworkX** | 全局知识图谱（实体+关系） | `knowledge_base/graphs/{doc_id}.json` + `global.json` | 内存操作 + 文件原子写入 |
-| **Bridge** | block ↔ 实体 双向索引 | 纯内存（重启从 SQLite 重建） | 内存级 |
+### 四存储系统
+| 存储 | 职责 | 持久化文件 |
+|------|------|-----------|
+| **SQLite** | 文档元数据、content_blocks、heading_maps、usage_logs | `knowledge_base/workdocs.db` |
+| **FAISS** | 向量索引 | `knowledge_base/faiss.index` |
+| **NetworkX** | 全局知识图谱 | `knowledge_base/graphs/{doc_id}.json` + `global.json` |
+| **Bridge** | block ↔ 实体 双向索引 | 纯内存（重启从 SQLite 重建） |
 
 ### Pipeline 六阶段
-1. **解析**（PDF → Markdown + images）
-2. **构建 LLM Batch JSONL**（Markdown → 树形章节 → content_blocks + heading_maps → batch requests）
-3. **提交 LLM Batch API**（增量过滤 → 并行提交 → 保存原始结果）
-4. **解析入库**（结果文件 → entities/relations → GraphStore + SQLite，不含向量化）
-5. **构建 Embedding JSONL**（从 SQLite 查询待向量化的 blocks）
-6. **同步 Embedding 向量化**（逐条调用 Embedding API → SQLite + FAISS）
+解析 → 构建 Batch JSONL → 提交 Batch API → 解析入库 → 构建 Embedding JSONL → 同步 Embedding。详见 `DESIGN.md` 第 19 章。
 
-详见 `README.md`「架构概览」和 `DESIGN.md` 第 19 章。
+依赖与版本见 `pyproject.toml`。
 
 ---
 
@@ -97,107 +70,41 @@
 
 ```
 work-docs-library/
-├── kimi.plugin.json              # Kimi Code 新规范插件 Manifest（MCP server + Skill）
-├── skills/
-│   ├── using-workdocs/
-│   │   └── SKILL.md              # 入口：总览、规则、何时调用子 skill
-│   ├── ingesting-workdocs/
-│   │   └── SKILL.md              # 文档入库/更新/重试工作流
-│   └── exploring-workdocs/
-│       └── SKILL.md              # 语义搜索 + 图谱联合查询工作流
-├── pyproject.toml                # Python 项目配置、依赖、ruff/pyright/pytest 设置
+├── kimi.plugin.json              # 插件 Manifest
+├── skills/                       # Agent Skill 文档
+│   ├── using-workdocs/           # 入口 Skill
+│   ├── ingesting-workdocs/       # 入库工作流
+│   ├── exploring-workdocs/       # 查询工作流
+│   ├── agentic-search/           # 多跳检索工作流
+│   ├── synthesizing-workdocs/    # 综合报告工作流
+│   └── fixing-workdocs/          # 错误修正工作流
 ├── scripts/
-│   ├── mcp_server.py             # MCP stdio server（JSON-RPC，stdout 隔离）
-│   ├── plugin_router.py          # Plugin 工具函数库（被 mcp_server / admin_tools 复用）
-│   ├── admin_tools.py            # 不暴露为 MCP 的内部管理命令入口
-│   ├── .env / .env.example       # 环境变量（凭证等，gitignored）
-│   ├── prompts/                  # LLM 提示词文件（运行时读取，无需重启）
-│   │   ├── entity_extraction_system.txt
-│   │   └── entity_extraction_user.txt
+│   ├── mcp_server.py             # MCP stdio server
+│   ├── plugin_router.py          # 工具函数库
+│   ├── admin_tools.py            # 内部管理命令
+│   ├── prompts/                  # LLM 提示词
 │   ├── core/                     # 业务逻辑层
-│   │   ├── config.py             # 统一配置中心（.env / 环境变量 → 默认值）
-│   │   ├── doc_graph_pipeline.py # ⭐ DocGraphPipeline 主管道（六阶段）
-│   │   ├── knowledge_base_service.py  # 统一服务层封装（DB + VectorIndex + GraphStore + Bridge）
-│   │   ├── batch_clients.py      # BaseBatchClient + BatchClient（通用 OpenAI-compatible Batch API）
-│   │   ├── llm_chat_client.py    # LLM 同步对话客户端（Chat 模式回退）
-│   │   ├── embedding_client.py   # Embedding 同步单文本客户端
-│   │   ├── bigmodel_parser_client.py  # BigModel Expert 文件解析（专用非兼容 API）
-│   │   ├── graph_store.py        # NetworkX 图谱存储（CRUD、冲突检测、属性索引、路径搜索）
-│   │   ├── db.py                 # SQLite 数据库操作
-│   │   ├── vector_index.py       # FAISS 向量索引管理
-│   │   ├── models.py             # 数据模型（Chunk、Document、EvalDataset、EvalQuestion）
-│   │   ├── enums.py              # StrEnum 定义（ChunkStatus、DocumentStatus、ChunkType）
-│   │   ├── evaluation.py         # 评估框架（EvalDataset/EvalQuestion + LLM-as-judge + EvalHarness）
-│   │   ├── sparse_index.py       # BM25 稀疏索引
-│   │   ├── hybrid_retriever.py   # RRF 稠密+稀疏混合检索
-│   │   ├── reranker.py           # LLM 交叉编码器重排序
-│   │   └── agentic_search.py     # AgenticSearchPlanner 查询分解机制
-│   ├── parsers/                  # IO / 解析层
-│   │   ├── pdf_parser.py         # PDF 本地解析器（PyMuPDF + TOC 驱动章节识别 + 表格/图片检测）
-│   │   ├── office_parser.py      # DOCX / XLSX 解析器（代码存在，尚未接入 pipeline）
-│   │   └── image_utils.py        # 图片压缩与三分类（彩色/灰度/黑白）
-│   ├── tests/                    # pytest 测试集（506 passed, 0 skipped）
-│   │   ├── conftest.py           # 三重环境隔离（清除 WORKDOCS_ 环境变量、阻止 load_dotenv、临时目录重定向）
-│   │   ├── fixtures/             # 测试 fixture（PDF 页样本、解析输出样本）
-│   │   └── test_*.py             # 各模块测试文件
-├── knowledge_base/               # 运行时自动生成数据（❌ 禁止手动修改）
-│   ├── workdocs.db               # SQLite
-│   ├── faiss.index               # FAISS 向量索引（IndexIDMap2，直接存储 block_db_id）
-│   ├── parsed/<doc_id>/          # Stage1 解析输出
-│   ├── batch/                    # Stage2/3/5/6 中间产物
-│   └── graphs/                   # Stage4 子图快照 + global.json
-└── .venv/                        # Python 虚拟环境
+│   ├── parsers/                  # 解析层
+│   └── tests/                    # pytest 测试集
+└── knowledge_base/               # 运行时生成数据（❌ 禁止手动修改）
 ```
 
-> 新增项目级 Skill：`skills/agentic-search/SKILL.md`（Agentic Search 查询分解工作流，体现「复杂策略进 Skill，通用机制进代码」原则）。
+模块职责见源码 docstring，详细架构见 `DESIGN.md`。
 
 ---
 
 ## 构建与测试命令
 
-### 环境安装
 ```bash
-# 方式一：uv（推荐）
-cd /path/to/work-docs-library
-uv sync
-
-# 方式二：pip
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -e .
-```
-
-### 代码质量检查（提交前必须执行）
-```bash
-# 代码格式化与 lint
+# 提交前必须执行
 cd /path/to/work-docs-library
 ./.venv/bin/ruff check scripts/
 ./.venv/bin/ruff format scripts/
-
-# 类型检查
 ./.venv/bin/pyright scripts/
-```
-
-### 测试执行
-```bash
-# 完整测试集（当前状态：506 passed, 0 skipped, 0 failed）
-cd /path/to/work-docs-library
 PYTHONPATH=scripts ./.venv/bin/python -m pytest scripts/tests/ -v
-
-# 仅运行核心基础设施测试（<5s）
-PYTHONPATH=scripts ./.venv/bin/python -m pytest \
-  scripts/tests/test_graph_store.py \
-  scripts/tests/test_vector_index.py \
-  scripts/tests/test_db.py \
-  scripts/tests/test_knowledge_base_service.py \
-  scripts/tests/test_knowledge_base_service_queries.py -v
-
-# 仅运行 Pipeline 集成测试（<5s）
-PYTHONPATH=scripts ./.venv/bin/python -m pytest \
-  scripts/tests/test_pipeline_stages.py \
-  scripts/tests/test_plugin_router.py \
-  scripts/tests/test_pdf_parser.py -v
 ```
+
+环境安装见 `README.md`「安装」。
 
 ---
 
@@ -254,39 +161,25 @@ PYTHONPATH=scripts ./.venv/bin/python -m pytest \
   2. 阻止 `load_dotenv` 重新加载 `.env` 文件
   3. 重定向 Config 默认路径到临时目录（DB、FAISS、Graph 均隔离）
 - **回归即修复**：任何导致测试失败的变更必须当场修复
-- **506 个测试用例必须全部通过**（0 skipped）
+- **513 个测试用例必须全部通过**（0 skipped）
 
 ### 测试文件清单
-| 测试文件 | 用例数 | 说明 |
-|----------|--------|------|
-| `test_plugin_router.py` | 55 | Plugin 工具路由、参数解析、路径沙箱 |
-| `test_pdf_parser.py` | 71 | PDF 解析核心测试（含 14 个真实页面 fixture） |
-| `test_borderless_table_extractor.py` | 3 | AMBA 风格无边框表格提取单元测试 |
-| `test_table_utils.py` | 4 | Markdown 表格规范化单元测试 |
-| `test_office_parser.py` | 3 | DOCX / XLSX 解析测试 |
-| `test_db.py` | 15 | SQLite 操作、事务管理 |
-| `test_vector_index.py` | 14 | FAISS IndexIDMap2 增删查、事务 |
-| `test_llm_client.py` | 9 | LLM 客户端 Mock |
-| `test_config_env.py` | 13 | 环境变量配置优先级、默认值、敏感 key 脱敏 |
-| `test_chapter_parser.py` | 20 | ChapterParser 树形章节解析测试 |
-| `test_image_utils.py` | 13 | 图片压缩工具测试 |
-| `test_graph_store.py` | 77 | NetworkX 图谱存储 CRUD、冲突检测、属性索引、子图、路径搜索、持久化 |
-| `test_batch_clients.py` | 19 | Batch API 客户端 Mock 测试 |
-| `test_knowledge_base_service.py` | 21 | KnowledgeBaseService 统一服务层测试 |
-| `test_knowledge_base_service_queries.py` | 3 | 语义-图谱联合查询、block+实体联合返回测试 |
-| `test_bigmodel_parser_client.py` | 8 | BigModel 解析客户端全路径覆盖测试 |
-| `test_content_blocks.py` | 10 | 内容块切分、heading_maps 构建 |
-| `test_batch_builder.py` | 14 | BatchBuilder 切分保护与空 content 过滤测试 |
-| `test_parsed_docs_jsonl.py` | 2 | 真实文档端到端 JSONL 生成测试 |
-| `test_pipeline_stages.py` | 31 | 六阶段 pipeline 拆分测试 |
-| `test_audit_issues.py` | 10 | 生产 bug/审计问题定向回归测试（含 FAISS/SQLite 原子性） |
-| `test_mcp_server.py` | 10 | MCP Server 工具注册与 JSON-RPC 调用测试（含 5 个 MCP 工具白名单校验） |
-| `test_status_tool.py` | 13 | 结构化状态仪表盘各 scope 测试 |
-| `test_evaluation.py` | 21 | 评估框架（EvalDataset/EvalQuestion + LLM-as-judge + EvalHarness） |
-| `test_sparse_index.py` | 9 | BM25 稀疏索引构建与搜索 |
-| `test_hybrid_retriever.py` | 3 | RRF 稠密+稀疏混合检索 |
-| `test_reranker.py` | 9 | LLM 交叉编码器重排序 |
-| `test_agentic_search.py` | 11 | AgenticSearchPlanner 查询分解机制 |
+| 测试文件 | 说明 |
+|----------|------|
+| `test_plugin_router.py` | Plugin 工具路由、参数解析、路径沙箱 |
+| `test_pdf_parser.py` | PDF 解析核心测试 |
+| `test_db.py` | SQLite 操作、事务管理 |
+| `test_vector_index.py` | FAISS 索引增删查 |
+| `test_graph_store.py` | NetworkX 图谱存储 CRUD、冲突检测、路径搜索 |
+| `test_batch_clients.py` | Batch API 客户端 Mock |
+| `test_knowledge_base_service.py` | 统一服务层测试 |
+| `test_pipeline_stages.py` | 六阶段 pipeline 拆分 |
+| `test_mcp_server.py` | MCP Server 工具注册与 JSON-RPC |
+| `test_status_tool.py` | 状态仪表盘各 scope |
+| `test_usage_logger.py`, `test_status_usage.py`, `test_status_trace.py` | 使用日志与审计 |
+| `test_*.py` | 其他模块测试（详见 `scripts/tests/`） |
+
+**当前状态**：513 passed, 0 skipped, 0 failed。
 
 ### Mock 方法
 使用 `monkeypatch.setattr` 替换客户端类方法：
@@ -423,98 +316,25 @@ monkeypatch.setattr(
 ## 开发计划
 
 ### 当前阶段（已完成）
-- ✅ DocGraphPipeline 重构：Batch API 架构、树形章节解析、multimodal 图片处理
-- ✅ 零数据丢失：移除所有源数据过滤和截断
-- ✅ Prompt 外部化：所有提示词在 `scripts/prompts/*.txt`
-- ✅ 代码清理：删除 11 个旧文件、4 个旧 prompt 文件、7 个旧测试文件
-- ✅ **API 接口重构**：新增 `KnowledgeBaseService` 统一服务层；Plugin 暴露 5 个原子 MCP 工具（`search` / `explore` / `read` / `ingest` / `status`）
-- ✅ **图谱查询增强**：`GraphStore.find_path()` BFS 路径搜索、`search_entities()` 模糊搜索
-- ✅ **跨文档知识互通**：全局统一图谱 `global.json` + 文档子图快照 `{doc_id}.json`，同名同类型实体自动去重
-- ✅ **章节级增量更新**：`content_hash` 指纹比较，未变章节复用实体缓存与 embedding，仅 LLM 提取变更/新增章节
-- ✅ **本地 PDF 解析器 TOC 驱动式章节识别**
-- ✅ **完整章节层级构造**
-- ✅ **段落内换行保留原始 `\n`**
-- ✅ **ChapterParser 多级树重构**
-- ✅ **BatchBuilder 接收扁平化节点**
-- ✅ **数据模型清理**
-- ✅ **数据库 schema 简化**
-- ✅ **数据质量增强**：`GraphEntity`/`GraphRelation` 新增 `confidence`/`verified`/`created_at`/`updated_at`/`feedback_score` 字段
-- ✅ **图谱动态更新接口**：Plugin 内部提供 4 个图谱写工具（admin_tools / plugin_router），按最小权限原则未暴露为 MCP
-- ✅ **冲突检测与日志**
-- ✅ **语义-图谱联合查询**
-- ✅ **block+实体联合返回**
-- ✅ **用户反馈机制**
-- ✅ **IC 关系扩展**
-- ✅ **处理器架构图谱扩展（C28x+CLA）**
-- ✅ **多文档类型图谱扩展**
-- ✅ **跨产品外设变体建模**
-- ✅ **属性索引优化**
-- ✅ **跨粒度桥接索引**
-- ✅ **Pipeline 六阶段拆分**
-- ✅ **Embedding 同步单文本 API**
-- ✅ **环境隔离三重机制**：彻底根治 `.env` 污染测试环境的问题
-- ✅ **存储粒度与查询粒度解耦（方案C）**：引入 `content_blocks` 表作为存储粒度，`heading_maps` 表作为查询粒度，batch 数量减少 40-50%
-- ✅ **FAISS 索引重构为 IndexIDMap2**：直接使用 block_db_id 作为存储 ID，移除 `_BLOCK_FAISS_OFFSET` 与手动 `_id_map`
-- ✅ **506 个测试全部通过**
-- ✅ **PDF Parser 表格检测增强（Milestone 1-4）**：`find_tables(strategy="lines_strict")`、caption-gated 预筛选、位域图重叠保护、全部 14 个 Magic Number 配置化（已移除 PyMuPDF4LLM fallback）
-- ✅ **PDF Parser 图片检测增强（Milestone 2）**：`page.get_image_info()` 过滤链、双路径提取
-- ✅ **性能基准测试**：TI (219页) 10.3s/0表格 → 46.2s/68表格；AMBA (585页) 8.7s/0表格 → 93.3s/22表格
-- ✅ **多进程并行化可行性分析**：4-worker 加速比 TI 2.07x / AMBA 1.61x，但 Amdahl 定律限制整体收益仅 ~1.3x，**否决实施**
-- ✅ **AMBA 空跑根因分析**：251 页触发 find_tables → 234 页 Type A 空跑，根因为 lines_strict 对无竖线表格检测率仅 9%
-- ✅ **GapsFirstScanner 重构**：Caption-driven linear extractor 替代 UZN 方案，~600 行替代 2037 行，性能提升 5-10x
-- ✅ **Hard Separator + Zone 模型**：header/footer/heading/caption/body_text 构成 y 轴硬分割，提取只在 zone 内部搜索
-- ✅ **Cluster-based 图片渲染**：每个 drawing cluster 独立渲染为图片，修复过度合并问题
-- ✅ **Orphan Zone 检测**：无 Caption 表格通过 `_classify_table_style` 启发式检测，命中率 90.5%
-- ✅ **自适应表格策略**：`_classify_table_style` 识别 grid/horizontal 风格；grid 走 `find_tables(strategy="lines_strict")`，horizontal（含零高度线）走 `BorderlessTableExtractor`
-- ✅ **预计算优化**：grid 页面每页一次 `find_tables` 全页扫描，结果复用于所有 caption/orphan zone，避免 142 次重复调用
-- ✅ **AMBA 零高度线调研**：AMBA 表格水平线为 height=0.0 的零高度矢量线，`find_tables` 任何策略均无法识别，确认为 PyMuPDF C 库层面限制
-- ✅ **`tab.cells` 空伪表格防御**：`find_tables()` 返回 cells=[] 的伪表格导致 `tab.bbox` 触发 `ValueError`，添加防御性跳过
-- ✅ **`_fix_drawing_rect` 前零高度线统计**：在 rect 扩展前统计原始 drawing 的 `height==0.0`，避免检测永远失效
-- ✅ **`_classify_table_style` v2/v3**：去掉 `len<10` 门槛，增加 drawing 风格分类（h/v/other）、文本密度过滤（<0.02 text/pt）、零高度线过滤；`horizontal` 风格直接路由到 `BorderlessTableExtractor`，不做 `find_tables` fallback
-- ✅ **空跑率优化**：TI 15.9%→1.4%，AMBA 92.9%→0.0%，SPRUI07 10.4%→8.8%，DC_UG 31.0%→28.6%
-- ✅ **AMBA 零高度线表格提取**：新增 `scripts/parsers/borderless_table_extractor.py`，基于横线 + 文本 x 对齐重建 Markdown 表格；`GapsFirstScanner` 识别 `horizontal` 后直接进入该提取器，不再尝试 `find_tables`
-- ✅ **sprui07 page 692 纵向堆叠时序图修复**：cluster 合并改为连通分量 + 最近 caption 分量，防止只渲染底部子图
-- ✅ **审计选项 A 最小紧急修复**：路径沙箱、强制脱敏、ZIP 路径遍历防护、FAISS/SQLite 写入顺序、KBService 原子失败处理、GraphStore 深拷贝、`fitz.open` 上下文管理、Batch 超时与失败抛错
-- ✅ **解析器输出格式改为 PNG**：矢量图/光栅图/表格区域统一输出 PNG（无损高保真），移除 `PARSER_IMAGE_JPEG_QUALITY` 配置；LLM API 发送时的压缩由 `_compress_image_to_base64` 独立处理（三层分类策略不变）
-- ✅ **评估框架**：`EvalDataset`/`EvalQuestion` + LLM-as-judge（Faithfulness / ContextPrecision / ContextRecall）+ retrieval metrics（HitRate / MRR / NDCG）+ `EvalHarness`
-- ✅ **BM25 稀疏索引**：新增 `scripts/core/sparse_index.py`，支持从 SQLite blocks 或内存 block 列表构建
-- ✅ **RRF 混合检索**：新增 `scripts/core/hybrid_retriever.py`，FAISS 稠密检索与 BM25 稀疏检索 RRF 融合
-- ✅ **LLM 交叉编码器重排序**：新增 `scripts/core/reranker.py`，`LLMReranker` 通过同步 LLM 调用对候选 passage 打分
-- ✅ **AgenticSearchPlanner 查询分解机制**：新增 `scripts/core/agentic_search.py`，LLM 将自然语言问题分解为 semantic / hybrid / reranked / graph / chapter / metadata / synthesize 多步搜索计划
-- ✅ **Agentic Search Skill**：新增项目级 Skill `skills/agentic-search/SKILL.md`，由外部 Agent 编排查询分解与多步检索
-- ✅ **MCP 工具面精简为 5 个原子工具**：`search`（聚合 semantic/hybrid/reranked）、`explore`（聚合 entity/neighbors/subgraph/path/provenance/conflicts）、`read`、`ingest`、`status`
+- ✅ Pipeline：Batch API、章节树、content_blocks/heading_maps 双粒度、六阶段拆分
+- ✅ 解析：BigModel Expert + 本地 PyMuPDF fallback、TOC 驱动章节、表格/图片检测、GapsFirstScanner + BorderlessTableExtractor
+- ✅ 存储：SQLite + FAISS IndexIDMap2 + NetworkX 全局图 + Bridge 双向索引
+- ✅ 检索：语义搜索、BM25 稀疏索引、RRF 混合检索、可选重排序
+- ✅ 接口：`KnowledgeBaseService` 统一服务层；MCP 仅暴露 `search`/`explore`/`read`/`ingest`/`status` 5 个原子工具
+- ✅ 质量：`confidence`/`verified`/`feedback_score`、冲突日志、`usage_logs`/`block_activation` 使用跟踪、`fixing-workdocs` 修正闭环
+- ✅ Skill：`using-workdocs`、`ingesting-workdocs`、`exploring-workdocs`、`agentic-search`、`synthesizing-workdocs`、`fixing-workdocs`
+- ✅ 测试：513 passed, 0 skipped, 0 failed
+
+详细历史见 git log 与 `DESIGN.md` 各章节。
 
 ### 下一阶段（精确到下一步）
 1. **可视化**：图谱可视化导出（Graphviz / D3.js）
-2. **评估体系细化**：评测数据集沉淀、端到端 RAG 评估流程产品化、指标看板
-3. **DOCX/XLSX 接入 pipeline**：当前解析器代码存在但未接入 `DocGraphPipeline`
-4. **系统化加固（审计选项 B）**：跨存储事务回滚、VectorIndex 原子重建、参数限流、解析阈值配置化、fuzz/property 测试
+2. **评估体系细化**：评测数据集沉淀、端到端 RAG 评估流程产品化
+3. **DOCX/XLSX 接入 pipeline**
+4. **系统化加固**：跨存储事务回滚、VectorIndex 原子重建、参数限流、fuzz/property 测试
 
-### 已完成的非表格项
-
-- ✅ **Kimi Code 新插件规范迁移**：旧 `plugin.json` 替换为 `kimi.plugin.json`；新增 `scripts/mcp_server.py` 暴露 5 个 MCP 工具；`scripts/admin_tools.py` 承载数据改写/管理命令；新增 `skills/using-workdocs/SKILL.md`
-- ✅ **移除 config.json 配置机制**：配置来源统一为 `.env`/环境变量 → 默认值
-
-### PDF Parser 表格检测已知问题与下一步方向
-
-**已完成的分析**（详见 `DESIGN.md` 第 26 章）：
-- `_classify_table_style` 对 AMBA 表格 100% 正确分类为 `horizontal`，但 `find_tables` 任何策略均返回 0 表格
-- 根因：AMBA 表格水平线为 height=0.0 的零高度矢量线，PyMuPDF 内部算法无法识别
-- `text` 策略产生大量整页级误报（64×12 伪表格），不可用
-
-**当前状态**（2026-06-10）：
-- Grid 表格（TI/SPRUI07）：`lines_strict` 有效，自适应策略已优化
-- Horizontal 表格（AMBA/DC_UG）：统一由 `BorderlessTableExtractor` 处理，不再使用 `find_tables(strategy="lines")`（实测 AMBA 该策略零产出）
-- 路由原则：先由 `_classify_table_style` 判断风格，再直接调用最优方法，不做 fallback
-- 误触发成本：预计算机制使 TABLE_CAPTION_RE 误匹配的影响从 "142 次 clip 调用" 降至 "一次全页扫描"
-- 空跑率：TI 1.4% / AMBA 0.0% / SPRUI07 8.8% / DC_UG 28.6%（v2 算法，详见 DESIGN.md 26.8.4）
-
-**已修复问题**：
-- `tab.cells` 空伪表格：防御性跳过，避免 `ValueError: min() iterable argument is empty`
-- `_fix_drawing_rect` 副作用：在 rect 扩展前统计原始零高度线，避免检测永远失效
-
-**下一步方向**（按优先级）：
-1. **收紧 TABLE_CAPTION_RE**：排除包含 describes/shows/lists/gives/provides 等动词的引用句（进一步减少不必要的全页扫描）
-2. **跳过跨页续表**：检测 "Continued from previous page" 直接跳过 find_tables（预估可跳过 ~33 页）
-3. **自研 horizontal 表格提取**：不依赖 `find_tables`，基于文本块对齐分析实现 AMBA 风格表格识别（投入大，优先级低）
+### PDF Parser 表格检测
+- Grid 表格用 `find_tables(strategy="lines_strict")`；Horizontal（AMBA 等零高度线）用 `BorderlessTableExtractor`
+- 当前空跑率：TI 1.4% / AMBA 0.0% / SPRUI07 8.8% / DC_UG 28.6%
+- 下一步：收紧 TABLE_CAPTION_RE、跳过跨页续表；详见 `DESIGN.md` 第 26 章
 4. **to_markdown 性能**：TI 中 to_markdown 耗时比 find_tables 还高 31%，但为 PyMuPDF C 实现，外部优化空间极小
