@@ -1046,10 +1046,24 @@ class SearchStep:
 
 **不再暴露为 MCP 的工具**：`semantic_search`、`search_hybrid`、`search_reranked`、`graph_query`、`graph_path`、`graph_provenance`、`graph_conflicts`、`query`、`get_content`、`toc`、`config`、`agentic_plan`。这些能力仍可通过 admin 脚本或 `QueryService` 内部使用，但不再出现在 Agent 可见的 MCP 工具列表中。
 
-### 24.5 安全与失败处理
+### 24.5 Skill 文件与协作方式
+
+**Skill 分层**：
+- `using-workdocs`：入口决策，决定加载哪个子 Skill
+- `exploring-workdocs`：单次/简单多跳查询工作流，指导 `search`/`explore`/`read` 的选择与组合
+- `agentic-search`（`~/.agents/skills/agentic-search/SKILL.md`）：复杂多跳规划与执行，明确禁止调用 `agentic_plan` MCP 工具，把规划逻辑内建在 Skill 中
+- `synthesizing-workdocs`：把 `search`/`explore`/`read` 返回的结构化上下文综合为带引用的技术报告
+
+**协作流程**：
+```
+using-workdocs → agentic-search → exploring-workdocs (per step) → synthesizing-workdocs
+```
+
+### 24.6 安全与失败处理
 
 - `AgenticSearchPlanner.plan()` 捕获所有异常并返回空列表，避免规划失败阻塞 Agent
 - 返回空列表时，Skill 应降级为单步 `search`
+- `agentic-search` Skill 明确失败回退：某步为空时尝试更宽泛的 `search` 或 `explore`
 - 所有提示词替换使用 `string.Template.safe_substitute`，防止输入中的 `$` 破坏模板
 
 ---

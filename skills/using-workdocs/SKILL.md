@@ -7,7 +7,7 @@ description: Use when a user wants to ingest technical PDFs, query a document kn
 
 ## Overview
 
-The work-docs-library plugin turns technical PDFs into a queryable knowledge base with vector search, hybrid retrieval, LLM reranking, and a cross-document knowledge graph. This skill is the entry point. For concrete workflows, load the required sub-skill.
+The work-docs-library plugin turns technical PDFs into a queryable knowledge base with vector search, hybrid retrieval, optional reranking, and a cross-document knowledge graph. This skill is the entry point. For concrete workflows, load the required sub-skill.
 
 ## When to Use
 
@@ -19,9 +19,19 @@ The work-docs-library plugin turns technical PDFs into a queryable knowledge bas
 ## How to Choose a Workflow
 
 - **Import or update documents** → **REQUIRED SUB-SKILL:** `ingesting-workdocs`
-- **Answer technical questions, compare concepts, trace provenance** → **REQUIRED SUB-SKILL:** `exploring-workdocs`
-- **Complex multi-hop questions requiring planned retrieval** → **OPTIONAL SUB-SKILL:** `agentic-search` (user-level skill, located at `~/.agents/skills/agentic-search`). Use it when the question spans multiple documents, requires structured graph traversal, or when single-shot search is insufficient.
+- **Simple technical questions or single-document lookups** → **REQUIRED SUB-SKILL:** `exploring-workdocs`
+- **Complex multi-hop questions spanning multiple documents or requiring graph traversal** → **REQUIRED SUB-SKILL:** `agentic-search` (user-level skill, located at `~/.agents/skills/agentic-search`). Load it before planning retrieval.
+- **Produce a cited, structured answer from retrieved context** → **REQUIRED SUB-SKILL:** `synthesizing-workdocs`
 - **Manual maintenance** (entity correction, reprocessing, feedback, global graph rebuild) → not exposed through MCP. Use `scripts/admin_tools.py`.
+
+**Typical call chain for a complex question**:
+
+```
+using-workdocs (this skill)
+  → agentic-search (plan multi-hop retrieval)
+    → exploring-workdocs (execute each search/explore/read step)
+    → synthesizing-workdocs (produce the final cited report)
+```
 
 ## MCP Tools Quick Reference (5 tools)
 

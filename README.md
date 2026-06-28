@@ -242,14 +242,15 @@ flowchart LR
 | `ingesting-workdocs` | `skills/ingesting-workdocs/SKILL.md` | 导入/更新 PDF | 用户提供 PDF 或目录 |
 | `exploring-workdocs` | `skills/exploring-workdocs/SKILL.md` | 查询、溯源、图谱探索 | 技术问答、关系查询 |
 | `agentic-search` | `~/.agents/skills/agentic-search/SKILL.md` | 多跳 planned retrieval | 问题跨越多个文档，需要结构化检索计划 |
+| `synthesizing-workdocs` | `skills/synthesizing-workdocs/SKILL.md` | 把检索结果综合为带引用报告 | 已拿到 search/explore/read 结果，需要生成答案 |
 
 **推荐调用路径：**
 
 ```
 using-workdocs（判断意图）
   ├── 导入/更新 → ingesting-workdocs → mcp__workdocs__ingest + status 轮询
-  ├── 技术问答 → exploring-workdocs → search / explore / read
-  └── 复杂多跳 → agentic-search → 分解 SearchStep → 逐步执行 search / explore / read → 综合回答
+  ├── 技术问答 → exploring-workdocs → search / explore / read → synthesizing-workdocs
+  └── 复杂多跳 → agentic-search → 分解 SearchStep → 逐步执行 search / explore / read → synthesizing-workdocs
 ```
 
 ---
@@ -264,8 +265,10 @@ work-docs-library/
 │   │   └── SKILL.md              # 入口：总览、规则、何时调用子 skill
 │   ├── ingesting-workdocs/
 │   │   └── SKILL.md              # 文档入库/更新/重试工作流
-│   └── exploring-workdocs/
-│       └── SKILL.md              # 语义搜索 + 图谱联合查询工作流
+│   ├── exploring-workdocs/
+│   │   └── SKILL.md              # 语义搜索 + 图谱联合查询工作流
+│   └── synthesizing-workdocs/
+│       └── SKILL.md              # 把检索结果综合为带引用报告
 ├── AGENTS.md                     # Agent 开发指南（架构、策略、代码规范）
 ├── README.md                     # 本文件
 ├── scripts/
