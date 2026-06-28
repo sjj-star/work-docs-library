@@ -20,7 +20,7 @@ The work-docs-library plugin turns technical PDFs into a queryable knowledge bas
 
 - **Import or update documents** → **REQUIRED SUB-SKILL:** `ingesting-workdocs`
 - **Simple technical questions or single-document lookups** → **REQUIRED SUB-SKILL:** `exploring-workdocs`
-- **Complex multi-hop questions spanning multiple documents or requiring graph traversal** → **REQUIRED SUB-SKILL:** `agentic-search` (user-level skill, located at `~/.agents/skills/agentic-search`). Load it before planning retrieval.
+- **Complex multi-hop questions spanning multiple documents or requiring graph traversal** → **REQUIRED SUB-SKILL:** `agentic-search` (project-level skill, located at `skills/agentic-search/`). Load it before planning retrieval.
 - **Produce a cited, structured answer from retrieved context** → **REQUIRED SUB-SKILL:** `synthesizing-workdocs`
 - **Manual maintenance** (entity correction, reprocessing, feedback, global graph rebuild) → not exposed through MCP. Use `scripts/admin_tools.py`.
 

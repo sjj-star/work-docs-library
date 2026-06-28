@@ -31,7 +31,7 @@
 ### 核心含义
 1. **LLM 是外部 Agent 的资源，不是插件的固定成本**
    - 评估框架、智能体检索、查询改写、`AgenticSearchPlanner` 查询分解等需要 LLM 评判或推理的能力，优先以 **Skill 编排 + 原子 MCP 工具** 实现，由外部 Agent 承担 LLM 调用成本，而不是在插件内部启动完整 Agent 运行时。
-   - 新增的 `~/.agents/skills/agentic-search/SKILL.md` 即通过 Skill 编排 `AgenticSearchPlanner` 查询分解策略，由外部 Agent 承担 LLM 推理成本。
+   - 新增的 `skills/agentic-search/SKILL.md` 即通过 Skill 编排 `AgenticSearchPlanner` 查询分解策略，由外部 Agent 承担 LLM 推理成本。
 2. **复杂策略进 Skill，通用机制进代码**
    - Python 层只提供机制：评估指标计算、检索器接口、单步搜索、chunk 读取、图谱查询。
    - Skill 层编排策略：评估流程、ReAct/Self-Ask 步骤、查询分解、结果批判。
@@ -149,7 +149,7 @@ work-docs-library/
 └── .venv/                        # Python 虚拟环境
 ```
 
-> 新增用户级 Skill：`~/.agents/skills/agentic-search/SKILL.md`（Agentic Search 查询分解工作流，体现「复杂策略进 Skill，通用机制进代码」原则）。
+> 新增项目级 Skill：`skills/agentic-search/SKILL.md`（Agentic Search 查询分解工作流，体现「复杂策略进 Skill，通用机制进代码」原则）。
 
 ---
 
@@ -480,7 +480,7 @@ monkeypatch.setattr(
 - ✅ **RRF 混合检索**：新增 `scripts/core/hybrid_retriever.py`，FAISS 稠密检索与 BM25 稀疏检索 RRF 融合
 - ✅ **LLM 交叉编码器重排序**：新增 `scripts/core/reranker.py`，`LLMReranker` 通过同步 LLM 调用对候选 passage 打分
 - ✅ **AgenticSearchPlanner 查询分解机制**：新增 `scripts/core/agentic_search.py`，LLM 将自然语言问题分解为 semantic / hybrid / reranked / graph / chapter / metadata / synthesize 多步搜索计划
-- ✅ **Agentic Search Skill**：新增用户级 Skill `~/.agents/skills/agentic-search/SKILL.md`，由外部 Agent 编排查询分解与多步检索
+- ✅ **Agentic Search Skill**：新增项目级 Skill `skills/agentic-search/SKILL.md`，由外部 Agent 编排查询分解与多步检索
 - ✅ **MCP 工具面精简为 5 个原子工具**：`search`（聚合 semantic/hybrid/reranked）、`explore`（聚合 entity/neighbors/subgraph/path/provenance/conflicts）、`read`、`ingest`、`status`
 
 ### 下一阶段（精确到下一步）

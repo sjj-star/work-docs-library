@@ -1051,7 +1051,7 @@ class SearchStep:
 **Skill 分层**：
 - `using-workdocs`：入口决策，决定加载哪个子 Skill
 - `exploring-workdocs`：单次/简单多跳查询工作流，指导 `search`/`explore`/`read` 的选择与组合
-- `agentic-search`（`~/.agents/skills/agentic-search/SKILL.md`）：复杂多跳规划与执行，明确禁止调用 `agentic_plan` MCP 工具，把规划逻辑内建在 Skill 中
+- `agentic-search`（`skills/agentic-search/SKILL.md`）：复杂多跳规划与执行，明确禁止调用 `agentic_plan` MCP 工具，把规划逻辑内建在 Skill 中
 - `synthesizing-workdocs`：把 `search`/`explore`/`read` 返回的结构化上下文综合为带引用的技术报告
 
 **协作流程**：

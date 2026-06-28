@@ -8,7 +8,7 @@
 - **知识图谱构建**：自动提取实体（Feature、Module、Register、Signal、Instruction、Interrupt、PipelineStage、Peripheral 等）和关系（IMPLEMENTS、CONTAINS、HAS_REGISTER、INSTRUCTION_READS_REGISTER、MODULE_IMPLEMENTS_INSTRUCTION、INTERRUPT_TRIGGERS 等），构建可查询的跨层级知识图谱（RTL ↔ ISA）
 - **向量语义检索**：基于 FAISS 的语义向量索引，支持相似度搜索
 - **混合检索与重排序**：BM25 稀疏索引（支持 CJK 2-gram）与 FAISS 稠密检索通过 RRF 融合；LLM cross-encoder 对候选结果重排序，提升复杂查询精度
-- **Agentic 搜索**：`AgenticSearchPlanner` 将复杂问题分解为 `SearchStep` 列表，支持多跳检索策略；Agent 通过 `~/.agents/skills/agentic-search/SKILL.md` 编排执行
+- **Agentic 搜索**：`AgenticSearchPlanner` 将复杂问题分解为 `SearchStep` 列表，支持多跳检索策略；Agent 通过 `skills/agentic-search/SKILL.md` 编排执行
 - **Batch API 架构**：Batch API 优先：提取类 LLM 调用通过 Batch API 提交以降低成本；辅助 LLM 调用（重排序、Agentic 规划、评估 judge）使用同步 API。支持超大 JSONL 自动拆分并行处理
 - **章节级增量更新**：文档修订后，按章节 `content_hash` 指纹比较，未变章节复用实体缓存与 embedding，仅对变更/新增章节进行 LLM 提取，万页级文档变更一页时成本降低 99%+
 - **Multimodal 图片理解**：LLM 直接分析文档中的图片（时序图、架构框图、寄存器表等），生成文字描述用于向量化
@@ -241,7 +241,7 @@ flowchart LR
 | `using-workdocs` | `skills/using-workdocs/SKILL.md` | 入口 Skill，负责派发至子 Skill | 用户首次提问，不确定 workflow |
 | `ingesting-workdocs` | `skills/ingesting-workdocs/SKILL.md` | 导入/更新 PDF | 用户提供 PDF 或目录 |
 | `exploring-workdocs` | `skills/exploring-workdocs/SKILL.md` | 查询、溯源、图谱探索 | 技术问答、关系查询 |
-| `agentic-search` | `~/.agents/skills/agentic-search/SKILL.md` | 多跳 planned retrieval | 问题跨越多个文档，需要结构化检索计划 |
+| `agentic-search` | `skills/agentic-search/SKILL.md` | 多跳 planned retrieval | 问题跨越多个文档，需要结构化检索计划 |
 | `synthesizing-workdocs` | `skills/synthesizing-workdocs/SKILL.md` | 把检索结果综合为带引用报告 | 已拿到 search/explore/read 结果，需要生成答案 |
 
 **推荐调用路径：**
@@ -313,7 +313,7 @@ work-docs-library/
 └── .gitignore
 ```
 
-> 用户级 Skill：`~/.agents/skills/agentic-search/SKILL.md` 提供多跳 Agentic 搜索工作流，由外部 Agent 编排调用，不在项目 `skills/` 目录内。
+> 项目级 Skill：`skills/agentic-search/SKILL.md` 提供多跳 Agentic 搜索工作流，由外部 Agent 编排调用。
 
 ---
 
@@ -506,7 +506,7 @@ mcp__workdocs__search {"mode": "reranked", "text": "AH bus arbitration priority"
 # 典型步骤：search(mode=semantic) → explore(mode=neighbors) → read → synthesize
 ```
 
-`SearchStep` 可包含 `semantic` / `hybrid` / `reranked` / `graph` / `chapter` / `metadata` / `synthesize` 等类型，执行时映射到 `search` / `explore` / `read` / `status`。详见 `~/.agents/skills/agentic-search/SKILL.md`。
+`SearchStep` 可包含 `semantic` / `hybrid` / `reranked` / `graph` / `chapter` / `metadata` / `synthesize` 等类型，执行时映射到 `search` / `explore` / `read` / `status`。详见 `skills/agentic-search/SKILL.md`。
 
 ### 6. 读取内容
 
