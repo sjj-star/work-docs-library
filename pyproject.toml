@@ -10,8 +10,6 @@ readme = "README.md"
 license = {text = "MIT"}
 requires-python = ">=3.11"
 dependencies = [
-    "PyPDF2>=3.0.0",
-    "pdfplumber>=0.10.0",
     "pymupdf>=1.23.0",
     "Pillow>=10.0.0",
     "requests>=2.31.0",
@@ -21,6 +19,8 @@ dependencies = [
     "networkx>=3.0",
     "rank-bm25>=0.2.2",
     "sentence-transformers>=3.0.0",
+    # 强制使用 PyTorch CPU 版本，避免 uv 解析到带 NVIDIA CUDA 的 torch。
+    "torch>=2.0.0",
 ]
 
 [project.optional-dependencies]
@@ -81,7 +81,18 @@ addopts = "-q --tb=short"
 [tool.setuptools]
 packages = []
 
+# PyTorch CPU 专用索引，避免 uv 默认解析到带 CUDA 的 torch。
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
+[tool.uv.sources]
+torch = { index = "pytorch-cpu" }
+
 [dependency-groups]
 dev = [
     "pytest>=9.0.3",
+    "ruff>=0.5.0",
+    "pyright>=1.1.0",
 ]
