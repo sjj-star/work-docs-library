@@ -12,11 +12,13 @@
 
 import copy
 import logging
+import time
 from typing import Any
 
 from .config import Config
 from .knowledge_base_service import KnowledgeBaseService
 from .models import Chunk
+from .usage_logger import UsageLogger
 
 logger = logging.getLogger(__name__)
 
@@ -31,6 +33,7 @@ class QueryService:
             service: 已初始化的 KnowledgeBaseService，提供底层原子方法.
         """
         self._svc = service
+        self._usage_logger = UsageLogger(service.db)
 
     # ------------------------------------------------------------------
     # 公共查询接口
@@ -44,6 +47,7 @@ class QueryService:
         include_graph: bool = True,
         graph_depth: int = Config.PLUGIN_SUBGRAPH_DEPTH,
         rerank_candidate_k: int | None = None,
+        session_id: str | None = None,
     ) -> dict[str, Any]:
         """统一搜索入口.
 
@@ -54,10 +58,12 @@ class QueryService:
             include_graph: 是否通过桥接索引扩展相关实体/关系
             graph_depth: 子图扩展深度
             rerank_candidate_k: reranked 模式候选集大小
+            session_id: 可选会话跟踪 ID
 
         Returns:
             {"chunks": [...], "entities": [...], "relations": [...], "source_documents": [...]}
         """
+        start = time.time()
         if mode == "semantic":
             raw_results = self._svc.search_semantic(text, top_k=top_k)
         elif mode == "hybrid":
@@ -69,40 +75,63 @@ class QueryService:
         else:
             raise ValueError(f"Unsupported search mode: {mode}")
 
-        chunks = [
-            {"score": r["score"], "chunk": copy.deepcopy(r["chunk"])} for r in raw_results
-        ]
+        chunks = [{"score": r["score"], "chunk": copy.deepcopy(r["chunk"])} for r in raw_results]
 
         if not include_graph:
-            return {
+            result = {
                 "chunks": chunks,
                 "entities": [],
                 "relations": [],
                 "source_documents": self._collect_source_documents(chunks),
             }
+            self._usage_logger.log_query(
+                tool_name="search",
+                mode=mode,
+                params={"text": text, "top_k": top_k, "include_graph": False},
+                result=result,
+                session_id=session_id,
+                start_time=start,
+            )
+            return result
 
         context = self._collect_related_context(
             [c["chunk"].id for c in chunks if c["chunk"].id is not None],
             graph_depth=graph_depth,
         )
 
-        return {
+        result = {
             "chunks": chunks,
             "entities": context["entities"],
             "relations": context["relations"],
             "source_documents": self._collect_source_documents(chunks),
         }
+        self._usage_logger.log_query(
+            tool_name="search",
+            mode=mode,
+            params={
+                "text": text,
+                "top_k": top_k,
+                "include_graph": True,
+                "graph_depth": graph_depth,
+            },
+            result=result,
+            session_id=session_id,
+            start_time=start,
+        )
+        return result
 
-    def explore(self, mode: str, **kwargs: Any) -> dict[str, Any]:
+    def explore(self, mode: str, session_id: str | None = None, **kwargs: Any) -> dict[str, Any]:
         """统一图谱探索入口.
 
         Args:
             mode: entity | neighbors | subgraph | path | provenance | conflicts
+            session_id: 可选会话跟踪 ID
             **kwargs: 各模式所需参数
 
         Returns:
             统一包装的结果字典，只有对应 mode 的字段有值.
         """
+        start = time.time()
         result: dict[str, Any] = {"success": True, "mode": mode}
 
         if mode == "entity":
@@ -120,6 +149,14 @@ class QueryService:
         else:
             raise ValueError(f"Unsupported explore mode: {mode}")
 
+        self._usage_logger.log_query(
+            tool_name="explore",
+            mode=mode,
+            params={"mode": mode, **kwargs},
+            result=result,
+            session_id=session_id,
+            start_time=start,
+        )
         return result
 
     def read(
@@ -130,6 +167,7 @@ class QueryService:
         concept: str | None = None,
         chunk_db_id: int | None = None,
         with_entities: bool = True,
+        session_id: str | None = None,
     ) -> dict[str, Any]:
         """统一内容读取入口.
 
@@ -140,23 +178,41 @@ class QueryService:
             concept: 概念名匹配
             chunk_db_id: 直接按 block DB ID 查询
             with_entities: 是否返回关联实体/关系
+            session_id: 可选会话跟踪 ID
 
         Returns:
             {"query_type": ..., "content": ..., "chunks": ..., "entities": ..., "relations": ...}
         """
+        start = time.time()
         if chunk_db_id is not None:
-            return self._read_by_chunk(chunk_db_id, with_entities=with_entities)
-
-        if chapter is not None or chapter_regex is not None or concept is not None:
+            result = self._read_by_chunk(chunk_db_id, with_entities=with_entities)
+        elif chapter is not None or chapter_regex is not None or concept is not None:
             chunks = self._svc.query_chunks(
                 doc_id=doc_id,
                 chapter=chapter,
                 chapter_regex=chapter_regex,
                 concept=concept,
             )
-            return self._build_read_result(chunks, with_entities=with_entities)
+            result = self._build_read_result(chunks, with_entities=with_entities)
+        else:
+            raise ValueError("Provide chunk_db_id, or doc_id with chapter/chapter_regex/concept")
 
-        raise ValueError("Provide chunk_db_id, or doc_id with chapter/chapter_regex/concept")
+        self._usage_logger.log_query(
+            tool_name="read",
+            mode=None,
+            params={
+                "doc_id": doc_id,
+                "chapter": chapter,
+                "chapter_regex": chapter_regex,
+                "concept": concept,
+                "chunk_db_id": chunk_db_id,
+                "with_entities": with_entities,
+            },
+            result=result,
+            session_id=session_id,
+            start_time=start,
+        )
+        return result
 
     # ------------------------------------------------------------------
     # 内部方法

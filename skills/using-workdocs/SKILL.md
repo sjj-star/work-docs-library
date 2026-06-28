@@ -41,7 +41,7 @@ using-workdocs (this skill)
 | `mcp__workdocs__explore` | Explore the knowledge graph. `mode=entity` / `neighbors` / `subgraph` / `path` / `provenance` / `conflicts`. |
 | `mcp__workdocs__read` | Read source content: a chapter, a content block, or a list of blocks by doc/chapter/concept. |
 | `mcp__workdocs__ingest` | Import PDF(s) end-to-end. |
-| `mcp__workdocs__status` | Status dashboard. `scope=overview/documents/vectors/graph/blocks/headings/conflicts/feedback/config/quality/ingest_pipeline/toc/all`. |
+| `mcp__workdocs__status` | Status dashboard. `scope=overview/documents/vectors/graph/blocks/headings/conflicts/feedback/config/quality/ingest_pipeline/toc/trace/usage/all`. `trace` replays query paths; `usage` audits hotspots and coldspots. |
 
 > **Note:** `config` and `toc` are now scopes of `status`, not standalone tools.
 
@@ -56,6 +56,16 @@ Map the user's intent to one of the five atomic tools:
 - **Check progress / config / TOC** → `status`
 
 No LLM synthesis or smart routing happens inside the plugin. The Agent/Skill performs all intelligent dynamic analysis by calling the atomic tools and composing their structured outputs.
+
+## Sub-skills
+
+Load the appropriate sub-skill for the workflow:
+
+- **Import/update documents** → `ingesting-workdocs`
+- **Single/simple technical question** → `exploring-workdocs`
+- **Complex multi-hop retrieval** → `agentic-search`
+- **Synthesize a cited answer** → `synthesizing-workdocs`
+- **User reports an error in an entity, relation, or answer** → `fixing-workdocs`
 
 ## Rules
 

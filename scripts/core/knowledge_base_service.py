@@ -216,6 +216,15 @@ class KnowledgeBaseService:
                     self._sync_bridge_for_doc(doc_id)
                 except Exception as e:
                     logger.warning(f"Bridge 同步失败，重启后自动恢复 | doc_id={doc_id} | error={e}")
+            # 自动清理使用日志
+            try:
+                deleted = self.db.cleanup_usage_logs(
+                    max_days=Config.USAGE_LOG_MAX_DAYS,
+                    max_rows=Config.USAGE_LOG_MAX_ROWS,
+                )
+                logger.info(f"Usage logs cleaned: {deleted}")
+            except Exception as e:
+                logger.warning(f"Usage log cleanup failed: {e}")
             return doc_ids
         finally:
             pipe.close()

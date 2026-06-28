@@ -69,6 +69,10 @@ MCP_TOOL_SCHEMAS: dict[str, dict] = {
                 "type": "integer",
                 "description": "reranked 模式候选集大小（可选）",
             },
+            "session_id": {
+                "type": "string",
+                "description": "可选会话跟踪 ID，用于 status scope=trace 回放路径",
+            },
         },
         "required": ["text"],
     },
@@ -115,6 +119,10 @@ MCP_TOOL_SCHEMAS: dict[str, dict] = {
                 "description": "最大返回数量",
                 "default": Config.PLUGIN_DEFAULT_LIMIT,
             },
+            "session_id": {
+                "type": "string",
+                "description": "可选会话跟踪 ID，用于 status scope=trace 回放路径",
+            },
         },
         "required": ["mode"],
     },
@@ -130,6 +138,10 @@ MCP_TOOL_SCHEMAS: dict[str, dict] = {
                 "type": "boolean",
                 "description": "是否同时返回关联图谱实体/关系",
                 "default": True,
+            },
+            "session_id": {
+                "type": "string",
+                "description": "可选会话跟踪 ID，用于 status scope=trace 回放路径",
             },
         },
         "anyOf": [
@@ -159,11 +171,14 @@ MCP_TOOL_SCHEMAS: dict[str, dict] = {
                     "quality",
                     "ingest_pipeline",
                     "toc",
+                    "trace",
+                    "usage",
                     "all",
                 ],
                 "default": "overview",
             },
             "top_n": {"type": "integer", "description": "最近处理文档数量", "default": 20},
+            "session_id": {"type": "string", "description": "scope=trace 时过滤会话路径"},
         },
     },
 }

@@ -416,13 +416,16 @@ def tool_status(params: dict) -> dict:
         doc_id: 可选，提供时返回该文档的详细状态和进度统计（与 scope=overview 兼容）
         scope: 状态维度，可选值：
             overview（默认）, documents, vectors, graph, blocks, headings,
-            conflicts, feedback, config, quality, ingest_pipeline, toc, all
+            conflicts, feedback, config, quality, ingest_pipeline, toc,
+            trace, usage, all
         top_n: 列表类数据默认返回条数（默认 20）
+        session_id: scope=trace 时用于过滤会话路径
     """
     svc = _get_service()
     doc_id = params.get("doc_id")
     scope = params.get("scope", "overview")
     top_n = params.get("top_n", 20)
+    session_id = params.get("session_id")
     if not isinstance(top_n, int) or top_n < 0:
         top_n = 20
 
@@ -503,6 +506,10 @@ def tool_status(params: dict) -> dict:
             return collector.collect_quality_status()
         if scope == "ingest_pipeline":
             return collector.collect_ingest_pipeline_status()
+        if scope == "trace":
+            return collector.collect_trace_status(session_id=session_id, top_n=top_n)
+        if scope == "usage":
+            return collector.collect_usage_status(top_n=top_n)
         if scope == "all":
             return collector.collect_all(top_n)
     except Exception as e:
@@ -540,6 +547,7 @@ def tool_search(params: dict) -> dict:
     include_graph = params.get("include_graph", True)
     graph_depth = params.get("graph_depth", Config.PLUGIN_SUBGRAPH_DEPTH)
     rerank_candidate_k = params.get("rerank_candidate_k")
+    session_id = params.get("session_id")
 
     qs = _get_query_service()
     try:
@@ -550,6 +558,7 @@ def tool_search(params: dict) -> dict:
             include_graph=include_graph,
             graph_depth=graph_depth,
             rerank_candidate_k=rerank_candidate_k,
+            session_id=session_id,
         )
     except Exception as e:
         logger.exception("search failed")
@@ -559,9 +568,7 @@ def tool_search(params: dict) -> dict:
         "success": True,
         "text": text,
         "mode": mode,
-        "chunks": [
-            {"score": c["score"], **_chunk_to_dict(c["chunk"])} for c in result["chunks"]
-        ],
+        "chunks": [{"score": c["score"], **_chunk_to_dict(c["chunk"])} for c in result["chunks"]],
         "entities": [_entity_to_dict(e) for e in result["entities"]],
         "relations": [_relation_to_dict(r) for r in result["relations"]],
         "source_documents": result["source_documents"],
@@ -582,9 +589,11 @@ def tool_explore(params: dict) -> dict:
     if mode not in _EXPLORE_MODES:
         return {"success": False, "error": f"Unsupported explore mode: {mode}"}
 
+    session_id = params.get("session_id")
+
     qs = _get_query_service()
     try:
-        return qs.explore(**params)
+        return qs.explore(session_id=session_id, **params)
     except ValueError as e:
         return {"success": False, "error": str(e)}
     except Exception as e:
@@ -610,16 +619,13 @@ def tool_read(params: dict) -> dict:
     concept = params.get("concept")
     with_entities = params.get("with_entities", True)
 
-    if (
-        chunk_db_id is None
-        and chapter is None
-        and chapter_regex is None
-        and concept is None
-    ):
+    if chunk_db_id is None and chapter is None and chapter_regex is None and concept is None:
         return {
             "success": False,
             "error": "Provide chunk_db_id, or doc_id with chapter/chapter_regex/concept",
         }
+
+    session_id = params.get("session_id")
 
     qs = _get_query_service()
     try:
@@ -630,6 +636,7 @@ def tool_read(params: dict) -> dict:
             concept=concept,
             chunk_db_id=chunk_db_id,
             with_entities=with_entities,
+            session_id=session_id,
         )
     except ValueError as e:
         return {"success": False, "error": str(e)}
@@ -1011,6 +1018,8 @@ def tool_config(params: dict) -> dict:
         "PLUGIN_DEFAULT_LIMIT": "Plugin 配置",
         "PLUGIN_BM25_TOP_K": "Plugin 配置",
         "PLUGIN_HYBRID_RRF_K": "Plugin 配置",
+        "USAGE_LOG_MAX_DAYS": "Plugin 配置",
+        "USAGE_LOG_MAX_ROWS": "Plugin 配置",
         "RERANK_CROSS_ENCODER_MODEL": "Plugin 配置",
         "GRAPH_MAX_PATH_DEPTH": "Pipeline 配置",
         "BLOCK_MAX_CHARS": "Pipeline 配置",
@@ -1034,6 +1043,37 @@ def tool_config(params: dict) -> dict:
         "embedding_configured": Config.embedding_configured(),
         "config_groups": groups,
     }
+
+
+# ---------------------------------------------------------------------------
+# 使用日志管理工具（admin-only，不暴露为 MCP）
+# ---------------------------------------------------------------------------
+
+
+def tool_usage_report(params: dict) -> dict:
+    """输出使用日志审计报告.
+
+    参数:
+        top_n: 返回条数（默认 20）
+    """
+    svc = _get_service()
+    top_n = params.get("top_n", 20)
+    collector = StatusCollector(svc)
+    return collector.collect_usage_status(top_n=top_n)
+
+
+def tool_usage_clean(params: dict) -> dict:
+    """清理旧的使用日志.
+
+    参数:
+        max_days: 保留天数（默认 Config.USAGE_LOG_MAX_DAYS）
+        max_rows: 最大保留条数（默认 Config.USAGE_LOG_MAX_ROWS）
+    """
+    svc = _get_service()
+    max_days = params.get("max_days", Config.USAGE_LOG_MAX_DAYS)
+    max_rows = params.get("max_rows", Config.USAGE_LOG_MAX_ROWS)
+    deleted = svc.db.cleanup_usage_logs(max_days=max_days, max_rows=max_rows)
+    return {"success": True, "deleted": deleted}
 
 
 # ---------------------------------------------------------------------------
@@ -1065,4 +1105,6 @@ TOOL_MAP = {
     "graph_conflicts": tool_graph_conflicts,
     "graph_provenance": tool_graph_provenance,
     "rebuild_global_graph": tool_rebuild_global_graph,
+    "usage_report": tool_usage_report,
+    "usage_clean": tool_usage_clean,
 }

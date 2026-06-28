@@ -336,16 +336,32 @@ class FakeQueryService:
     def __init__(self, svc=None):
         self._svc = svc
 
-    def search(self, text, top_k=5, mode="hybrid", include_graph=True,
-               graph_depth=1, rerank_candidate_k=None):
+    def search(
+        self,
+        text,
+        top_k=5,
+        mode="hybrid",
+        include_graph=True,
+        graph_depth=1,
+        rerank_candidate_k=None,
+        session_id=None,
+    ):
         assert text == "SPI"
         assert mode == "hybrid"
         return _fake_search_result()
 
 
 class FakeQueryServiceRerank:
-    def search(self, text, top_k=5, mode="hybrid", include_graph=True,
-               graph_depth=1, rerank_candidate_k=None):
+    def search(
+        self,
+        text,
+        top_k=5,
+        mode="hybrid",
+        include_graph=True,
+        graph_depth=1,
+        rerank_candidate_k=None,
+        session_id=None,
+    ):
         assert mode == "reranked"
         assert rerank_candidate_k == 20
         return _fake_search_result()

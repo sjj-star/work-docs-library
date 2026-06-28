@@ -4,6 +4,7 @@
 结构化统计信息。
 """
 
+import json
 import logging
 import tempfile
 from collections import defaultdict
@@ -295,10 +296,7 @@ class StatusCollector:
         metrics["embedded_blocks"] = db_embedded
         metrics["faiss_vectors"] = faiss_count
         if db_embedded != faiss_count:
-            msg = (
-                f"DB embedded blocks ({db_embedded}) 与 "
-                f"FAISS vectors ({faiss_count}) 不一致"
-            )
+            msg = f"DB embedded blocks ({db_embedded}) 与 FAISS vectors ({faiss_count}) 不一致"
             issues.append(
                 {
                     "severity": "error",
@@ -439,6 +437,100 @@ class StatusCollector:
         }
 
     # ------------------------------------------------------------------
+    # usage trace / audit
+    # ------------------------------------------------------------------
+
+    def collect_trace_status(
+        self, session_id: str | None = None, top_n: int = 50
+    ) -> dict[str, Any]:
+        """查询路径回放."""
+        traces = self.svc.db.get_usage_trace(session_id=session_id, limit=top_n)
+        return {
+            "success": True,
+            "scope": "trace",
+            "session_id": session_id,
+            "count": len(traces),
+            "traces": traces,
+        }
+
+    def collect_usage_status(self, top_n: int = 20) -> dict[str, Any]:
+        """使用审计报告：热点、冷点、未使用实体/关系、被标记项."""
+        report = self.svc.db.get_usage_report(top_n=top_n)
+
+        # 未使用实体/关系：在图中存在但在 usage_logs 的 entity_hits/relation_hits 中未出现
+        used_entities = set()
+        used_relations = set()
+        for row in self.svc.db.get_usage_trace(limit=10000):
+            for e in json.loads(row.get("entity_hits") or "[]"):
+                used_entities.add(f"{e.get('type')}::{e.get('name')}")
+            for r in json.loads(row.get("relation_hits") or "[]"):
+                used_relations.add(
+                    f"{r.get('from_type')}::{r.get('from_name')}--"
+                    f"{r.get('rel_type')}--{r.get('to_type')}::{r.get('to_name')}"
+                )
+
+        unused_entities: list[dict[str, str]] = []
+        unverified_entities: list[dict[str, Any]] = []
+        for entity in self.svc.graph.all_entities():
+            eid = f"{entity.entity_type}::{entity.name}"
+            if eid not in used_entities:
+                unused_entities.append({"type": entity.entity_type, "name": entity.name})
+            if not entity.verified:
+                unverified_entities.append(
+                    {
+                        "type": entity.entity_type,
+                        "name": entity.name,
+                        "confidence": entity.confidence,
+                    }
+                )
+
+        unused_relations: list[dict[str, str]] = []
+        unverified_relations: list[dict[str, Any]] = []
+        for relation in self.svc.graph.all_relations():
+            rid = (
+                f"{relation.from_type}::{relation.from_name}--"
+                f"{relation.rel_type}--{relation.to_type}::{relation.to_name}"
+            )
+            if rid not in used_relations:
+                unused_relations.append(
+                    {
+                        "rel_type": relation.rel_type,
+                        "from_type": relation.from_type,
+                        "from_name": relation.from_name,
+                        "to_type": relation.to_type,
+                        "to_name": relation.to_name,
+                    }
+                )
+            if not relation.verified:
+                unverified_relations.append(
+                    {
+                        "rel_type": relation.rel_type,
+                        "from": f"{relation.from_type}::{relation.from_name}",
+                        "to": f"{relation.to_type}::{relation.to_name}",
+                        "confidence": relation.confidence,
+                    }
+                )
+
+        return {
+            "success": True,
+            "scope": "usage",
+            "summary": {
+                **report,
+                "unused_entities": len(unused_entities),
+                "unused_relations": len(unused_relations),
+                "unverified_entities": len(unverified_entities),
+                "unverified_relations": len(unverified_relations),
+            },
+            "hot_blocks": report["hot_blocks"],
+            "cold_blocks": report["cold_blocks"],
+            "recent_flagged": report["recent_flagged"],
+            "unused_entities_sample": unused_entities[:top_n],
+            "unused_relations_sample": unused_relations[:top_n],
+            "unverified_entities_sample": unverified_entities[:top_n],
+            "unverified_relations_sample": unverified_relations[:top_n],
+        }
+
+    # ------------------------------------------------------------------
     # all
     # ------------------------------------------------------------------
 
@@ -457,4 +549,6 @@ class StatusCollector:
             "config": self.collect_config_status(),
             "quality": self.collect_quality_status(),
             "ingest_pipeline": self.collect_ingest_pipeline_status(),
+            "trace": self.collect_trace_status(top_n=top_n),
+            "usage": self.collect_usage_status(top_n=top_n),
         }

@@ -44,6 +44,8 @@ _ADMIN_COMMANDS: dict[str, str] = {
     "graph_upsert_relation": "graph_upsert_relation",
     "graph_delete_relation": "graph_delete_relation",
     "graph_feedback": "graph_feedback",
+    "usage_report": "usage_report",
+    "usage_clean": "usage_clean",
 }
 
 

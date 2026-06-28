@@ -98,6 +98,15 @@ The C28x CLA handles EPWM safety trips via the ePWM Trip-Zone submodule (`EPWM_T
 - If one step returns empty: do not stop. Continue with the remaining steps and note the gap in the final answer.
 - If the plan becomes unclear after initial results: replan with at most 2 additional steps, then synthesize.
 
+## Handling User Corrections
+
+If the user challenges any entity or relation in your synthesized answer:
+
+1. Load `fixing-workdocs`.
+2. Use `status scope=trace` to see which step activated the problematic object.
+3. Use `explore(mode=provenance)` to find its source blocks.
+4. Propose a fix (flag/update/delete) and ask the user to confirm before running any admin command.
+
 ## Red Flags — STOP and Replan
 
 | Red flag | Why it is wrong |

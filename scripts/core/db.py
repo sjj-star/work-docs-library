@@ -14,6 +14,7 @@ from .models import Chapter, Document, EvalDataset, EvalQuestion
 
 logger = logging.getLogger(__name__)
 
+
 class KnowledgeDB:
     """KnowledgeDB 类."""
 
@@ -94,6 +95,28 @@ class KnowledgeDB:
             rating INTEGER,
             comment TEXT,
             created_at TEXT DEFAULT CURRENT_TIMESTAMP
+        );
+        CREATE TABLE IF NOT EXISTS usage_logs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            session_id TEXT,
+            tool_name TEXT NOT NULL,
+            mode TEXT,
+            params TEXT,
+            vector_hits TEXT,
+            entity_hits TEXT,
+            relation_hits TEXT,
+            flagged_items TEXT,
+            elapsed_ms INTEGER,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP
+        );
+        CREATE INDEX IF NOT EXISTS idx_usage_logs_session ON usage_logs(session_id);
+        CREATE INDEX IF NOT EXISTS idx_usage_logs_tool ON usage_logs(tool_name);
+        CREATE INDEX IF NOT EXISTS idx_usage_logs_created ON usage_logs(created_at);
+        CREATE TABLE IF NOT EXISTS block_activation (
+            block_db_id INTEGER PRIMARY KEY,
+            hit_count INTEGER DEFAULT 0,
+            first_hit_at TEXT,
+            last_hit_at TEXT
         );
         CREATE TABLE IF NOT EXISTS eval_datasets (
             name TEXT PRIMARY KEY,
@@ -657,6 +680,7 @@ class KnowledgeDB:
                 """
             ).fetchall()
         from collections import defaultdict
+
         docs: dict[str, dict[str, int]] = defaultdict(
             lambda: {"total": 0, "pending": 0, "embedded": 0, "done": 0, "skipped": 0, "failed": 0}
         )
@@ -666,10 +690,7 @@ class KnowledgeDB:
             count = row["c"]
             docs[doc_id]["total"] += count
             docs[doc_id][status] = count
-        return [
-            {"doc_id": doc_id, **counts}
-            for doc_id, counts in sorted(docs.items())
-        ]
+        return [{"doc_id": doc_id, **counts} for doc_id, counts in sorted(docs.items())]
 
     def count_headings(self) -> dict[str, Any]:
         """统计 heading_maps 总数及层级分布."""
@@ -710,9 +731,10 @@ class KnowledgeDB:
         with self._connect() as conn:
             total = conn.execute("SELECT COUNT(*) as c FROM feedback").fetchone()["c"] or 0
             avg_row = conn.execute("SELECT AVG(rating) as avg FROM feedback").fetchone()
-            low = conn.execute(
-                "SELECT COUNT(*) as c FROM feedback WHERE rating <= 0"
-            ).fetchone()["c"] or 0
+            low = (
+                conn.execute("SELECT COUNT(*) as c FROM feedback WHERE rating <= 0").fetchone()["c"]
+                or 0
+            )
         return {
             "total": total,
             "average_rating": round(float(avg_row["avg"] or 0), 2),
@@ -788,9 +810,7 @@ class KnowledgeDB:
     def load_eval_dataset(self, name: str) -> EvalDataset:
         """加载评估数据集及其问题列表."""
         with self._connect() as conn:
-            row = conn.execute(
-                "SELECT * FROM eval_datasets WHERE name = ?", (name,)
-            ).fetchone()
+            row = conn.execute("SELECT * FROM eval_datasets WHERE name = ?", (name,)).fetchone()
             if not row:
                 raise ValueError(f"Eval dataset not found: {name}")
             q_rows = conn.execute(
@@ -830,3 +850,187 @@ class KnowledgeDB:
             conn.execute("DELETE FROM eval_questions WHERE dataset_name = ?", (name,))
             cur = conn.execute("DELETE FROM eval_datasets WHERE name = ?", (name,))
             return cur.rowcount > 0
+
+    # -- 使用日志与激活统计 --
+
+    def log_usage(
+        self,
+        tool_name: str,
+        mode: str | None,
+        params: dict[str, Any],
+        vector_hits: list[dict[str, Any]],
+        entity_hits: list[dict[str, Any]],
+        relation_hits: list[dict[str, Any]],
+        elapsed_ms: int,
+        session_id: str | None = None,
+    ) -> int:
+        """记录一次知识库使用日志.
+
+        Args:
+            tool_name: search / explore / read / status / ingest
+            mode: 子模式，例如 hybrid / entity
+            params: 参数摘要（会被 json 序列化）
+            vector_hits: 向量命中块列表
+            entity_hits: 命中实体列表
+            relation_hits: 命中关系列表
+            elapsed_ms: 耗时
+            session_id: 可选会话跟踪 ID
+
+        Returns:
+            日志行 id
+        """
+        now = datetime.now().isoformat()
+        with self._connect() as conn:
+            cur = conn.execute(
+                """
+                INSERT INTO usage_logs (
+                    session_id, tool_name, mode, params,
+                    vector_hits, entity_hits, relation_hits,
+                    elapsed_ms, created_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    session_id,
+                    tool_name,
+                    mode,
+                    json.dumps(params, ensure_ascii=False),
+                    json.dumps(vector_hits, ensure_ascii=False),
+                    json.dumps(entity_hits, ensure_ascii=False),
+                    json.dumps(relation_hits, ensure_ascii=False),
+                    elapsed_ms,
+                    now,
+                ),
+            )
+            assert cur.lastrowid is not None
+            return cur.lastrowid
+
+    def increment_block_activation(self, block_db_ids: list[int]) -> None:
+        """增加向量 block 的命中计数."""
+        now = datetime.now().isoformat()
+        with self._connect() as conn:
+            for bid in block_db_ids:
+                conn.execute(
+                    """
+                    INSERT INTO block_activation (block_db_id, hit_count, first_hit_at, last_hit_at)
+                    VALUES (?, 1, ?, ?)
+                    ON CONFLICT(block_db_id) DO UPDATE SET
+                        hit_count = hit_count + 1,
+                        last_hit_at = excluded.last_hit_at
+                    """,
+                    (bid, now, now),
+                )
+
+    def get_usage_trace(
+        self, session_id: str | None = None, limit: int = 50
+    ) -> list[dict[str, Any]]:
+        """获取使用路径，按时间倒序."""
+        sql = "SELECT * FROM usage_logs"
+        params: tuple[Any, ...] = ()
+        if session_id:
+            sql += " WHERE session_id = ?"
+            params = (session_id,)
+        sql += " ORDER BY created_at DESC LIMIT ?"
+        params += (limit,)
+        with self._connect() as conn:
+            rows = conn.execute(sql, params).fetchall()
+        return [dict(r) for r in rows]
+
+    def get_usage_report(self, top_n: int = 20) -> dict[str, Any]:
+        """获取使用审计报告."""
+        with self._connect() as conn:
+            total_logs = conn.execute("SELECT COUNT(*) as c FROM usage_logs").fetchone()["c"]
+            tool_counts = conn.execute(
+                "SELECT tool_name, COUNT(*) as c FROM usage_logs GROUP BY tool_name"
+            ).fetchall()
+            flagged = conn.execute(
+                """
+                SELECT COUNT(*) as c FROM usage_logs
+                WHERE flagged_items IS NOT NULL AND flagged_items != '[]'
+                """
+            ).fetchone()["c"]
+            recent_flagged = conn.execute(
+                """
+                SELECT id, session_id, tool_name, flagged_items, created_at
+                FROM usage_logs
+                WHERE flagged_items IS NOT NULL AND flagged_items != '[]'
+                ORDER BY created_at DESC LIMIT ?
+                """,
+                (top_n,),
+            ).fetchall()
+            hot_blocks = conn.execute(
+                "SELECT * FROM block_activation ORDER BY hit_count DESC LIMIT ?",
+                (top_n,),
+            ).fetchall()
+            cold_blocks = conn.execute(
+                "SELECT * FROM block_activation ORDER BY hit_count ASC LIMIT ?",
+                (top_n,),
+            ).fetchall()
+        return {
+            "total_logs": total_logs or 0,
+            "tool_counts": {r["tool_name"]: r["c"] for r in tool_counts},
+            "flagged_count": flagged or 0,
+            "recent_flagged": [dict(r) for r in recent_flagged],
+            "hot_blocks": [dict(r) for r in hot_blocks],
+            "cold_blocks": [dict(r) for r in cold_blocks],
+        }
+
+    def cleanup_usage_logs(self, max_days: int = 30, max_rows: int = 10000) -> dict[str, int]:
+        """清理旧的使用日志.
+
+        超出 max_days 或 max_rows 任一阈值时，按时间顺序删除最旧的。
+        """
+        cutoff_dt = datetime.fromtimestamp(datetime.now().timestamp() - max_days * 24 * 3600)
+        with self._connect() as conn:
+            # 按时间删除
+            cur1 = conn.execute(
+                "DELETE FROM usage_logs WHERE created_at < ?",
+                (cutoff_dt.isoformat(),),
+            )
+            deleted_by_time = cur1.rowcount
+
+            # 按容量删除
+            total = conn.execute("SELECT COUNT(*) as c FROM usage_logs").fetchone()["c"] or 0
+            deleted_by_size = 0
+            if total > max_rows:
+                to_delete = total - max_rows
+                cur2 = conn.execute(
+                    """
+                    DELETE FROM usage_logs
+                    WHERE id IN (
+                        SELECT id FROM usage_logs ORDER BY created_at ASC LIMIT ?
+                    )
+                    """,
+                    (to_delete,),
+                )
+                deleted_by_size = cur2.rowcount
+        return {"deleted_by_time": deleted_by_time, "deleted_by_size": deleted_by_size}
+
+    def add_usage_flag(
+        self,
+        log_id: int,
+        kind: str,
+        identifier: dict[str, Any],
+        reason: str,
+    ) -> bool:
+        """在指定日志上添加问题标记.
+
+        Args:
+            log_id: usage_logs 行 id
+            kind: entity / relation / block
+            identifier: 对象标识，例如 {"type": "Module", "name": "EPWM_TZ"}
+            reason: 问题描述
+        """
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT flagged_items FROM usage_logs WHERE id = ?", (log_id,)
+            ).fetchone()
+            if not row:
+                return False
+            flags: list[dict[str, Any]] = json.loads(row["flagged_items"] or "[]")
+            flags.append({"kind": kind, "identifier": identifier, "reason": reason})
+            conn.execute(
+                "UPDATE usage_logs SET flagged_items = ? WHERE id = ?",
+                (json.dumps(flags, ensure_ascii=False), log_id),
+            )
+        return True

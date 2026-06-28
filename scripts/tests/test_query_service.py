@@ -42,13 +42,18 @@ def test_query_service_search_basic(tmp_path, monkeypatch):
     from core.models import Chunk
 
     def fake_search_hybrid(text, top_k=5):
-        return [{"score": 0.95, "chunk": Chunk(
-            id=db_id,
-            doc_id="d1",
-            chunk_id="b1",
-            content="Test content about PIEIER register",
-            chunk_type="text",
-        )}]
+        return [
+            {
+                "score": 0.95,
+                "chunk": Chunk(
+                    id=db_id,
+                    doc_id="d1",
+                    chunk_id="b1",
+                    content="Test content about PIEIER register",
+                    chunk_type="text",
+                ),
+            }
+        ]
 
     monkeypatch.setattr(svc, "search_hybrid", fake_search_hybrid)
 

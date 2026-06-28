@@ -115,6 +115,10 @@ class Config:
     PLUGIN_SUBGRAPH_DEPTH: int = 0  # 将在下方初始化
     PLUGIN_DEFAULT_LIMIT: int = 0  # 将在下方初始化
 
+    # 使用日志清理策略
+    USAGE_LOG_MAX_DAYS: int = 0  # 将在下方初始化
+    USAGE_LOG_MAX_ROWS: int = 0  # 将在下方初始化
+
     # BM25 / hybrid retrieval config
     PLUGIN_BM25_TOP_K: int = 0  # 将在下方初始化
     PLUGIN_HYBRID_RRF_K: int = 0  # 将在下方初始化
@@ -224,6 +228,10 @@ class Config:
         cls.PLUGIN_GRAPH_MAX_DEPTH = int(_resolve_config("WORKDOCS_PLUGIN_GRAPH_MAX_DEPTH", "3"))
         cls.PLUGIN_SUBGRAPH_DEPTH = int(_resolve_config("WORKDOCS_PLUGIN_SUBGRAPH_DEPTH", "1"))
         cls.PLUGIN_DEFAULT_LIMIT = int(_resolve_config("WORKDOCS_PLUGIN_DEFAULT_LIMIT", "100"))
+
+        # 使用日志清理策略
+        cls.USAGE_LOG_MAX_DAYS = int(_resolve_config("WORKDOCS_USAGE_LOG_MAX_DAYS", "30"))
+        cls.USAGE_LOG_MAX_ROWS = int(_resolve_config("WORKDOCS_USAGE_LOG_MAX_ROWS", "10000"))
 
         # BM25 / hybrid retrieval config
         cls.PLUGIN_BM25_TOP_K = int(_resolve_config("WORKDOCS_PLUGIN_BM25_TOP_K", "50"))

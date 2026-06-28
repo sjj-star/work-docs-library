@@ -99,7 +99,16 @@ User intent
 - `search.include_graph`: default `true` so you get entities and relations for the next explore step.
 - `explore` `neighbors`/`subgraph` depth: 1 for initial context, 2 only if relations are sparse.
 - Prefer exact `name` in `explore`; if no result, try substring or wildcard.
-- Filter out low-confidence (`confidence < 0.5`) or unverified results unless the user asks for everything.
+- Prefer `verified` entities/relations in the final answer. If you include unverified results, explicitly say so.
+
+## Handling User Corrections
+
+If the user says an entity, relation, or answer is wrong:
+
+1. Load `fixing-workdocs`.
+2. Use `status scope=trace` to replay the retrieval path.
+3. Use `explore(mode=provenance)` and `read` to locate the source.
+4. Generate the appropriate admin command and ask the user for confirmation.
 
 ## Red Flags — STOP and Correct
 

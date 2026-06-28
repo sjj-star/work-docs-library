@@ -243,6 +243,7 @@ flowchart LR
 | `exploring-workdocs` | `skills/exploring-workdocs/SKILL.md` | 查询、溯源、图谱探索 | 技术问答、关系查询 |
 | `agentic-search` | `skills/agentic-search/SKILL.md` | 多跳 planned retrieval | 问题跨越多个文档，需要结构化检索计划 |
 | `synthesizing-workdocs` | `skills/synthesizing-workdocs/SKILL.md` | 把检索结果综合为带引用报告 | 已拿到 search/explore/read 结果，需要生成答案 |
+| `fixing-workdocs` | `skills/fixing-workdocs/SKILL.md` | 错误定位与图谱修正 | 用户指出实体/关系/答案错误 |
 
 **推荐调用路径：**
 
@@ -250,7 +251,8 @@ flowchart LR
 using-workdocs（判断意图）
   ├── 导入/更新 → ingesting-workdocs → mcp__workdocs__ingest + status 轮询
   ├── 技术问答 → exploring-workdocs → search / explore / read → synthesizing-workdocs
-  └── 复杂多跳 → agentic-search → 分解 SearchStep → 逐步执行 search / explore / read → synthesizing-workdocs
+  ├── 复杂多跳 → agentic-search → 分解 SearchStep → 逐步执行 search / explore / read → synthesizing-workdocs
+  └── 用户纠错 → fixing-workdocs → status scope=trace → explore provenance → admin_tools 修正
 ```
 
 ---
@@ -267,8 +269,10 @@ work-docs-library/
 │   │   └── SKILL.md              # 文档入库/更新/重试工作流
 │   ├── exploring-workdocs/
 │   │   └── SKILL.md              # 语义搜索 + 图谱联合查询工作流
-│   └── synthesizing-workdocs/
-│       └── SKILL.md              # 把检索结果综合为带引用报告
+│   ├── synthesizing-workdocs/
+│   │   └── SKILL.md              # 把检索结果综合为带引用报告
+│   └── fixing-workdocs/
+│       └── SKILL.md              # 错误定位与图谱修正工作流
 ├── AGENTS.md                     # Agent 开发指南（架构、策略、代码规范）
 ├── README.md                     # 本文件
 ├── scripts/
@@ -596,12 +600,12 @@ python scripts/admin_tools.py run_eval --params '{"dataset_name":"my_eval","retr
 | `mcp__workdocs__explore` | 统一图谱入口：`mode=entity`/`neighbors`/`subgraph`/`path`/`provenance`/`conflicts` |
 | `mcp__workdocs__read` | 按章节、关键词、概念或 `chunk_db_id` 读取 content_block 完整内容，可选返回关联图谱实体/关系 |
 | `mcp__workdocs__ingest` | 一键导入 PDF/目录，自动完成解析→Batch→入库→向量化 |
-| `mcp__workdocs__status` | 状态仪表盘：`scope=overview`/`documents`/`vectors`/`graph`/`blocks`/`headings`/`conflicts`/`feedback`/`config`/`quality`/`ingest_pipeline`/`toc`/`all` |
+| `mcp__workdocs__status` | 状态仪表盘：`scope=overview`/`documents`/`vectors`/`graph`/`blocks`/`headings`/`conflicts`/`feedback`/`config`/`quality`/`ingest_pipeline`/`toc`/`trace`/`usage`/`all`。`trace` 回放查询路径，`usage` 审计使用热点 |
 
 ### 不暴露为 MCP 的内部功能
 
 以下功能直接改写知识库数据或属于人工阶段调试，不进入 MCP 工具面：
-`doc_parse`（对应 `stage1_parse`）、`doc_build_batches`（对应 `stage2_build_jsonl`）、`doc_submit_batches`（对应 `stage3_submit_batches`）、`doc_ingest_results`（对应 `stage4_ingest_results`）、`doc_build_embed_jsonl`（对应 `stage5_build_embed_jsonl`）、`doc_submit_embed_batches`（对应 `stage6_submit_embed_batches`）、`reprocess`、`evaluate` / `run_eval`、`graph_upsert_entity`、`graph_delete_entity`、`graph_upsert_relation`、`graph_delete_relation`、`graph_feedback`、`rebuild_global_graph`。
+`doc_parse`（对应 `stage1_parse`）、`doc_build_batches`（对应 `stage2_build_jsonl`）、`doc_submit_batches`（对应 `stage3_submit_batches`）、`doc_ingest_results`（对应 `stage4_ingest_results`）、`doc_build_embed_jsonl`（对应 `stage5_build_embed_jsonl`）、`doc_submit_embed_batches`（对应 `stage6_submit_embed_batches`）、`reprocess`、`evaluate` / `run_eval`、`graph_upsert_entity`、`graph_delete_entity`、`graph_upsert_relation`、`graph_delete_relation`、`graph_feedback`、`rebuild_global_graph`、`usage_report`、`usage_clean`。
 
 ---
 

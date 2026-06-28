@@ -218,9 +218,10 @@ PYTHONPATH=scripts ./.venv/bin/python -m pytest \
 ### 类型与模型
 - 领域模型使用 `dataclass`（`Chunk`、`Document`、`GraphEntity`、`GraphRelation`、`SubGraphView`、`EvalQuestion`、`EvalDataset`）
 - `Chunk.status`：`pending` → `embedded` → `done`（含 `skipped`、`failed`，`ChunkStatus` StrEnum）
-- `Chunk.chunk_type`：`text` / `table` / `image_desc` / `summary`（`ChunkType` StrEnum）
+- `Chunk.chunk_type`：`text` / `table` / `image_desc`（`ChunkType` StrEnum）
 - `Document.status`：`pending` → `processing` → `batch_submitted` → `done` / `failed`（`DocumentStatus` StrEnum）
-- `GraphEntity`/`GraphRelation` 字段：`entity_type`/`rel_type`、`name`、`properties`、`doc_properties`（按文档原始属性快照）、`source_doc_ids`、`source_chapter`、`confidence`、`verified`、`created_at`、`updated_at`、`feedback_score`
+- `GraphEntity`/`GraphRelation` 字段：`entity_type`/`rel_type`、`name`、`properties`、`doc_properties`（按文档原始属性快照）、`source_doc_ids`、`source_chapter`、`confidence`、`verified`、`created_at`、`updated_at`、`feedback_score`；其中 `confidence`/`feedback_score` 仅作参考，不用于默认排序或过滤
+- 跟踪与审计表：`usage_logs`（统一记录工具调用、向量/实体/关系命中、问题标记）、`block_activation`（向量 block 命中计数）
 
 ### 数据库安全
 - **所有 SQL 必须使用参数化查询**（`?` 占位符）

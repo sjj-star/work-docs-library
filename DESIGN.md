@@ -1644,16 +1644,32 @@ read(with_entities=true)（block+实体联合返回）:
 
 ---
 
-## 29. 反馈与数据质量闭环
+## 29. 反馈、使用跟踪与数据质量闭环
 
-**设计**：`feedback` 表 + `graph_feedback` 工具建立数据质量闭环。
+**设计**：从"复杂打分体系"转向"验证 + 使用跟踪 + 用户修正"的最小闭环。
 
-**机制**：
-- 用户对实体/关系提交 `rating`（+1 正确 / -1 错误）+ `comment`
-- `get_entity_feedback_score()` 汇总评分，同步更新到 `GraphEntity.feedback_score`
-- `confidence` 字段标记 LLM 提取置信度（默认 1.0）
-- `verified` 字段标记人工验证状态
-- 低 confidence 或负 feedback_score 的实体可被 Agent 优先复核
+**核心数据**：
+- `usage_logs` 表：统一记录每次 `search`/`explore`/`read` 的工具调用、向量命中、实体/关系命中、用户标记
+- `block_activation` 表：记录向量 block 被检索命中的次数，识别"热"块与"冷"块
+- `feedback` 表：保留用户对实体/关系的 ±1 评分，但仅作为"待复核"提示，不再参与排序
+- `GraphEntity` / `GraphRelation`：保留 `verified` 二元状态；`confidence` / `feedback_score` 仅作参考，不用于默认过滤或排序
+
+**状态审计**：
+- `status scope=trace`：回放指定 `session_id` 的查询路径
+- `status scope=usage`：输出使用热点、未使用实体/关系、未验证对象、被标记问题项
+
+**修正闭环**：
+- 用户指出错误 → Skill 调用 `fixing-workdocs`
+- `status scope=trace` 定位哪一步检索引入了问题对象
+- `explore(mode=provenance)` + `read` 确认来源
+- 生成 admin 命令（`graph_feedback` / `graph_upsert_*` / `graph_delete_*`）
+- 用户确认后执行
+- 执行后通过 `explore(mode=entity)` 验证
+
+**日志生命周期**：
+- 默认保留 30 天 / 10000 条
+- 每次 `ingest` 成功后自动触发清理
+- 可通过 `admin_tools.py usage-report` / `usage-clean` 手动查阅和清理
 
 ---
 
