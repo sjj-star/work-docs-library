@@ -103,6 +103,16 @@ class Config:
     LLM_MAX_RETRIES: int = 0  # 将在下方初始化
     LLM_RETRY_BACKOFF: int = 0  # 将在下方初始化
     LLM_TIMEOUT: int = 0  # 将在下方初始化
+    # --- 统一 HTTP 客户端重试配置 ---
+    HTTP_TIMEOUT: int = 0  # 将在下方初始化
+    HTTP_RETRY_MAX_ATTEMPTS: int = 0  # 将在下方初始化
+    HTTP_RETRY_BASE_DELAY: float = 0.0  # 将在下方初始化
+    HTTP_RETRY_MAX_DELAY: float = 0.0  # 将在下方初始化
+    HTTP_RETRY_JITTER: bool = False  # 将在下方初始化
+    HTTP_RETRY_RESPECT_RETRY_AFTER: bool = False  # 将在下方初始化
+    # --- Embedding 输入长度保护 ---
+    EMBED_MAX_CHARS_PER_TEXT: int = 0  # 将在下方初始化
+    EMBED_SPLIT_OVERLONG: bool = False  # 将在下方初始化
     # --- 文件解析参数 ---
     PARSER_TIMEOUT: int = 0  # 将在下方初始化
     PARSER_MAX_RETRIES: int = 0  # 将在下方初始化
@@ -181,6 +191,30 @@ class Config:
         cls.LLM_MAX_RETRIES = int(_resolve_config("WORKDOCS_LLM_MAX_RETRIES", "3"))
         cls.LLM_RETRY_BACKOFF = int(_resolve_config("WORKDOCS_LLM_RETRY_BACKOFF", "2"))
         cls.LLM_TIMEOUT = int(_resolve_config("WORKDOCS_LLM_TIMEOUT", "120"))
+        # 统一 HTTP 客户端重试配置
+        cls.HTTP_TIMEOUT = int(_resolve_config("WORKDOCS_HTTP_TIMEOUT", "120"))
+        cls.HTTP_RETRY_MAX_ATTEMPTS = int(
+            _resolve_config("WORKDOCS_HTTP_RETRY_MAX_ATTEMPTS", "3")
+        )
+        cls.HTTP_RETRY_BASE_DELAY = float(
+            _resolve_config("WORKDOCS_HTTP_RETRY_BASE_DELAY", "1.0")
+        )
+        cls.HTTP_RETRY_MAX_DELAY = float(
+            _resolve_config("WORKDOCS_HTTP_RETRY_MAX_DELAY", "60.0")
+        )
+        cls.HTTP_RETRY_JITTER = (
+            _resolve_config("WORKDOCS_HTTP_RETRY_JITTER", "true").lower() == "true"
+        )
+        cls.HTTP_RETRY_RESPECT_RETRY_AFTER = (
+            _resolve_config("WORKDOCS_HTTP_RETRY_RESPECT_RETRY_AFTER", "true").lower()
+            == "true"
+        )
+        cls.EMBED_MAX_CHARS_PER_TEXT = int(
+            _resolve_config("WORKDOCS_EMBED_MAX_CHARS_PER_TEXT", "8192")
+        )
+        cls.EMBED_SPLIT_OVERLONG = (
+            _resolve_config("WORKDOCS_EMBED_SPLIT_OVERLONG", "true").lower() == "true"
+        )
         # 文件解析
         cls.PARSER_TIMEOUT = int(_resolve_config("WORKDOCS_PARSER_TIMEOUT", "60"))
         cls.PARSER_MAX_RETRIES = int(_resolve_config("WORKDOCS_PARSER_MAX_RETRIES", "60"))

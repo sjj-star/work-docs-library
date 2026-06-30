@@ -28,6 +28,7 @@ import numpy as np
 from parsers.pdf_parser import PDFParser
 from PIL import Image
 
+from .api_client import APIError
 from .batch_clients import BatchClient
 from .bigmodel_parser_client import BigModelParserClient
 from .config import Config
@@ -1523,7 +1524,7 @@ class DocGraphPipeline:
                     f"text_len={text_len} | images={img_count}"
                 )
                 try:
-                    response_data = self.llm_chat._post(self.llm_chat.chat_url, body)
+                    response_data = self.llm_chat._post(Config.LLM_BATCH_ENDPOINT, body)
                     result = {
                         "custom_id": custom_id,
                         "response": {
@@ -1898,6 +1899,8 @@ class DocGraphPipeline:
                 self.db.update_block_status(block["id"], "done")
             return doc_id
 
+        failed_block_ids: set[int] = set()
+
         # 2. 从 JSONL 读取并同步向量化
         if not embed_jsonl_path.exists() or embed_jsonl_path.stat().st_size == 0:
             logger.warning(f"Embedding JSONL 为空，跳过向量化 | path={embed_jsonl_path}")
@@ -1915,9 +1918,21 @@ class DocGraphPipeline:
                         if block_db_id is None or not text:
                             logger.warning(f"Embedding JSONL 记录格式异常 | rec={rec}")
                             continue
-                        emb = embedder.embed_single(text)
-                        sqlite_items.append((block_db_id, emb))
-                        faiss_items.append((block_db_id, emb))
+                        try:
+                            emb = embedder.embed_single(text)
+                            sqlite_items.append((block_db_id, emb))
+                            faiss_items.append((block_db_id, emb))
+                        except APIError as exc:
+                            logger.error(
+                                f"Block embedding 失败 | block_db_id={block_db_id} | "
+                                f"status={exc.status_code} | message={exc.message!r}"
+                            )
+                            failed_block_ids.add(block_db_id)
+                        except Exception:
+                            logger.exception(
+                                f"Block embedding 未知错误 | block_db_id={block_db_id}"
+                            )
+                            failed_block_ids.add(block_db_id)
                 finally:
                     embedder.close()
 
@@ -1935,10 +1950,26 @@ class DocGraphPipeline:
             else:
                 self.vec.commit()
 
-        # 5. 更新状态为 done
+        # 5. 更新 block 状态：成功 -> done，失败 -> failed，未处理 -> failed
+        embedded_ids = {bid for bid, _ in sqlite_items}
+        success_count = 0
         for block in db_blocks:
-            self.db.update_block_status(block["id"], "done")
+            bid = block["id"]
+            if bid in failed_block_ids:
+                self.db.update_block_status(bid, "failed")
+            elif bid in embedded_ids:
+                self.db.update_block_status(bid, "done")
+                success_count += 1
+            else:
+                logger.warning(
+                    f"Block 未生成 embedding | block_db_id={bid} | doc_id={doc_id}"
+                )
+                self.db.update_block_status(bid, "failed")
 
+        logger.info(
+            f"Stage6 完成 | doc_id={doc_id} | success={success_count}/"
+            f"{len(db_blocks)} | failed={len(failed_block_ids)}"
+        )
         return doc_id
 
     def _process_one(

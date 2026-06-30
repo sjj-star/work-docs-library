@@ -374,17 +374,24 @@ def test_batch_client_create_batch_payload(monkeypatch, tmp_path):
 
     posted = []
 
-    def _fake_post(url, payload=None, files=None, timeout=120):
-        posted.append((url, payload))
-        return {"id": "batch_456"}
+    def _fake_request(method, path, *, headers=None, **kwargs):
+        posted.append((method, path, kwargs.get("json")))
 
-    monkeypatch.setattr(client, "_post", _fake_post)
+        class Resp:
+            def json(self):
+                return {"id": "batch_456"}
+
+        return Resp()
+
+    monkeypatch.setattr(client._client, "request", _fake_request)
 
     batch_id = client._create_batch("file_789")
     assert batch_id == "batch_456"
-    assert posted[0][1]["endpoint"] == "/v2/chat/completions"
-    assert posted[0][1]["completion_window"] == "48h"
-    assert posted[0][1]["auto_delete_input_file"] is True
+    assert posted[0][0] == "POST"
+    assert posted[0][1] == "/batches"
+    assert posted[0][2]["endpoint"] == "/v2/chat/completions"
+    assert posted[0][2]["completion_window"] == "48h"
+    assert posted[0][2]["auto_delete_input_file"] is True
 
 
 def test_batch_client_download_file(monkeypatch, tmp_path):
@@ -396,20 +403,18 @@ def test_batch_client_download_file(monkeypatch, tmp_path):
         download_url_template="{base_url}/custom/files/{file_id}/download",
     )
 
-    fetched_urls = []
+    fetched_paths = []
 
-    def _fake_get(url, **kwargs):
-        class FakeResp:
+    def _fake_request(method, path, *, headers=None, **kwargs):
+        fetched_paths.append(path)
+
+        class Resp:
             text = "downloaded"
 
-            def raise_for_status(self):
-                pass
+        return Resp()
 
-        fetched_urls.append(url)
-        return FakeResp()
-
-    monkeypatch.setattr(client._session, "get", _fake_get)
+    monkeypatch.setattr(client._client, "request", _fake_request)
 
     result = client._download_file("file_123")
     assert result == "downloaded"
-    assert fetched_urls[0] == "https://test.example.com/custom/files/file_123/download"
+    assert fetched_paths[0] == "/custom/files/file_123/download"

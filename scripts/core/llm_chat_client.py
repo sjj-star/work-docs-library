@@ -1,24 +1,25 @@
-"""LLM 对话客户端 - 基类.
+"""LLM 对话客户端.
 
-支持同步对话调用.
+基于统一 APIClient 构建，按 Kimi 官方错误码分类处理并重试。
 """
+
+from __future__ import annotations
 
 import json
 import logging
-import threading
+import time
 from pathlib import Path
 
-import requests
-
+from .api_client import APIClient, ContentTooLargeError, KimiProvider
 from .config import Config
 
 logger = logging.getLogger(__name__)
 
 
 class BaseLLMClient:
-    """LLM 对话客户端基类."""
+    """LLM 对话客户端."""
 
-    # 类常量 - 从 Config 读取，保留属性供测试覆盖
+    # 保留类常量供测试覆盖兼容性
     MAX_RETRY_ATTEMPTS = Config.LLM_MAX_RETRIES
     RETRY_BACKOFF_BASE = Config.LLM_RETRY_BACKOFF
     DEFAULT_TIMEOUT = Config.LLM_TIMEOUT
@@ -29,7 +30,7 @@ class BaseLLMClient:
 
         Kimi Coding API 白名单要求 User-Agent 前缀为 KimiCLI/ 才能通过验证.
         """
-        plugin_path = Path(__file__).resolve().parent.parent.parent / "plugin.json"
+        plugin_path = Path(__file__).resolve().parent.parent.parent / "kimi.plugin.json"
         if plugin_path.exists():
             try:
                 data = json.loads(plugin_path.read_text(encoding="utf-8"))
@@ -57,32 +58,16 @@ class BaseLLMClient:
         if not self.api_key:
             raise RuntimeError("LLM API key not configured. Set WORKDOCS_LLM_API_KEY in .env")
 
-        # 完全由 base_url 决定，不做服务商推断
-        self.chat_url = f"{self.base_url}/chat/completions"
-
-        # 使用线程本地存储，确保多线程并发时每个线程有独立的 Session
-        self._local = threading.local()
-
-    def _get_session(self) -> requests.Session:
-        """获取当前线程的 requests.Session（懒创建）."""
-        if not hasattr(self._local, "session") or self._local.session is None:
-            self._local.session = requests.Session()
-        return self._local.session
+        provider = KimiProvider(api_key=self.api_key, base_url=self.base_url)
+        self._client = APIClient(provider, timeout=self.DEFAULT_TIMEOUT, user_agent=self.user_agent)
 
     def _post(self, url: str, payload: dict, timeout: int | None = None) -> dict:
-        """发送 POST 请求，带重试机制.
+        """发送 POST 请求.
 
-        仅对可重试错误（5xx、429）执行指数退避重试，
-        4xx 客户端错误（除 429 外）直接抛出，
-        超时异常直接抛出（重试使用相同 timeout 无法解决请求过大的超时问题）。
+        保留此接口以便现有调用点与部分单测 monkeypatch 兼容。
+        实际请求由 APIClient 处理，包含统一的错误分类与重试。
+        url 参数传入相对 path 或完整 URL（完整 URL 仅用于兼容旧调用）。
         """
-        import time
-
-        timeout = timeout or self.DEFAULT_TIMEOUT
-        session = self._get_session()
-        last_exc = None
-
-        # 计算请求大小用于日志和诊断
         messages = payload.get("messages", [])
         text_len = sum(len(str(m.get("content", ""))) for m in messages)
         img_count = sum(
@@ -92,50 +77,27 @@ class BaseLLMClient:
             for item in m["content"]
             if isinstance(item, dict) and item.get("type") == "image_url"
         )
-        logger.info(f"LLM 请求开始 | text_len={text_len} | images={img_count} | timeout={timeout}s")
+        logger.info(f"LLM 请求开始 | text_len={text_len} | images={img_count}")
         start_time = time.time()
 
-        for attempt in range(self.MAX_RETRY_ATTEMPTS):
-            try:
-                resp = session.post(
-                    url,
-                    headers={
-                        "Authorization": f"Bearer {self.api_key}",
-                        "Content-Type": "application/json",
-                        "User-Agent": self.user_agent,
-                    },
-                    json=payload,
-                    timeout=timeout,
-                )
-                resp.raise_for_status()
-                elapsed = time.time() - start_time
-                logger.info(f"LLM 请求成功 | elapsed={elapsed:.1f}s | status=ok")
-                return resp.json()
-            except requests.Timeout as e:
-                elapsed = time.time() - start_time
-                suggested = max(timeout * 2, 300)
-                logger.warning(
-                    f"LLM 请求超时 | elapsed={elapsed:.1f}s | timeout={timeout}s | "
-                    f"text_len={text_len} | images={img_count} | "
-                    f"建议增大 WORKDOCS_LLM_TIMEOUT 至 {suggested}s 以上"
-                )
-                raise RuntimeError(
-                    f"LLM 请求超时 ({timeout}s)。请求大小: text_len={text_len}, "
-                    f"images={img_count}。建议: export WORKDOCS_LLM_TIMEOUT={suggested} "
-                    f"或在 .env 中设置 WORKDOCS_LLM_TIMEOUT={suggested}"
-                ) from e
-            except requests.HTTPError as e:
-                last_exc = e
-                status_code = e.response.status_code if e.response else 0
-                # 4xx 客户端错误（除 429 Too Many Requests 外）不可重试
-                if 400 <= status_code < 500 and status_code != 429:
-                    raise
-                time.sleep(self.RETRY_BACKOFF_BASE**attempt)
-            except Exception as e:
-                last_exc = e
-                time.sleep(self.RETRY_BACKOFF_BASE**attempt)
-        assert last_exc is not None
-        raise last_exc
+        # 兼容旧调用传入完整 URL 的情况，提取相对 path
+        path = url
+        if path.startswith(self._client.provider.base_url):
+            path = path[len(self._client.provider.base_url) :]
+        if not path:
+            path = Config.LLM_BATCH_ENDPOINT
+
+        original_timeout = self._client.timeout
+        if timeout is not None:
+            self._client.timeout = timeout
+        try:
+            response = self._client.post(path, json=payload)
+        finally:
+            self._client.timeout = original_timeout
+
+        elapsed = time.time() - start_time
+        logger.info(f"LLM 请求成功 | elapsed={elapsed:.1f}s | status={response.status_code}")
+        return response.json()
 
     def chat(self, messages: list[dict], temperature: float = 0.3, **kwargs) -> str:
         """基础对话功能."""
@@ -149,7 +111,15 @@ class BaseLLMClient:
         # 合并额外参数
         data.update(kwargs)
 
-        response_data = self._post(self.chat_url, data)
+        try:
+            response_data = self._post(Config.LLM_BATCH_ENDPOINT, data)
+        except ContentTooLargeError as exc:
+            total_len = sum(len(str(m.get("content", ""))) for m in messages)
+            logger.warning(
+                f"LLM 请求内容超长 | text_len={total_len} | message={exc.message!r}"
+            )
+            raise
+
         # 防御性校验 API 响应结构
         if not isinstance(response_data, dict):
             raise RuntimeError("Invalid response: not a dict")
@@ -165,10 +135,8 @@ class BaseLLMClient:
         return content
 
     def close(self) -> None:
-        """关闭当前线程的会话."""
-        if hasattr(self._local, "session") and self._local.session is not None:
-            self._local.session.close()
-            self._local.session = None
+        """关闭底层 HTTP 客户端."""
+        self._client.close()
 
     @staticmethod
     def _load_prompt(name: str) -> str:

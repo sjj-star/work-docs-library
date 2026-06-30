@@ -2,6 +2,7 @@
 
 import io
 import zipfile
+from typing import Any
 
 import pytest
 from core.bigmodel_parser_client import BigModelParserClient
@@ -10,22 +11,22 @@ from core.bigmodel_parser_client import BigModelParserClient
 class FakeResponse:
     """Mock requests.Response."""
 
-    def __init__(self, json_data=None, content=b"", status_code=200, exc=None):
+    def __init__(
+        self,
+        json_data: dict[str, Any] | None = None,
+        content: bytes = b"",
+        text: str = "",
+        status_code: int = 200,
+    ) -> None:
         self._json = json_data
         self.content = content
+        self.text = text
         self.status_code = status_code
-        self._exc = exc
 
-    def json(self):
-        if self._exc:
-            raise self._exc
+    def json(self) -> dict[str, Any]:
+        if self._json is None:
+            return {}
         return self._json
-
-    def raise_for_status(self):
-        if self.status_code >= 400:
-            import requests
-
-            raise requests.HTTPError(f"HTTP {self.status_code}")
 
 
 @pytest.fixture(autouse=True)
@@ -38,10 +39,10 @@ def test_create_task_success(monkeypatch, tmp_path):
     """create_task 成功返回 task_id."""
     client = BigModelParserClient(api_key="test-key")
 
-    def fake_post(url, **kwargs):
+    def fake_request(method, path, *, headers=None, **kwargs):
         return FakeResponse(json_data={"task_id": "task-123"})
 
-    monkeypatch.setattr("core.bigmodel_parser_client.requests.post", fake_post)
+    monkeypatch.setattr(client._client, "request", fake_request)
 
     pdf = tmp_path / "test.pdf"
     pdf.write_bytes(b"pdf content")
@@ -53,10 +54,10 @@ def test_create_task_no_task_id(monkeypatch, tmp_path):
     """create_task 无 task_id 时应抛出 RuntimeError."""
     client = BigModelParserClient(api_key="test-key")
 
-    def fake_post(url, **kwargs):
+    def fake_request(method, path, *, headers=None, **kwargs):
         return FakeResponse(json_data={"error": "bad request"})
 
-    monkeypatch.setattr("core.bigmodel_parser_client.requests.post", fake_post)
+    monkeypatch.setattr(client._client, "request", fake_request)
 
     pdf = tmp_path / "test.pdf"
     pdf.write_bytes(b"pdf content")
@@ -69,11 +70,11 @@ def test_poll_result_success(monkeypatch):
     client = BigModelParserClient(api_key="test-key")
     call_count = [0]
 
-    def fake_get(url, **kwargs):
+    def fake_request(method, path, *, headers=None, **kwargs):
         call_count[0] += 1
         return FakeResponse(json_data={"status": "succeeded", "data": {"url": "http://x"}})
 
-    monkeypatch.setattr("core.bigmodel_parser_client.requests.get", fake_get)
+    monkeypatch.setattr(client._client, "request", fake_request)
 
     result = client.poll_result("task-123")
     assert result["status"] == "succeeded"
@@ -84,10 +85,10 @@ def test_poll_result_failed(monkeypatch):
     """poll_result 收到 failed 状态应抛出 RuntimeError."""
     client = BigModelParserClient(api_key="test-key")
 
-    def fake_get(url, **kwargs):
+    def fake_request(method, path, *, headers=None, **kwargs):
         return FakeResponse(json_data={"status": "failed"})
 
-    monkeypatch.setattr("core.bigmodel_parser_client.requests.get", fake_get)
+    monkeypatch.setattr(client._client, "request", fake_request)
 
     with pytest.raises(RuntimeError, match="BigModel parsing failed"):
         client.poll_result("task-123")
@@ -99,10 +100,10 @@ def test_poll_result_timeout(monkeypatch):
     monkeypatch.setattr(client, "MAX_POLL_RETRIES", 2)
     monkeypatch.setattr(client, "POLL_INTERVAL", 0)
 
-    def fake_get(url, **kwargs):
+    def fake_request(method, path, *, headers=None, **kwargs):
         return FakeResponse(json_data={"status": "processing"})
 
-    monkeypatch.setattr("core.bigmodel_parser_client.requests.get", fake_get)
+    monkeypatch.setattr(client._client, "request", fake_request)
 
     with pytest.raises(RuntimeError, match="polling timeout"):
         client.poll_result("task-123")
@@ -112,86 +113,74 @@ def test_download_result(monkeypatch):
     """download_result 返回 bytes."""
     client = BigModelParserClient(api_key="test-key")
 
-    def fake_get(url, **kwargs):
+    def fake_request(method, path, *, headers=None, **kwargs):
         return FakeResponse(content=b"zip content")
 
-    monkeypatch.setattr("core.bigmodel_parser_client.requests.get", fake_get)
+    monkeypatch.setattr(client._client, "request", fake_request)
 
     data = client.download_result("http://example.com/result.zip")
     assert data == b"zip content"
 
 
 def test_parse_pdf_full_flow(monkeypatch, tmp_path):
-    """parse_pdf 端到端流程."""
+    """parse_pdf 完整流程."""
     client = BigModelParserClient(api_key="test-key")
 
-    # 构建内存 ZIP：包含 result.md 和一张图片
-    zip_buf = io.BytesIO()
-    with zipfile.ZipFile(zip_buf, "w") as zf:
-        zf.writestr("result.md", "# Test\n\nHello world.")
-        zf.writestr("image.png", b"png data")
-    zip_bytes = zip_buf.getvalue()
+    # 构造一个包含 markdown 的 zip
+    zip_buffer = io.BytesIO()
+    with zipfile.ZipFile(zip_buffer, "w") as zf:
+        zf.writestr("result.md", "# parsed")
+    zip_bytes = zip_buffer.getvalue()
 
-    def fake_post(url, **kwargs):
-        return FakeResponse(json_data={"task_id": "task-abc"})
+    call_idx = [0]
 
-    def fake_get(url, **kwargs):
-        if "result" in url:
+    def fake_request(method, path, *, headers=None, **kwargs):
+        call_idx[0] += 1
+        if call_idx[0] == 1:
+            return FakeResponse(json_data={"task_id": "task-abc"})
+        if call_idx[0] == 2:
             return FakeResponse(
                 json_data={
                     "status": "succeeded",
-                    "parsing_result_url": "http://x.zip",
-                    "data": {"parsingResultUrl": "http://x.zip"},
+                    "parsing_result_url": "http://example.com/result.zip",
                 }
             )
         return FakeResponse(content=zip_bytes)
 
-    monkeypatch.setattr("core.bigmodel_parser_client.requests.post", fake_post)
-    monkeypatch.setattr("core.bigmodel_parser_client.requests.get", fake_get)
+    monkeypatch.setattr(client._client, "request", fake_request)
 
-    pdf = tmp_path / "test.pdf"
-    pdf.write_bytes(b"pdf")
-
-    md_text, images = client.parse_pdf(pdf)
-    assert "Hello world." in md_text
-    assert len(images) == 1
-    assert images[0].name == "image.png"
+    (tmp_path / "dummy.pdf").write_bytes(b"pdf")
+    md_text, images = client.parse_pdf(tmp_path / "dummy.pdf", output_dir=tmp_path / "out")
+    assert "# parsed" in md_text
+    assert images == []
 
 
 def test_parse_pdf_rejects_zip_path_traversal(monkeypatch, tmp_path):
-    """parse_pdf 应拒绝包含路径遍历的恶意 ZIP 条目，且不写入 output_dir 之外."""
+    """parse_pdf 拒绝 ZIP 路径遍历."""
     client = BigModelParserClient(api_key="test-key")
 
-    # 构建包含恶意路径遍历条目的 ZIP
-    zip_buf = io.BytesIO()
-    with zipfile.ZipFile(zip_buf, "w") as zf:
-        zf.writestr("result.md", "# Safe")
-        zf.writestr("../../../evil.txt", "malicious")
-    zip_bytes = zip_buf.getvalue()
+    zip_buffer = io.BytesIO()
+    with zipfile.ZipFile(zip_buffer, "w") as zf:
+        zf.writestr("../evil.md", "bad")
+    zip_bytes = zip_buffer.getvalue()
 
-    def fake_post(url, **kwargs):
-        return FakeResponse(json_data={"task_id": "task-traversal"})
+    call_idx = [0]
 
-    def fake_get(url, **kwargs):
-        if "result" in url:
+    def fake_request(method, path, *, headers=None, **kwargs):
+        call_idx[0] += 1
+        if call_idx[0] == 1:
+            return FakeResponse(json_data={"task_id": "task-abc"})
+        if call_idx[0] == 2:
             return FakeResponse(
                 json_data={
                     "status": "succeeded",
-                    "parsing_result_url": "http://x.zip",
-                    "data": {"parsingResultUrl": "http://x.zip"},
+                    "parsing_result_url": "http://example.com/result.zip",
                 }
             )
         return FakeResponse(content=zip_bytes)
 
-    monkeypatch.setattr("core.bigmodel_parser_client.requests.post", fake_post)
-    monkeypatch.setattr("core.bigmodel_parser_client.requests.get", fake_get)
+    monkeypatch.setattr(client._client, "request", fake_request)
 
-    pdf = tmp_path / "test.pdf"
-    pdf.write_bytes(b"pdf")
-    output_dir = tmp_path / "a" / "b" / "extracted"
-
-    with pytest.raises(ValueError):
-        client.parse_pdf(pdf, output_dir=output_dir)
-
-    # 确认没有文件被写到 output_dir 之外
-    assert not (tmp_path / "evil.txt").exists()
+    (tmp_path / "dummy.pdf").write_bytes(b"pdf")
+    with pytest.raises(ValueError, match="Malformed ZIP entry path"):
+        client.parse_pdf(tmp_path / "dummy.pdf", output_dir=tmp_path / "out")

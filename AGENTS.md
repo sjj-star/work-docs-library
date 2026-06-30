@@ -161,7 +161,7 @@ PYTHONPATH=scripts ./.venv/bin/python -m pytest scripts/tests/ -v
   2. 阻止 `load_dotenv` 重新加载 `.env` 文件
   3. 重定向 Config 默认路径到临时目录（DB、FAISS、Graph 均隔离）
 - **回归即修复**：任何导致测试失败的变更必须当场修复
-- **513 个测试用例必须全部通过**（0 skipped）
+- **524 个测试用例必须全部通过**（0 skipped）
 
 ### 测试文件清单
 | 测试文件 | 说明 |
@@ -171,7 +171,9 @@ PYTHONPATH=scripts ./.venv/bin/python -m pytest scripts/tests/ -v
 | `test_db.py` | SQLite 操作、事务管理 |
 | `test_vector_index.py` | FAISS 索引增删查 |
 | `test_graph_store.py` | NetworkX 图谱存储 CRUD、冲突检测、路径搜索 |
+| `test_api_client.py` | 统一 API 客户端重试与错误分类 |
 | `test_batch_clients.py` | Batch API 客户端 Mock |
+| `test_embedding_client.py` | Embedding 超长拆分与单条失败隔离 |
 | `test_knowledge_base_service.py` | 统一服务层测试 |
 | `test_pipeline_stages.py` | 六阶段 pipeline 拆分 |
 | `test_mcp_server.py` | MCP Server 工具注册与 JSON-RPC |
@@ -179,7 +181,7 @@ PYTHONPATH=scripts ./.venv/bin/python -m pytest scripts/tests/ -v
 | `test_usage_logger.py`, `test_status_usage.py`, `test_status_trace.py` | 使用日志与审计 |
 | `test_*.py` | 其他模块测试（详见 `scripts/tests/`） |
 
-**当前状态**：513 passed, 0 skipped, 0 failed。
+**当前状态**：524 passed, 0 skipped, 0 failed。
 
 ### Mock 方法
 使用 `monkeypatch.setattr` 替换客户端类方法：
@@ -322,8 +324,9 @@ monkeypatch.setattr(
 - ✅ 检索：语义搜索、BM25 稀疏索引、RRF 混合检索、可选重排序
 - ✅ 接口：`KnowledgeBaseService` 统一服务层；MCP 仅暴露 `search`/`explore`/`read`/`ingest`/`status` 5 个原子工具
 - ✅ 质量：`confidence`/`verified`/`feedback_score`、冲突日志、`usage_logs`/`block_activation` 使用跟踪、`fixing-workdocs` 修正闭环
+- ✅ API 错误处理：统一 `APIClient` + Provider + `RetryPolicy`，429/5xx 重试，401/402/403/配额类 429 快速失败；Embedding 超长拆分、单条失败隔离
 - ✅ Skill：`using-workdocs`、`ingesting-workdocs`、`exploring-workdocs`、`agentic-search`、`synthesizing-workdocs`、`fixing-workdocs`
-- ✅ 测试：513 passed, 0 skipped, 0 failed
+- ✅ 测试：524 passed, 0 skipped, 0 failed
 
 详细历史见 git log 与 `DESIGN.md` 各章节。
 

@@ -1,7 +1,10 @@
 """Batch API 客户端 - 通用实现（服务商无感）.
 
 封装异步 batch 处理流程：JSONL 构造 → 上传 → 创建 batch → 轮询 → 下载结果.
+基于统一 APIClient 构建，自动获得按官方错误码分类的重试能力。
 """
+
+from __future__ import annotations
 
 import json
 import logging
@@ -12,8 +15,7 @@ from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import Any
 
-import requests
-
+from .api_client import APIClient, KimiProvider
 from .config import Config
 
 logger = logging.getLogger(__name__)
@@ -60,54 +62,10 @@ class BaseBatchClient(ABC):
         """初始化 BaseBatchClient."""
         self.api_key = api_key
         self.base_url = base_url.rstrip("/")
-        self.headers = {
-            "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json",
-        }
-        self._session = requests.Session()
         # 从 Config 读取运行时参数，保留实例属性供测试覆盖
         self.DEFAULT_POLL_INTERVAL = Config.BATCH_POLL_INTERVAL
         self.MAX_POLL_RETRIES = Config.BATCH_MAX_POLL_RETRIES
         self.MAX_FILE_SIZE_MB = Config.BATCH_MAX_FILE_SIZE_MB
-
-    def _post(
-        self,
-        url: str,
-        payload: dict | None = None,
-        files: dict | None = None,
-        data: dict | None = None,
-        timeout: int | None = None,
-    ) -> dict[str, Any]:
-        timeout = timeout or Config.LLM_TIMEOUT
-        """发送 POST 请求."""
-        if files:
-            # 文件上传时不设置 Content-Type（requests 会自动设置 multipart）
-            headers = {k: v for k, v in self.headers.items() if k.lower() != "content-type"}
-            resp = self._session.post(url, headers=headers, files=files, data=data, timeout=timeout)
-        else:
-            resp = self._session.post(
-                url, headers=self.headers, json=payload, data=data, timeout=timeout
-            )
-        resp.raise_for_status()
-        return resp.json()
-
-    def _get(self, url: str, timeout: int | None = None) -> dict[str, Any]:
-        timeout = timeout or Config.LLM_TIMEOUT
-        """发送 GET 请求."""
-        resp = self._session.get(url, headers=self.headers, timeout=timeout)
-        resp.raise_for_status()
-        return resp.json()
-
-    def _delete(self, url: str, timeout: int | None = None) -> dict[str, Any]:
-        timeout = timeout or Config.LLM_TIMEOUT
-        """发送 DELETE 请求."""
-        resp = self._session.delete(url, headers=self.headers, timeout=timeout)
-        resp.raise_for_status()
-        return resp.json()
-
-    # -----------------------------------------------------------------------
-    # 子类必须实现
-    # -----------------------------------------------------------------------
 
     @abstractmethod
     def _upload_jsonl(self, file_path: Path) -> str:
@@ -335,8 +293,8 @@ class BaseBatchClient(ABC):
         return all_results
 
     def close(self) -> None:
-        """关闭会话."""
-        self._session.close()
+        """关闭会话（子类可覆盖）."""
+        pass
 
 
 # ---------------------------------------------------------------------------
@@ -383,11 +341,16 @@ class BatchClient(BaseBatchClient):
         super().__init__(api_key, base_url)
         self.batch_endpoint = batch_endpoint or Config.LLM_BATCH_ENDPOINT
         self.completion_window = completion_window or Config.LLM_BATCH_COMPLETION_WINDOW
+        # 保留完整 URL 属性供外部读取/测试
         self.files_url = f"{self.base_url}/{files_url_path.lstrip('/')}"
         self.batches_url = f"{self.base_url}/{batches_url_path.lstrip('/')}"
         self.download_url_template = download_url_template or Config.BATCH_FILE_DOWNLOAD_TEMPLATE
         self.auto_delete_input_file = auto_delete_input_file
         self.upload_mime_type = upload_mime_type
+        self._client = APIClient(
+            KimiProvider(api_key=self.api_key, base_url=self.base_url),
+            timeout=Config.HTTP_TIMEOUT,
+        )
 
     def _upload_jsonl(self, file_path: Path) -> str:
         with open(file_path, "rb") as f:
@@ -395,12 +358,12 @@ class BatchClient(BaseBatchClient):
                 files = {"file": (file_path.name, f, self.upload_mime_type)}
             else:
                 files = {"file": (file_path.name, f)}
-            resp = self._post(
-                self.files_url,
+            resp = self._client.post(
+                "/files",
                 files=files,
                 data={"purpose": "batch"},
             )
-        return resp["id"]
+        return resp.json()["id"]
 
     def _create_batch(self, file_id: str) -> str:
         payload: dict[str, Any] = {
@@ -411,20 +374,23 @@ class BatchClient(BaseBatchClient):
             payload["completion_window"] = self.completion_window
         if self.auto_delete_input_file:
             payload["auto_delete_input_file"] = True
-        resp = self._post(self.batches_url, payload=payload)
-        return resp["id"]
+        resp = self._client.post("/batches", json=payload)
+        return resp.json()["id"]
 
     def _get_batch_status(self, batch_id: str) -> dict[str, Any]:
-        return self._get(f"{self.batches_url}/{batch_id}")
+        return self._client.get(f"/batches/{batch_id}").json()
 
     def _download_file(self, file_id: str) -> str:
         url = self.download_url_template.format(base_url=self.base_url, file_id=file_id)
-        resp = self._session.get(
-            url,
-            headers={"Authorization": f"Bearer {self.api_key}"},
-        )
-        resp.raise_for_status()
-        return resp.text
+        # 兼容旧版模板：若模板包含 base_url，则剥离为相对 path
+        path = url
+        if path.startswith(self.base_url):
+            path = path[len(self.base_url) :]
+        return self._client.get(path).text
 
     def _delete_file(self, file_id: str) -> None:
-        self._delete(f"{self.files_url}/{file_id}")
+        self._client.delete(f"/files/{file_id}")
+
+    def close(self) -> None:
+        """关闭底层 HTTP 客户端."""
+        self._client.close()

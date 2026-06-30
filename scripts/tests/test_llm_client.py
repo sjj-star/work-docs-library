@@ -1,78 +1,17 @@
 """test_llm_client 模块."""
 
 import pytest
-from core.embedding_client import EmbeddingClient
 from core.llm_chat_client import BaseLLMClient as ChatClient
-
-
-class FakeResponse:
-    """FakeResponse 类."""
-
-    def __init__(self, json_data, status_code=200):
-        """初始化 FakeResponse."""
-        self._json = json_data
-        self.status_code = status_code
-
-    def json(self):
-        """Json 函数."""
-        return self._json
-
-    def raise_for_status(self):
-        """raise_for_status 函数."""
-        if self.status_code >= 400:
-            raise Exception("HTTP Error")
-
-
-class FakeSession:
-    """FakeSession 类."""
-
-    def __init__(self, response):
-        """初始化 FakeSession."""
-        self._response = response
-        self.calls = []
-
-    def post(self, url, **kwargs):
-        """Post 函数."""
-        self.calls.append((url, kwargs))
-        return self._response
-
-    def close(self):
-        """Close 函数."""
-        pass
 
 
 @pytest.fixture(autouse=True)
 def mock_env(monkeypatch, tmp_path):
-    """mock_env 函数."""
+    """提供测试用配置."""
     from core import config as config_module
 
     monkeypatch.setattr(config_module.Config, "LLM_API_KEY", "test-key")
-    monkeypatch.setattr(config_module.Config, "LLM_BASE_URL", "")
+    monkeypatch.setattr(config_module.Config, "LLM_BASE_URL", "https://test.com")
     monkeypatch.setattr(config_module.Config, "LLM_MODEL", "gpt-4")
-    monkeypatch.setattr(config_module.Config, "EMBEDDING_API_KEY", "test-emb-key")
-    monkeypatch.setattr(config_module.Config, "EMBEDDING_BASE_URL", "https://api.openai.com/v1")
-    monkeypatch.setattr(config_module.Config, "EMBEDDING_MODEL", "text-embedding-3-small")
-
-
-def test_embedding_client_embed(monkeypatch):
-    """Test embedding client embed."""
-    fake_resp = FakeResponse(
-        {
-            "data": [
-                {"index": 1, "embedding": [0.1, 0.2]},
-                {"index": 0, "embedding": [0.3, 0.4]},
-            ]
-        }
-    )
-    session = FakeSession(fake_resp)
-    monkeypatch.setattr("core.embedding_client.requests.Session", lambda: session)
-
-    client = EmbeddingClient()
-    result = client.embed(["hello", "world"])
-    assert len(result) == 2
-    assert result[0] == [0.3, 0.4]
-    assert result[1] == [0.1, 0.2]
-    assert "embeddings" in session.calls[0][0]
 
 
 def test_chat_client_chat(monkeypatch):
@@ -146,104 +85,38 @@ def test_chat_client_user_agent_empty_version_fallback(monkeypatch):
 
 def test_chat_client_user_agent_default():
     """plugin.json 不存在时 User-Agent 使用默认值."""
-    # 当测试环境中项目根目录无 plugin.json 时，_load_user_agent 回退到默认值
     ua = ChatClient._load_user_agent()
     assert ua.startswith("KimiCLI/")
 
 
-def test_chat_client_post_includes_user_agent(monkeypatch):
-    """_post 发送的 headers 必须包含 User-Agent."""
-
-    def _fake_post(self, url, payload, timeout=None):
-        # 通过 monkeypatch 的 _get_session 捕获 headers
-        pass
-
+def test_chat_client_post_uses_apiclient(monkeypatch):
+    """_post 应调用底层 APIClient."""
+    client = ChatClient()
     calls = []
 
-    class FakeSession:
-        def post(self, url, headers, json, timeout):
-            calls.append(headers)
+    def _fake_request(method, path, *, headers=None, **kwargs):
+        calls.append((method, path, kwargs))
 
-            class Resp:
-                def raise_for_status(self):
-                    pass
+        class Resp:
+            status_code = 200
 
-                def json(self):
-                    return {"choices": [{"message": {"content": "ok"}}]}
+            def json(self):
+                return {"choices": [{"message": {"content": "ok"}}]}
 
-            return Resp()
+        return Resp()
 
-    monkeypatch.setattr(ChatClient, "_get_session", lambda self: FakeSession())
-    client = ChatClient(user_agent="KimiCLI/1.44.0")
-    client._post("https://test.com/chat/completions", {"model": "test"})
-    assert len(calls) == 1
-    assert calls[0].get("User-Agent") == "KimiCLI/1.44.0"
-
-
-def test_post_retry_eventual_success(monkeypatch):
-    """首次失败、第二次成功时应重试并返回结果."""
-    call_count = [0]
-
-    class FakeSession:
-        def post(self, url, **kwargs):
-            call_count[0] += 1
-            if call_count[0] == 1:
-                raise Exception("Network error")
-
-            class Resp:
-                def raise_for_status(self):
-                    pass
-
-                def json(self):
-                    return {"choices": [{"message": {"content": "ok"}}]}
-
-            return Resp()
-
-    monkeypatch.setattr(ChatClient, "_get_session", lambda self: FakeSession())
-    monkeypatch.setattr(ChatClient, "RETRY_BACKOFF_BASE", 0)
-    client = ChatClient()
-    result = client._post("https://test.com/v1/chat/completions", {})
-    assert call_count[0] == 2
+    monkeypatch.setattr(client._client, "request", _fake_request)
+    result = client._post("/v1/chat/completions", {"model": "test"})
     assert result["choices"][0]["message"]["content"] == "ok"
+    assert calls[0][0] == "POST"
+    assert calls[0][1] == "/v1/chat/completions"
+    assert client._client.user_agent.startswith("KimiCLI/")
 
 
-def test_post_retry_exhausted(monkeypatch):
-    """全部失败时应抛出最后一次异常."""
-    call_count = [0]
+def test_chat_client_missing_api_key(monkeypatch):
+    """未配置 API Key 时应抛出 RuntimeError."""
+    from core import config as config_module
 
-    class FakeSession:
-        def post(self, url, **kwargs):
-            call_count[0] += 1
-            raise Exception(f"Fail {call_count[0]}")
-
-    monkeypatch.setattr(ChatClient, "_get_session", lambda self: FakeSession())
-    monkeypatch.setattr(ChatClient, "RETRY_BACKOFF_BASE", 0)
-    client = ChatClient()
-    with pytest.raises(Exception, match="Fail 3"):
-        client._post("https://test.com/v1/chat/completions", {})
-    assert call_count[0] == 3
-
-
-def test_post_no_retry_on_401(monkeypatch):
-    """401 Unauthorized 不应重试."""
-    call_count = [0]
-
-    class FakeResponse:
-        def __init__(self):
-            self.status_code = 401
-
-        def raise_for_status(self):
-            import requests
-
-            raise requests.HTTPError("401 Unauthorized", response=self)
-
-    class FakeSession:
-        def post(self, url, **kwargs):
-            call_count[0] += 1
-            return FakeResponse()
-
-    monkeypatch.setattr(ChatClient, "_get_session", lambda self: FakeSession())
-    client = ChatClient()
-    with pytest.raises(Exception):
-        client._post("https://test.com/v1/chat/completions", {})
-    assert call_count[0] == 1
+    monkeypatch.setattr(config_module.Config, "LLM_API_KEY", "")
+    with pytest.raises(RuntimeError, match="LLM API key not configured"):
+        ChatClient()

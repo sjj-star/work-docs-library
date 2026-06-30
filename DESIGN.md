@@ -680,6 +680,7 @@ explore(mode="entity", entity_type="Product", name="TMS320F28379D")
 | **跨阶段产物必须校验一致性** | Stage3/Stage4 增量分析结果不一致 | 持久化 `_incremental.json` + hash 校验 |
 | **配置路径加载/保存必须一致** | `_save_global_graph` 硬编码 `"graphs"` | 统一使用 `Config.GRAPH_OUTPUT_DIR` |
 | **警惕外部库的导入级副作用** | `pymupdf4llm` 导入时激活 ONNX layout，静默改变 `find_tables()` 结果 | 移除 `pymupdf4llm` 依赖及未触发的 fallback 代码 |
+| **API 错误必须按官方文档分类处理** | 429 额度耗尽仍被重试、Embedding 400 导致整篇文档崩溃 | 新增 `core/api_client.py`：Provider + RetryPolicy，429/5xx 重试，401/402/403/配额类 429 快速失败；Embedding 超长拆分、单条失败隔离 |
 | **MCP 工具面过宽会降低 Agent 调用质量** | 14 个查询类工具导致 Agent 频繁选错检索策略 | 收敛为 5 个原子工具：search/explore/read/ingest/status |
 | **服务层职责过重会阻碍演进** | `KnowledgeBaseService` 同时承载生命周期、持久化、检索、图谱、桥接、重排序等 ~1,200 行 | 拆出 `core/bridge.py` 与 `core/query_service.py`，让服务层回归生命周期与原子能力 |
 | **私有内部类难以独立测试** | `_EntityChunkBridge` 作为 `KnowledgeBaseService` 内部类 | 提升为独立模块 `core/bridge.py`，可单独测试和复用 |

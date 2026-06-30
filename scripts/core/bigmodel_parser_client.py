@@ -4,9 +4,10 @@
     使用专有端点 /files/parser/create 和 /files/parser/result，非 OpenAI-compatible API。
     如需使用其他厂商的 PDF 解析服务，需另行实现对应客户端。
 
-封装 /files/parser/create + /files/parser/result 异步 API
-输出：Markdown 文本 + 提取的图片文件列表.
+基于统一 APIClient 构建，对 429/5xx/超时自动重试。
 """
+
+from __future__ import annotations
 
 import io
 import logging
@@ -14,8 +15,7 @@ import time
 import zipfile
 from pathlib import Path
 
-import requests
-
+from .api_client import APIClient, BigModelProvider
 from .config import Config
 
 logger = logging.getLogger(__name__)
@@ -28,22 +28,21 @@ class BigModelParserClient:
     MAX_POLL_RETRIES = Config.PARSER_MAX_RETRIES
     POLL_INTERVAL = Config.PARSER_POLL_INTERVAL
 
-    def __init__(self, api_key: str | None = None) -> None:
+    def __init__(self, api_key: str | None = None, base_url: str | None = None) -> None:
         """初始化 BigModelParserClient."""
         self.api_key = api_key or self._resolve_api_key()
-        self.base_url = Config.PARSER_BASE_URL
+        self.base_url = (base_url or Config.PARSER_BASE_URL).rstrip("/")
         if not self.api_key:
             raise RuntimeError(
                 "Parser API key not configured. "
                 "Set WORKDOCS_PARSER_API_KEY in .env or environment variable"
             )
-        self.headers = {"Authorization": f"Bearer {self.api_key}"}
+        provider = BigModelProvider(api_key=self.api_key, base_url=self.base_url)
+        self._client = APIClient(provider, timeout=self.DEFAULT_TIMEOUT)
 
     @staticmethod
     def _resolve_api_key() -> str:
         """解析 Parser API Key."""
-        from .config import Config
-
         return Config.PARSER_API_KEY
 
     def create_task(self, file_path: str | Path, tool_type: str = "expert") -> str:
@@ -62,15 +61,12 @@ class BigModelParserClient:
             raise FileNotFoundError(f"File not found: {file_path}")
 
         with open(file_path, "rb") as f:
-            resp = requests.post(
-                f"{self.base_url}/files/parser/create",
-                headers=self.headers,
+            resp = self._client.post(
+                "/files/parser/create",
                 files={"file": (file_path.name, f)},
                 data={"tool_type": tool_type, "file_type": "PDF"},
-                timeout=self.DEFAULT_TIMEOUT,
             )
 
-        resp.raise_for_status()
         data = resp.json()
         task_id = data.get("task_id")
         if not task_id:
@@ -94,12 +90,9 @@ class BigModelParserClient:
 
         """
         for i in range(self.MAX_POLL_RETRIES):
-            resp = requests.get(
-                f"{self.base_url}/files/parser/result/{task_id}/{format_type}",
-                headers=self.headers,
-                timeout=self.DEFAULT_TIMEOUT,
+            resp = self._client.get(
+                f"/files/parser/result/{task_id}/{format_type}",
             )
-            resp.raise_for_status()
             data = resp.json()
             status = data.get("status") or data.get("data", {}).get("status", "unknown")
             logger.debug(f"BigModel poll {i + 1}/{self.MAX_POLL_RETRIES}: {status}")
@@ -116,8 +109,7 @@ class BigModelParserClient:
 
     def download_result(self, url: str) -> bytes:
         """下载解析结果 ZIP."""
-        resp = requests.get(url, timeout=self.DEFAULT_TIMEOUT)
-        resp.raise_for_status()
+        resp = self._client.get(url)
         return resp.content
 
     def parse_pdf(

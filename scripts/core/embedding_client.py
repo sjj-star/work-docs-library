@@ -1,130 +1,186 @@
-"""Embedding 专用客户端 - 完全独立的 Embedding 模型配置.
+"""Embedding 客户端（BigModel / OpenAI-compatible）.
 
-与 LLM 对话模型使用不同的 API 密钥和端点.
+基于统一 APIClient 构建，支持：
+- 按官方错误码分类重试
+- 超长文本自动拆分后 embed 并平均
+- 单条失败隔离（不影响其他 texts）
 """
+
+from __future__ import annotations
 
 import logging
 
-import requests
+import numpy as np
 
+from .api_client import APIClient, APIError, BigModelProvider, ContentTooLargeError
 from .config import Config
 
 logger = logging.getLogger(__name__)
 
 
 class EmbeddingClient:
-    """Embedding 专用客户端 - 使用独立的 Embedding 配置."""
-
-    # 类常量 - 从 Config 读取，保留属性供测试覆盖
-    MAX_RETRY_ATTEMPTS = Config.EMBED_MAX_RETRIES
-    RETRY_BACKOFF_BASE = Config.EMBED_RETRY_BACKOFF
-    DEFAULT_TIMEOUT = Config.EMBED_TIMEOUT
+    """向外部 Embedding API 发送文本并获取向量."""
 
     def __init__(
         self,
         api_key: str | None = None,
         base_url: str | None = None,
         model: str | None = None,
+        timeout: float | None = None,
     ) -> None:
-        """初始化 EmbeddingClient."""
-        self.api_key = api_key or Config.EMBEDDING_API_KEY
-        self.base_url = base_url or Config.EMBEDDING_BASE_URL
-        self.model = model or Config.EMBEDDING_MODEL
+        """初始化 EmbeddingClient.
 
-        # 运行时探测的实际维度（首次调用后设置）
-        self._actual_dimension: int | None = None
-        self._dim_validated = False
-
-        if not self.api_key:
-            raise RuntimeError(
-                "Embedding API key not configured. Set WORKDOCS_EMBEDDING_API_KEY in .env"
-            )
-
-        # 设置 API endpoint（由 base_url + EMBEDDING_ENDPOINT 决定，不做服务商推断）
-        self.embed_url = f"{self.base_url}{Config.EMBEDDING_ENDPOINT}"
-
-        self._session = requests.Session()
-
-    def _post(self, url: str, payload: dict, timeout: int | None = None) -> dict:
-        """发送 POST 请求，带重试机制."""
-        timeout = timeout or self.DEFAULT_TIMEOUT
-        last_exc = None
-        for attempt in range(self.MAX_RETRY_ATTEMPTS):
-            try:
-                resp = self._session.post(
-                    url,
-                    headers={
-                        "Authorization": f"Bearer {self.api_key}",
-                        "Content-Type": "application/json",
-                    },
-                    json=payload,
-                    timeout=timeout,
-                )
-                resp.raise_for_status()
-                return resp.json()
-            except Exception as e:
-                last_exc = e
-                import time
-
-                time.sleep(self.RETRY_BACKOFF_BASE**attempt)
-        assert last_exc is not None
-        raise last_exc
-
-    def embed(self, texts: list[str]) -> list[list[float]]:
-        """生成文本嵌入向量.
-
-        调用方负责控制每次传入的文本数量（当前所有调用方均传入单元素列表）。
+        Args:
+            api_key: API Key，默认使用 Config.EMBEDDING_API_KEY
+            base_url: 基础 URL，默认使用 Config.EMBEDDING_BASE_URL
+            model: 模型名，默认使用 Config.EMBEDDING_MODEL
+            timeout: 请求超时（秒）
         """
-        if not texts:
-            return []
+        self.model = model or Config.EMBEDDING_MODEL
+        provider = BigModelProvider(api_key=api_key, base_url=base_url)
+        self._client = APIClient(provider, timeout=timeout)
+        self._dimension: int | None = None
 
-        # 构建请求数据
-        request_data = {"model": self.model, "input": texts}
+    @property
+    def dimension(self) -> int:
+        """返回向量维度.
 
-        # 无条件添加 dimensions 参数
-        # 支持的 API 会生效，不支持的 API 会忽略
-        config_dim = int(Config.EMBEDDING_DIMENSION)
-        if config_dim > 0:
-            request_data["dimensions"] = config_dim
-
-        data = self._post(self.embed_url, request_data)
-
-        items = data["data"]
-        items.sort(key=lambda x: x["index"])
-        all_embeddings = [item["embedding"] for item in items]
-
-        # 首次调用：验证维度
-        if not self._dim_validated and all_embeddings:
-            actual_dim = len(all_embeddings[0])
-            expected_dim = Config.EMBEDDING_DIMENSION
-
-            if actual_dim != expected_dim:
-                logger.warning(
-                    f"Embedding dimension mismatch: API returned {actual_dim} dimensions, "
-                    f"but configuration specifies {expected_dim}. "
-                    f"Please update WORKDOCS_EMBEDDING_DIMENSION to {actual_dim} "
-                    f"or verify your model supports the configured dimension."
-                )
-
-            self._actual_dimension = actual_dim
-            self._dim_validated = True
-            logger.info(f"Embedding dimension detected and locked: {actual_dim}")
-
-        return all_embeddings
-
-    def embed_single(self, text: str) -> list[float]:
-        """生成单个文本的嵌入向量."""
-        embeddings = self.embed([text])
-        return embeddings[0] if embeddings else []
-
-    def get_embedding_dimension(self) -> int:
-        """获取嵌入向量维度（首次调用后可用）."""
-        if self._actual_dimension is None:
+        必须在至少成功调用一次 embed() 之后才能获取准确值。
+        """
+        if self._dimension is None:
             raise RuntimeError(
                 "Embedding dimension not yet detected. Call embed() at least once first."
             )
-        return self._actual_dimension
+        return self._dimension
+
+    def _split_text(self, text: str, max_chars: int) -> list[str]:
+        """按段落、行、句子边界拆分超长文本."""
+        if len(text) <= max_chars:
+            return [text]
+
+        # 优先按双换行（段落）拆分
+        chunks: list[str] = []
+        for paragraph in text.split("\n\n"):
+            if len(paragraph) <= max_chars:
+                chunks.append(paragraph)
+                continue
+            # 段落仍超长，按单换行或句子边界拆分
+            for line in paragraph.split("\n"):
+                if len(line) <= max_chars:
+                    chunks.append(line)
+                    continue
+                # 行仍超长，按句子边界硬拆
+                start = 0
+                while start < len(line):
+                    end = start + max_chars
+                    chunks.append(line[start:end])
+                    start = end
+
+        # 合并过小的碎片，减少 API 调用次数
+        merged: list[str] = []
+        current = ""
+        for piece in chunks:
+            if len(current) + len(piece) + 2 <= max_chars:
+                current = f"{current}\n\n{piece}" if current else piece
+            else:
+                if current:
+                    merged.append(current)
+                current = piece
+        if current:
+            merged.append(current)
+        return merged if merged else [text]
+
+    def _call_embedding_api(self, inputs: list[str]) -> list[list[float]]:
+        """调用 Embedding API，返回与 inputs 顺序一致的向量列表."""
+        if not inputs:
+            return []
+
+        response = self._client.post(
+            Config.EMBEDDING_ENDPOINT,
+            json={"model": self.model, "input": inputs},
+        )
+        data = response.json().get("data", [])
+        embeddings = [item.get("embedding", []) for item in data]
+        if len(embeddings) != len(inputs):
+            raise APIError(
+                f"Embedding response length mismatch: expected {len(inputs)}, "
+                f"got {len(embeddings)}",
+                status_code=response.status_code,
+            )
+
+        if self._dimension is None and embeddings:
+            self._dimension = len(embeddings[0])
+        return embeddings
+
+    def _embed_chunks(self, chunks: list[str]) -> list[float] | None:
+        """对拆分后的 chunks 分别 embed 并取平均."""
+        try:
+            embeddings = self._call_embedding_api(chunks)
+        except ContentTooLargeError:
+            # 拆分后仍然超长（极少见），继续二次拆分
+            if Config.EMBED_SPLIT_OVERLONG and any(
+                len(c) > Config.EMBED_MAX_CHARS_PER_TEXT for c in chunks
+            ):
+                smaller: list[str] = []
+                half = Config.EMBED_MAX_CHARS_PER_TEXT // 2
+                for c in chunks:
+                    if len(c) > Config.EMBED_MAX_CHARS_PER_TEXT:
+                        for i in range(0, len(c), half):
+                            smaller.append(c[i : i + half])
+                    else:
+                        smaller.append(c)
+                return self._embed_chunks(smaller)
+            raise
+
+        if not embeddings:
+            return None
+        arr = np.array(embeddings, dtype=np.float32)
+        avg = arr.mean(axis=0)
+        # L2 归一化，保持与原始 embedding 相似的度量方式
+        norm = np.linalg.norm(avg)
+        if norm > 0:
+            avg = avg / norm
+        return avg.tolist()
+
+    def embed(self, texts: list[str]) -> list[list[float]]:
+        """批量获取文本向量.
+
+        超长文本会被拆分后 embed 再平均；单条失败时记录日志并返回零向量，
+        不会导致整个批次失败。
+        """
+        results: list[list[float]] = []
+        for text in texts:
+            text = str(text)
+            try:
+                if Config.EMBED_SPLIT_OVERLONG and len(text) > Config.EMBED_MAX_CHARS_PER_TEXT:
+                    chunks = self._split_text(text, Config.EMBED_MAX_CHARS_PER_TEXT)
+                    embedding = self._embed_chunks(chunks)
+                else:
+                    embedding = self._call_embedding_api([text])[0]
+
+                if embedding is None:
+                    raise APIError("Empty embedding returned")
+                results.append(embedding)
+            except APIError as exc:
+                logger.error(
+                    f"Embedding failed for single text | text_len={len(text)} | "
+                    f"status={exc.status_code} | message={exc.message!r}"
+                )
+                results.append(self._zero_vector())
+            except Exception:
+                logger.exception(f"Unexpected embedding error | text_len={len(text)}")
+                results.append(self._zero_vector())
+        return results
+
+    def embed_single(self, text: str) -> list[float]:
+        """获取单条文本向量."""
+        return self.embed([text])[0]
+
+    def _zero_vector(self) -> list[float]:
+        """返回与当前维度一致的零向量."""
+        dim = self._dimension or Config.EMBEDDING_DIMENSION
+        return [0.0] * dim
 
     def close(self) -> None:
-        """关闭会话."""
-        self._session.close()
+        """关闭底层 HTTP 客户端."""
+        self._client.close()

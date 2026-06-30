@@ -645,7 +645,13 @@ python scripts/admin_tools.py run_eval --params '{"dataset_name":"my_eval","retr
 | `WORKDOCS_LLM_BATCH_TIMEOUT` | `3600` | LLM Batch API 轮询超时（秒） |
 | `WORKDOCS_LLM_MAX_RETRIES` | `3` | LLM 同步请求最大重试次数 |
 | `WORKDOCS_LLM_RETRY_BACKOFF` | `2` | LLM 重试退避系数（秒） |
-| `WORKDOCS_LLM_TIMEOUT` | `120` | LLM 同步请求超时（秒） |
+| `WORKDOCS_LLM_TIMEOUT` | `120` | LLM 同步请求超时（秒）（保留兼容） |
+| `WORKDOCS_HTTP_TIMEOUT` | `120` | 统一 HTTP 请求超时（秒） |
+| `WORKDOCS_HTTP_RETRY_MAX_ATTEMPTS` | `3` | 统一 HTTP 请求最大重试次数 |
+| `WORKDOCS_HTTP_RETRY_BASE_DELAY` | `1.0` | 统一 HTTP 重试基础退避（秒） |
+| `WORKDOCS_HTTP_RETRY_MAX_DELAY` | `60.0` | 统一 HTTP 重试最大退避（秒） |
+| `WORKDOCS_HTTP_RETRY_JITTER` | `true` | 是否启用退避抖动 |
+| `WORKDOCS_HTTP_RETRY_RESPECT_RETRY_AFTER` | `true` | 是否优先使用服务端 Retry-After 头 |
 | **图片配置** | | | |
 | `WORKDOCS_IMAGE_MAX_SIZE` | `1024` | 图片压缩最长边（px） |
 | `WORKDOCS_IMAGE_QUALITY` | `80` | JPEG 压缩质量 1-100（color 模式默认） |
@@ -659,9 +665,11 @@ python scripts/admin_tools.py run_eval --params '{"dataset_name":"my_eval","retr
 | `WORKDOCS_EMBEDDING_MODEL` | `embedding-3` | 向量化模型 |
 | `WORKDOCS_EMBEDDING_DIMENSION` | `1024` | 向量维度 |
 | `WORKDOCS_EMBEDDING_ENDPOINT` | `/v4/embeddings` | Embedding API endpoint（相对路径） |
-| `WORKDOCS_EMBED_MAX_RETRIES` | `3` | Embedding 同步请求最大重试次数 |
-| `WORKDOCS_EMBED_RETRY_BACKOFF` | `2` | Embedding 重试退避系数（秒） |
-| `WORKDOCS_EMBED_TIMEOUT` | `120` | Embedding 同步请求超时（秒） |
+| `WORKDOCS_EMBED_MAX_RETRIES` | `3` | Embedding 同步请求最大重试次数（保留兼容） |
+| `WORKDOCS_EMBED_RETRY_BACKOFF` | `2` | Embedding 重试退避系数（秒）（保留兼容） |
+| `WORKDOCS_EMBED_TIMEOUT` | `120` | Embedding 同步请求超时（秒）（保留兼容） |
+| `WORKDOCS_EMBED_MAX_CHARS_PER_TEXT` | `8192` | 单条 Embedding 文本最大字符数，超过则拆分 |
+| `WORKDOCS_EMBED_SPLIT_OVERLONG` | `true` | 是否对超长文本自动拆分后 embed |
 | **Parser 配置** | | | |
 | `WORKDOCS_PARSER_API_KEY` | 空 | BigModel Expert 解析 API Key（⚠️ 仅用于 PDF 解析，为 BigModel 专有接口） |
 | `WORKDOCS_PARSER_BASE_URL` | `https://open.bigmodel.cn/api/paas/v4` | BigModel Expert 解析 Base URL |
