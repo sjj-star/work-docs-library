@@ -34,9 +34,9 @@ Always produce the answer in this order:
 | ...  | ...  | ...            | ...        | ...      |
 
 ## Key Relations
-| Relation | From | To | Properties |
-|----------|------|----|-----------|
-| ...      | ...  | ...| ...       |
+| Relation | From | To | Properties | Source |
+|----------|------|----|-----------|--------|
+| ...      | ...  | ...| ...       | ...    |
 
 ## Source Evidence
 | doc_id | chapter_title | content_preview |
@@ -49,6 +49,7 @@ Always produce the answer in this order:
 ## Conflicts or Uncertainties
 - If documents disagree, state the disagreement and which source says what.
 - If information is missing, say so.
+- **Mandatory**: If you called `explore(mode="conflicts")`, you must report the conflict here; do not hide it.
 
 ## Next Steps
 - Specific follow-up queries if the answer is incomplete.

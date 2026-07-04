@@ -77,6 +77,7 @@ Load the appropriate sub-skill for the workflow:
 ## Common Pitfalls
 
 - Assuming ingestion succeeds immediately. Always poll `status` after `ingest`.
+- Re-submitting `ingest` just because the first call has not returned yet. Long-running ingest should run in the background; polling `status` by `doc_id` is the correct way to wait.
 - Searching with only one phrasing. Try synonyms and technical abbreviations.
 - Trusting graph relations without tracing provenance via `explore` `mode=provenance`.
 - Forgetting to check `explore` `mode=conflicts` when answers from different documents disagree.

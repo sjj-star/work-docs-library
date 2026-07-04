@@ -31,8 +31,9 @@ Ingestion parses PDFs, extracts chapters, builds LLM batches, runs entity/relati
 
 4. **Choose the action**
    - New PDF or directory → `mcp__workdocs__ingest` with `{"path": "..."}`.
+   - Preview before ingesting → `mcp__workdocs__ingest` with `{"path": "...", "dry_run": true}` (parses and builds batches without calling LLM API).
    - Update/retry an existing document or a failed document → **admin-only**: run `python scripts/admin_tools.py reprocess --params '{"doc_id": "..."}'`. This is not exposed as an MCP tool because it may rewrite graph/vector state.
-   - Fine-grained control (rarely needed) → call the individual `doc_*` tools in order.
+   - Fine-grained stage-by-stage control (rarely needed) → **admin-only**: use `python scripts/admin_tools.py stage1_parse ... stage6_submit_embed_batches`. These are not MCP tools.
 
 5. **Run `ingest` as a background task**
    - **REQUIRED:** Call `mcp__workdocs__ingest` as a background task with `timeout` set to at least 1800 seconds.
@@ -62,6 +63,9 @@ Ingestion parses PDFs, extracts chapters, builds LLM batches, runs entity/relati
 ## Concrete Examples
 
 ```json
+// Preview before ingesting (no API cost)
+{"path": "./docs/spi.pdf", "dry_run": true}
+
 // Start ingestion
 {"path": "./docs/spi.pdf"}
 
