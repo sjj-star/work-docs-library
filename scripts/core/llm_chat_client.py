@@ -19,9 +19,7 @@ logger = logging.getLogger(__name__)
 class BaseLLMClient:
     """LLM 对话客户端."""
 
-    # 保留类常量供测试覆盖兼容性
-    MAX_RETRY_ATTEMPTS = Config.LLM_MAX_RETRIES
-    RETRY_BACKOFF_BASE = Config.LLM_RETRY_BACKOFF
+    # LLM 同步对话请求的超时；重试统一由 APIClient（HTTP_RETRY_* 配置）处理。
     DEFAULT_TIMEOUT = Config.LLM_TIMEOUT
 
     @staticmethod
@@ -66,7 +64,7 @@ class BaseLLMClient:
 
         保留此接口以便现有调用点与部分单测 monkeypatch 兼容。
         实际请求由 APIClient 处理，包含统一的错误分类与重试。
-        url 参数传入相对 path 或完整 URL（完整 URL 仅用于兼容旧调用）。
+        url 参数为相对 path（APIClient 会拼接 base_url）。
         """
         messages = payload.get("messages", [])
         text_len = sum(len(str(m.get("content", ""))) for m in messages)
@@ -80,18 +78,11 @@ class BaseLLMClient:
         logger.info(f"LLM 请求开始 | text_len={text_len} | images={img_count}")
         start_time = time.time()
 
-        # 兼容旧调用传入完整 URL 的情况，提取相对 path
-        path = url
-        if path.startswith(self._client.provider.base_url):
-            path = path[len(self._client.provider.base_url) :]
-        if not path:
-            path = Config.LLM_BATCH_ENDPOINT
-
         original_timeout = self._client.timeout
         if timeout is not None:
             self._client.timeout = timeout
         try:
-            response = self._client.post(path, json=payload)
+            response = self._client.post(url, json=payload)
         finally:
             self._client.timeout = original_timeout
 
@@ -115,9 +106,7 @@ class BaseLLMClient:
             response_data = self._post(Config.LLM_BATCH_ENDPOINT, data)
         except ContentTooLargeError as exc:
             total_len = sum(len(str(m.get("content", ""))) for m in messages)
-            logger.warning(
-                f"LLM 请求内容超长 | text_len={total_len} | message={exc.message!r}"
-            )
+            logger.warning(f"LLM 请求内容超长 | text_len={total_len} | message={exc.message!r}")
             raise
 
         # 防御性校验 API 响应结构

@@ -94,14 +94,9 @@ class Config:
     BATCH_MAX_FILE_SIZE_MB: int = 0  # 将在下方初始化
     BATCH_PARALLEL_WORKERS: int = 0  # 将在下方初始化
 
-    # --- Embedding 客户端参数 ---
-    EMBED_MAX_RETRIES: int = 0  # 将在下方初始化
-    EMBED_RETRY_BACKOFF: int = 0  # 将在下方初始化
-    EMBED_TIMEOUT: int = 0  # 将在下方初始化
-
     # --- LLM 客户端参数 ---
-    LLM_MAX_RETRIES: int = 0  # 将在下方初始化
-    LLM_RETRY_BACKOFF: int = 0  # 将在下方初始化
+    # 注：LLM/Embedding 的重试与超时统一由下方 HTTP_* 配置驱动（见 core/api_client.py）。
+    # LLM_TIMEOUT 单独用于 LLM 同步对话请求的超时。
     LLM_TIMEOUT: int = 0  # 将在下方初始化
     # --- 统一 HTTP 客户端重试配置 ---
     HTTP_TIMEOUT: int = 0  # 将在下方初始化
@@ -183,31 +178,18 @@ class Config:
         cls.BATCH_MAX_FILE_SIZE_MB = int(_resolve_config("WORKDOCS_BATCH_MAX_FILE_SIZE_MB", "100"))
         cls.BATCH_PARALLEL_WORKERS = int(_resolve_config("WORKDOCS_BATCH_PARALLEL_WORKERS", "4"))
 
-        # Embedding 客户端
-        cls.EMBED_MAX_RETRIES = int(_resolve_config("WORKDOCS_EMBED_MAX_RETRIES", "3"))
-        cls.EMBED_RETRY_BACKOFF = int(_resolve_config("WORKDOCS_EMBED_RETRY_BACKOFF", "2"))
-        cls.EMBED_TIMEOUT = int(_resolve_config("WORKDOCS_EMBED_TIMEOUT", "120"))
         # LLM 客户端
-        cls.LLM_MAX_RETRIES = int(_resolve_config("WORKDOCS_LLM_MAX_RETRIES", "3"))
-        cls.LLM_RETRY_BACKOFF = int(_resolve_config("WORKDOCS_LLM_RETRY_BACKOFF", "2"))
         cls.LLM_TIMEOUT = int(_resolve_config("WORKDOCS_LLM_TIMEOUT", "120"))
         # 统一 HTTP 客户端重试配置
         cls.HTTP_TIMEOUT = int(_resolve_config("WORKDOCS_HTTP_TIMEOUT", "120"))
-        cls.HTTP_RETRY_MAX_ATTEMPTS = int(
-            _resolve_config("WORKDOCS_HTTP_RETRY_MAX_ATTEMPTS", "3")
-        )
-        cls.HTTP_RETRY_BASE_DELAY = float(
-            _resolve_config("WORKDOCS_HTTP_RETRY_BASE_DELAY", "1.0")
-        )
-        cls.HTTP_RETRY_MAX_DELAY = float(
-            _resolve_config("WORKDOCS_HTTP_RETRY_MAX_DELAY", "60.0")
-        )
+        cls.HTTP_RETRY_MAX_ATTEMPTS = int(_resolve_config("WORKDOCS_HTTP_RETRY_MAX_ATTEMPTS", "3"))
+        cls.HTTP_RETRY_BASE_DELAY = float(_resolve_config("WORKDOCS_HTTP_RETRY_BASE_DELAY", "1.0"))
+        cls.HTTP_RETRY_MAX_DELAY = float(_resolve_config("WORKDOCS_HTTP_RETRY_MAX_DELAY", "60.0"))
         cls.HTTP_RETRY_JITTER = (
             _resolve_config("WORKDOCS_HTTP_RETRY_JITTER", "true").lower() == "true"
         )
         cls.HTTP_RETRY_RESPECT_RETRY_AFTER = (
-            _resolve_config("WORKDOCS_HTTP_RETRY_RESPECT_RETRY_AFTER", "true").lower()
-            == "true"
+            _resolve_config("WORKDOCS_HTTP_RETRY_RESPECT_RETRY_AFTER", "true").lower() == "true"
         )
         cls.EMBED_MAX_CHARS_PER_TEXT = int(
             _resolve_config("WORKDOCS_EMBED_MAX_CHARS_PER_TEXT", "8192")

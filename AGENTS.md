@@ -164,22 +164,8 @@ PYTHONPATH=scripts ./.venv/bin/python -m pytest scripts/tests/ -v
 - **524 个测试用例必须全部通过**（0 skipped）
 
 ### 测试文件清单
-| 测试文件 | 说明 |
-|----------|------|
-| `test_plugin_router.py` | Plugin 工具路由、参数解析、路径沙箱 |
-| `test_pdf_parser.py` | PDF 解析核心测试 |
-| `test_db.py` | SQLite 操作、事务管理 |
-| `test_vector_index.py` | FAISS 索引增删查 |
-| `test_graph_store.py` | NetworkX 图谱存储 CRUD、冲突检测、路径搜索 |
-| `test_api_client.py` | 统一 API 客户端重试与错误分类 |
-| `test_batch_clients.py` | Batch API 客户端 Mock |
-| `test_embedding_client.py` | Embedding 超长拆分与单条失败隔离 |
-| `test_knowledge_base_service.py` | 统一服务层测试 |
-| `test_pipeline_stages.py` | 六阶段 pipeline 拆分 |
-| `test_mcp_server.py` | MCP Server 工具注册与 JSON-RPC |
-| `test_status_tool.py` | 状态仪表盘各 scope |
-| `test_usage_logger.py`, `test_status_usage.py`, `test_status_trace.py` | 使用日志与审计 |
-| `test_*.py` | 其他模块测试（详见 `scripts/tests/`） |
+
+> 完整的测试文件清单与分类见 `README.md`「开发与测试」（唯一权威详表），此处不再重复维护，避免双份漂移。
 
 **当前状态**：524 passed, 0 skipped, 0 failed。
 
@@ -309,7 +295,7 @@ monkeypatch.setattr(
 | 防御性编程与状态安全原则（7 条） | `DESIGN.md` 第 20 章（审计教训与新增开发原则） | 2026-04 审计 21 项缺陷的教训总结 |
 | Block/Sub-block 概念与生成链路 | `DESIGN.md` 第 16 章 | 概念定义、继承表、切分策略、设计意图 |
 | Prompt 设计演进与策略约束 | `DESIGN.md` 第 22 章 | 三步提取流程、代码排除规则、属性格式规范、变更历史 |
-| 配置系统与完整配置项速查 | `README.md`「配置说明」 | 三层优先级、全部活跃配置项（约 62 项） |
+| 配置系统与完整配置项速查 | `README.md`「配置说明」 | 三层优先级、全部活跃配置项（以 README 配置表为准） |
 | 环境隔离与测试基础设施 | `README.md`「开发与测试」 | conftest.py 三重隔离机制 |
 | 官方 API 开发文档链接 | `README.md`「参考资源」 | Kimi / BigModel API 文档 |
 
@@ -338,6 +324,5 @@ monkeypatch.setattr(
 
 ### PDF Parser 表格检测
 - Grid 表格用 `find_tables(strategy="lines_strict")`；Horizontal（AMBA 等零高度线）用 `BorderlessTableExtractor`
-- 当前空跑率：TI 1.4% / AMBA 0.0% / SPRUI07 8.8% / DC_UG 28.6%
-- 下一步：收紧 TABLE_CAPTION_RE、跳过跨页续表；详见 `DESIGN.md` 第 26 章
-4. **to_markdown 性能**：TI 中 to_markdown 耗时比 find_tables 还高 31%，但为 PyMuPDF C 实现，外部优化空间极小
+- 各文档空跑率与下一步优化（收紧 TABLE_CAPTION_RE、跳过跨页续表等）详见 `DESIGN.md` 第 26 章（唯一源头，避免双份维护）
+- `to_markdown` 性能：TI 中 to_markdown 耗时比 find_tables 还高 31%，但为 PyMuPDF C 实现，外部优化空间极小

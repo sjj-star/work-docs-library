@@ -95,7 +95,7 @@ User intent
 
 - `search.top_k`: 5-10 for overview, 15-20 when the topic is broad.
 - `search.mode`: **default to `"hybrid"`**. Use `"semantic"` only for fuzzy recall. Use `"reranked"` only when precision is critical and cost is acceptable.
-- `search.candidate_k` (reranked mode): 3-4 × top_k.
+- `search.rerank_candidate_k` (reranked mode): 3-4 × top_k.
 - `search.include_graph`: default `true` so you get entities and relations for the next explore step.
 - `explore` `neighbors`/`subgraph` depth: 1 for initial context, 2 only if relations are sparse.
 - Prefer exact `name` in `explore`; if no result, try substring or wildcard.

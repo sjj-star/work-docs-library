@@ -146,7 +146,7 @@
 - **单用户场景**：本项目为本地部署的 Kimi CLI Plugin，无多用户并发需求
 - **零运维**：无需安装、配置、维护数据库服务，一个 `.db` 文件即完整数据库
 - **事务简单**：`KnowledgeDB._connect()` 使用上下文管理器，自动 commit/close
-- **足够当前需求**：当前 Schema 包含 `_schema_meta`（版本管理）、`documents`（文档元数据）、`content_blocks`（内容块）、`heading_maps`（标题映射）、`conflict_logs`（同名实体属性冲突日志）、`feedback`（实体/关系用户反馈）六张表，无复杂查询
+- **足够当前需求**：当前 Schema 包含九张表：`documents`（文档元数据）、`content_blocks`（内容块）、`heading_maps`（标题映射）、`conflict_logs`（同名实体属性冲突日志）、`feedback`（实体/关系用户反馈）、`usage_logs`（统一使用/审计日志）、`block_activation`（向量 block 命中计数）、`eval_datasets`/`eval_questions`（评估数据集），无复杂查询
 
 **权衡**：
 - 单进程写入为主；FAISS 已加 `fcntl` 进程级文件锁防并发覆盖，但不建议多进程并发 reprocess
@@ -494,19 +494,21 @@ score(d) = Σ 1 / (k + rank_d)
 - 稀疏索引懒加载并缓存于 `KnowledgeBaseService._sparse_index`
 - 文档入库/重处理完成后调用 `_invalidate_sparse_index()`，下次 `search_hybrid` 自动重建
 
-### 重排序：LLM 交叉编码器 Reranker
+### 重排序：LLM 交叉编码器 / 本地 CrossEncoder Reranker
 
-**设计**：`LLMReranker` 作为可选的第二级精排，接收 hybrid 检索的候选 passages，由 LLM 判断每个 passage 与 query 的相关度（0-10），再按得分重排。
+**设计**：可选的第二级精排，接收 hybrid 检索的候选 passages，对每个 `(query, passage)` 打分后重排。提供两种实现：
+- `LLMReranker`：由 LLM 判断每个 passage 与 query 的相关度（0-10），成本较高、无需本地依赖。
+- `CrossEncoderReranker`：基于 `sentence-transformers.CrossEncoder` 的本地交叉编码器，模型由 `RERANK_CROSS_ENCODER_MODEL` 配置（默认 `BAAI/bge-reranker-v2-m3`），无需外部 API 调用。
 
 **实现要点**：
 - 提示词使用 `string.Template.safe_substitute`，防止用户 query/passages 中包含 `$` 字符时触发异常
-- 提示词文件：`rerank_passage_system.txt`、`rerank_passage_user.txt`
+- 提示词文件（LLMReranker）：`rerank_passage_system.txt`、`rerank_passage_user.txt`
 - 返回格式要求为 JSON 数组（与 passages 一一对应）或 `{"scores": [...]}`，非法格式时回退为全 0 分
-- 对 LLM 调用异常做捕获兜底：rerank 失败时直接返回 hybrid 结果，不影响搜索可用性
+- 对调用异常做捕获兜底：rerank 失败时直接返回 hybrid 结果，不影响搜索可用性
 
 **KnowledgeBaseService 集成**：
-- `search_reranked(text, top_k, candidate_k)`：先 `search_hybrid` 取 `candidate_k`（默认 `top_k * 4`）个候选，再调用 `LLMReranker.rank()`
-- 由于涉及同步 LLM 调用，reranked 检索成本显著高于纯 hybrid；仅当精度优先时使用
+- `search_reranked(text, top_k, candidate_k)`：先 `search_hybrid` 取 `candidate_k`（默认 `top_k * 4`）个候选，再调用 reranker 精排（MCP 层参数名为 `rerank_candidate_k`）
+- 由于涉及同步 LLM/模型推理，reranked 检索成本显著高于纯 hybrid；仅当精度优先时使用
 
 ### 检索能力矩阵
 
@@ -628,6 +630,7 @@ explore(mode="entity", entity_type="Product", name="TMS320F28379D")
 | Stage 1 | result.md | `parsed/{doc_id}/result.md` | 解析后的 Markdown（可人工编辑） |
 | Stage 2 | requests.jsonl | `batch/{doc_id}.jsonl` | LLM Batch API 输入请求 |
 | Stage 2 | batch_info.json | `batch/{doc_id}_batch_info.json` | request → chapter 映射 |
+| Stage 2 | blocks.json | `batch/{doc_id}_blocks.json` | content_blocks + heading_maps 快照，供 Stage 4 入库复用 |
 | Stage 3 | results.jsonl | `batch/{doc_id}_results.jsonl` | LLM Batch API 原始返回结果（Chat 模式下格式完全一致，Stage 4 零修改复用） |
 | Stage 3 | incremental.json | `batch/{doc_id}_incremental.json` | 增量分析摘要 + result.md hash |
 | Stage 4 | 子图谱 | `graphs/{doc_id}.json` | 文档级图谱快照 |
@@ -652,7 +655,7 @@ explore(mode="entity", entity_type="Product", name="TMS320F28379D")
 **背景**：
 - 2026-04 代码审计发现 21 项缺陷（9 个 P0 数据损坏风险、7 个 P1 可靠性缺陷、5 个 P2 代码质量问题），已全部修复并通过 514 个测试验证。
 - 2026-06 再次审计发现 Critical/High 级安全与数据完整性问题，按「最小紧急修复」方案修复后测试数达到 514 个。
-- 2026-06 接口精简：基于审计发现 Agent 在 14 个 MCP 工具间混淆的问题，将工具面收敛到 5 个，并将 `KnowledgeBaseService` 的查询组合逻辑拆出为 `QueryService`；测试数精简为 506 个。
+- 2026-06 接口精简：基于审计发现 Agent 在 14 个 MCP 工具间混淆的问题，将工具面收敛到 5 个，并将 `KnowledgeBaseService` 的查询组合逻辑拆出为 `QueryService`（当时测试数精简为 506 个）。此后随统一 `APIClient`、使用跟踪与评估等能力补充，测试集当前为 524 个（以最近一次 pytest 输出为准）。
 
 **关键教训**：
 
@@ -761,6 +764,8 @@ Step 3: 关系链补全 + 去重检查
 - **支撑类型**：Product、Document、Parameter、ClockDomain、ResetDomain
 - **精简移除**：Pin、Package、ElectricalSpec、ApplicationDomain、OrderingInfo、Advisory、Workaround、SiliconRevision、UsageNote、Protocol、ProtocolLayer、TransactionType、Channel、MessageField、Function、DataStructure、Section、BuildConfig、CodeExample、Scenario、TestCase
 
+> 注：此处「精简移除」指 **prompt 层去焦**（不再引导 LLM 主动提取这些类型），并非删除 schema 常量。`graph_store.py` 的 `ALL_NODE_TYPES`/`ALL_REL_TYPES` 仍保留全部类型常量，以便这些实体在其他文档中被显式提及时仍可入图（机制与策略分离原则）。
+
 **Step 1 分类从 9 个聚焦为 8 个**：
 
 ```
@@ -796,7 +801,7 @@ Step 1: 内容分类（8 种类型）
 
 ### 22.3 实体类型优先级与互斥规则
 
-**优先级链**：`Module > Register > Signal > Instruction > Parameter > Feature`
+**优先级链**：`Peripheral > Module > Register > Signal > Instruction > Parameter`
 
 **互斥原则**：同一个概念在同一文档中只能属于一个类型。
 
@@ -949,7 +954,8 @@ CREATE INDEX IF NOT EXISTS idx_eval_q_dataset ON eval_questions(dataset_name);
 
 **基类**：`BaseJudgeMetric`
 - 封装 `_judge(system_prompt_name, user_prompt_name, **kwargs)`，统一调用 `BaseLLMClient.chat`
-- 提示词文件：`eval_faithfulness_*.txt`、`eval_context_precision_*.txt`、`eval_context_recall_*.txt`
+- 提示词文件：`eval_faithfulness_*.txt`、`eval_context_precision_*.txt`、`eval_context_recall_*.txt`、`eval_answer_relevancy_*.txt`
+- 端到端 RAG 评估的答案生成使用 `eval_generate_answer_system.txt` / `eval_generate_answer_user.txt`（见 `EvalHarness._generate_answer`）
 - 对非 JSON 返回做空字典兜底，避免单次 judge 失败中断整批评估
 
 **具体指标**：
@@ -959,6 +965,7 @@ CREATE INDEX IF NOT EXISTS idx_eval_q_dataset ON eval_questions(dataset_name);
 | `FaithfulnessMetric` | 答案忠实度 | question, answer, contexts | `score` + supported/unsupported/not_found claims |
 | `ContextPrecisionMetric` | 检索上下文精确度 | question, contexts | `score` + 每段 relevance bool 列表 |
 | `ContextRecallMetric` | 检索上下文召回率 | ground_truth_answer, contexts | `score` + attributable/not_attributable claims |
+| `AnswerRelevancyMetric` | 答案与问题相关度 | question, answer | `score`（[0,1]，非法/越界回退 0.0） |
 
 **Judge 调用策略**：
 - `EvalHarness` 对三个 judge 指标使用懒加载属性
@@ -1688,6 +1695,8 @@ read(with_entities=true)（block+实体联合返回）:
 | `PARAMETERIZED_BY` | Module → Parameter（参数化配置） |
 | `INSTANCE_OF` | Module → Module（实例化：instance → definition） |
 
+> 此外，结构归属关系 `HAS_MODULE`（`Product/Document → Module`，由 pipeline 在解析产品型号时直接创建，见第 18 章）同样登记于 `graph_store.py` 的 `ALL_REL_TYPES`，作为产品级查询入口。
+
 ---
 
 ## 31. 已知限制与权衡汇总
@@ -1724,3 +1733,71 @@ read(with_entities=true)（block+实体联合返回）:
 | 环境配置 | `python-dotenv` | — |
 | 测试 | `pytest` | — |
 | 代码质量 | `ruff`、`pyright` | — |
+
+
+---
+
+## 33. 统一 API 错误分类与重试（`core/api_client.py`）
+
+**背景**：重构（commit `ab3d8b8`）之前，LLM 对话、Embedding、Batch 文件操作、PDF 解析
+四个客户端各自实现 ad-hoc 的重试与超时逻辑，错误分类不一致、退避策略重复。为消除重复
+并统一可观测性，引入了单一的 `APIClient` + `APIProvider` + `RetryPolicy` 基座，所有同步
+HTTP API 调用都经由它发出。
+
+### 架构
+
+- **`APIClient.request()`**：唯一的错误驱动重试循环。成功即返回；捕获 `requests.HTTPError`
+  后交由 provider 分类，可重试错误按退避 sleep 后重试，不可重试或到达最大次数则抛出；
+  `requests.Timeout`/`ConnectionError` 包装为 `TransientError`（可重试）。
+- **`APIProvider`（抽象）**：由 `KimiProvider` / `BigModelProvider` 实现，提供 `base_url`、
+  `auth_headers()`、`retry_policy()` 与 `classify(status_code, body)`。
+- **`RetryPolicy`（冻结 dataclass）**：字段来自 `HTTP_RETRY_*` 配置，封装 `is_retryable()`
+  与 `compute_delay()`。
+
+### 错误分类体系
+
+| 异常 | 语义 | 是否重试 |
+|------|------|---------|
+| `AuthenticationError` | 401/402（及 Kimi 402） | 否 |
+| `QuotaExceededError` | 403、配额型 429 | 否 |
+| `RateLimitError` | 429（频率限制） | 是 |
+| `ServerOverloadedError` | 服务端过载（Kimi 429 含 `overloaded`、BigModel 503） | 是 |
+| `ServerError` | 500/502/504（Kimi 亦含 503） | 是 |
+| `TransientError` | 网络超时/连接错误 | 是 |
+| `ContentTooLargeError` | 400 输入超长 | 否（由调用方拆分/截断） |
+| `ContentFilterError` | 400 内容安全拦截 | 否 |
+| `RequestFormatError` | 400 其他/404 | 否 |
+
+**Provider 分类差异**：
+- Kimi 对 429 先按 message 关键词细分：命中配额类关键词（`usage limit` 等）→ 不可重试的
+  `QuotaExceededError`；命中 `overloaded` → `ServerOverloadedError`；否则 `RateLimitError`。
+  503 归入 `ServerError`。
+- BigModel 对 429 一律归为 `RateLimitError`（不做配额细分）；503 单独归为 `ServerOverloadedError`。
+
+### 退避策略
+
+- 指数退避 `base_delay * 2**attempt`，乘以抖动因子（`1 + random()`，可关闭），并以 `max_delay` 封顶。
+- 若开启 `respect_retry_after` 且响应含 `Retry-After` 头，则优先采用该值。
+- 配置族（默认值见 README「配置说明」）：`HTTP_RETRY_MAX_ATTEMPTS`(3)、`HTTP_RETRY_BASE_DELAY`(1.0)、
+  `HTTP_RETRY_MAX_DELAY`(60.0)、`HTTP_RETRY_JITTER`(true)、`HTTP_RETRY_RESPECT_RETRY_AFTER`(true)、
+  `HTTP_TIMEOUT`(120)。LLM 同步对话额外用 `LLM_TIMEOUT`(120) 作为超时，PDF 解析用 `PARSER_TIMEOUT`(60)。
+
+### 错误重试 vs 状态轮询
+
+需区分两类「重试」：
+- **错误驱动重试**：仅 `APIClient.request()`。
+- **异步任务状态轮询**：Batch（`BATCH_MAX_POLL_RETRIES` × `BATCH_POLL_INTERVAL`）与 Parser
+  （`PARSER_MAX_RETRIES` × `PARSER_POLL_INTERVAL`）等待任务完成的固定间隔轮询，本身不是错误重试；
+  但其每一次单独 HTTP 请求仍受 `APIClient` 的错误重试保护。
+
+### 应用层容错（非重试）
+
+- **Embedding**：超长文本按边界预拆分后 embed 再平均（`EMBED_SPLIT_OVERLONG` /
+  `EMBED_MAX_CHARS_PER_TEXT`）；单条失败隔离为零向量，不影响整批。
+
+### 变更历史（死配置清理，2026-07）
+
+统一到 `HTTP_RETRY_*` 后，旧的每客户端重试旋钮 `LLM_MAX_RETRIES`、`LLM_RETRY_BACKOFF`、
+`EMBED_MAX_RETRIES`、`EMBED_RETRY_BACKOFF`、`EMBED_TIMEOUT` 已不再驱动任何行为，连同
+`BaseLLMClient` 的失效类常量 `MAX_RETRY_ATTEMPTS` / `RETRY_BACKOFF_BASE` 一并删除；
+`LLM_TIMEOUT` 因仍用于 LLM 同步对话超时而保留。

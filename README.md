@@ -158,7 +158,7 @@ flowchart LR
 1. **`search` — 统一检索入口**
    - `mode=semantic`：通过 `EmbeddingClient` 对 query 编码，`VectorIndex.search` 在 FAISS 中检索最近邻，返回 `block_db_id` 与 dense score。
    - `mode=hybrid`：同时触发稠密检索（FAISS，top 50）与 BM25 稀疏检索（`BM25SparseIndex`，CJK 2-gram + 英文标识符分词，top 50）。`RRFFusionRetriever` 使用 RRF 公式 `score = Σ 1/(k+rank)`（默认 `k=60`）融合两份结果，按 fused score 返回 top_k blocks。
-   - `mode=reranked`：先执行 hybrid 检索获取候选 passage 集合（`candidate_k` 默认 `top_k*4`），再通过 `LLMReranker` 或本地 `CrossEncoderReranker` 对 `(query, passage)` 打分，按 relevance score 降序返回 top_k；LLM/CrossEncoder 失败时回退到 hybrid 结果。
+   - `mode=reranked`：先执行 hybrid 检索获取候选 passage 集合（MCP 参数 `rerank_candidate_k`，默认 `top_k*4`），再通过 `LLMReranker` 或本地 `CrossEncoderReranker` 对 `(query, passage)` 打分，按 relevance score 降序返回 top_k；LLM/CrossEncoder 失败时回退到 hybrid 结果。
    - 三种模式均可通过 `graph_depth>0` 经 `_EntityChunkBridge` 扩展相关实体与子图。
 
 2. **`explore` — 统一图谱入口**
@@ -306,7 +306,7 @@ work-docs-library/
 │   │   ├── pdf_parser.py         # PDF 本地解析器（fallback，输出与 BigModel 一致）
 │   │   ├── office_parser.py      # DOCX / XLSX 解析器（代码存在，尚未接入 pipeline）
 │   │   └── image_utils.py        # 图片压缩工具
-│   └── tests/                    # pytest 测试集（506 个用例）
+│   └── tests/                    # pytest 测试集（524 个用例）
 ├── knowledge_base/               # 运行时自动生成
 │   ├── workdocs.db               # SQLite 元数据
 │   ├── faiss.index               # FAISS 向量索引（IndexIDMap2，直接存储 block_db_id）
@@ -498,7 +498,7 @@ mcp__workdocs__search {"mode": "semantic", "text": "AH bus arbitration", "top_k"
 mcp__workdocs__search {"mode": "hybrid", "text": "AH bus arbitration priority", "top_k": 5}
 
 # 混合检索候选 + LLM cross-encoder 重排序（更精准，成本更高）
-mcp__workdocs__search {"mode": "reranked", "text": "AH bus arbitration priority", "top_k": 5, "candidate_k": 20}
+mcp__workdocs__search {"mode": "reranked", "text": "AH bus arbitration priority", "top_k": 5, "rerank_candidate_k": 20}
 ```
 
 ### 5. Agentic 搜索规划
@@ -643,9 +643,7 @@ python scripts/admin_tools.py run_eval --params '{"dataset_name":"my_eval","retr
 | `WORKDOCS_LLM_BATCH_MAX_CHARS` | `10000` | 每个 LLM batch 最大文本字符数（LLM 聚合粒度） |
 | `WORKDOCS_BLOCK_MAX_CHARS` | `6000` | content_blocks 存储切分粒度（向量化粒度），基于 BigModel embedding-3 经验值 |
 | `WORKDOCS_LLM_BATCH_TIMEOUT` | `3600` | LLM Batch API 轮询超时（秒） |
-| `WORKDOCS_LLM_MAX_RETRIES` | `3` | LLM 同步请求最大重试次数 |
-| `WORKDOCS_LLM_RETRY_BACKOFF` | `2` | LLM 重试退避系数（秒） |
-| `WORKDOCS_LLM_TIMEOUT` | `120` | LLM 同步请求超时（秒）（保留兼容） |
+| `WORKDOCS_LLM_TIMEOUT` | `120` | LLM 同步对话请求超时（秒） |
 | `WORKDOCS_HTTP_TIMEOUT` | `120` | 统一 HTTP 请求超时（秒） |
 | `WORKDOCS_HTTP_RETRY_MAX_ATTEMPTS` | `3` | 统一 HTTP 请求最大重试次数 |
 | `WORKDOCS_HTTP_RETRY_BASE_DELAY` | `1.0` | 统一 HTTP 重试基础退避（秒） |
@@ -665,9 +663,6 @@ python scripts/admin_tools.py run_eval --params '{"dataset_name":"my_eval","retr
 | `WORKDOCS_EMBEDDING_MODEL` | `embedding-3` | 向量化模型 |
 | `WORKDOCS_EMBEDDING_DIMENSION` | `1024` | 向量维度 |
 | `WORKDOCS_EMBEDDING_ENDPOINT` | `/v4/embeddings` | Embedding API endpoint（相对路径） |
-| `WORKDOCS_EMBED_MAX_RETRIES` | `3` | Embedding 同步请求最大重试次数（保留兼容） |
-| `WORKDOCS_EMBED_RETRY_BACKOFF` | `2` | Embedding 重试退避系数（秒）（保留兼容） |
-| `WORKDOCS_EMBED_TIMEOUT` | `120` | Embedding 同步请求超时（秒）（保留兼容） |
 | `WORKDOCS_EMBED_MAX_CHARS_PER_TEXT` | `8192` | 单条 Embedding 文本最大字符数，超过则拆分 |
 | `WORKDOCS_EMBED_SPLIT_OVERLONG` | `true` | 是否对超长文本自动拆分后 embed |
 | **Parser 配置** | | | |
@@ -709,6 +704,11 @@ python scripts/admin_tools.py run_eval --params '{"dataset_name":"my_eval","retr
 | **Pipeline / Graph** | | | |
 | `WORKDOCS_GRAPH_MAX_PATH_DEPTH` | `6` | 图谱路径搜索最大深度 |
 | `WORKDOCS_GRAPH_OUTPUT_DIR` | `graphs` | 图谱 JSON 输出目录 |
+| **重排序配置** | | | |
+| `WORKDOCS_RERANK_CROSS_ENCODER_MODEL` | `BAAI/bge-reranker-v2-m3` | 本地 CrossEncoder 重排序模型名称或路径（`sentence-transformers`） |
+| **使用日志 / 审计** | | | |
+| `WORKDOCS_USAGE_LOG_MAX_DAYS` | `30` | usage_logs 保留天数 |
+| `WORKDOCS_USAGE_LOG_MAX_ROWS` | `10000` | usage_logs 最大行数 |
 
 ### 超时调节指南
 
@@ -721,9 +721,9 @@ python scripts/admin_tools.py run_eval --params '{"dataset_name":"my_eval","retr
 - 当前默认 120 秒不足以完成模型推理
 
 **超时后会发生什么？**
-- Chat 模式下，`_post()` 在超时后**不再进行无意义重试**（重试使用相同 timeout 无法解决请求过大的问题）
-- 失败请求会以 500 状态码记录到 `results.jsonl`，Stage 4 会跳过该请求（对应 chapter 无实体提取结果）
-- 日志会输出当前超时值和建议调节值
+- 超时被统一 `APIClient` 视为可重试的瞬时错误（`TransientError`），按 `HTTP_RETRY_*` 策略指数退避重试（默认最多 3 次）
+- 重试仍全部失败后异常向上抛出；Chat 模式下该请求以 500 状态码记录到 `results.jsonl`，Stage 4 会跳过该请求（对应 chapter 无实体提取结果）
+- 日志会输出当前超时值与重试信息
 
 **如何调节？**
 
@@ -742,7 +742,7 @@ export WORKDOCS_LLM_TIMEOUT=300
 
 **其他相关超时参数**：
 - `WORKDOCS_LLM_BATCH_TIMEOUT=3600`：Batch API 轮询超时（通常无需调节）
-- `WORKDOCS_EMBED_TIMEOUT=120`：Embedding 同步请求超时（纯文本向量化，通常无需调节）
+- `WORKDOCS_HTTP_TIMEOUT=120`：统一 HTTP 请求超时（Embedding / Batch 文件操作等，纯文本向量化通常无需调节）
 - `WORKDOCS_PARSER_TIMEOUT=60`：PDF 解析超时（BigModel Expert 解析通常很快，无需调节）
 
 ---
@@ -917,7 +917,7 @@ cd /path/to/work-docs-library
 PYTHONPATH=scripts ./.venv/bin/python -m pytest scripts/tests/ -v
 ```
 
-**当前状态：506 passed, 0 skipped, 0 failed。**
+**当前状态：524 passed, 0 skipped, 0 failed。**
 
 ### 测试分类与审计
 
@@ -930,7 +930,7 @@ PYTHONPATH=scripts ./.venv/bin/python -m pytest \
   scripts/tests/test_vector_index.py \
   scripts/tests/test_db.py \
   scripts/tests/test_knowledge_base_service.py \
-  scripts/tests/test_knowledge_base_service_queries.py -v
+  scripts/tests/test_query_service.py -v
 
 # 仅运行 Pipeline 集成测试（<5s）
 PYTHONPATH=scripts ./.venv/bin/python -m pytest \
@@ -939,40 +939,45 @@ PYTHONPATH=scripts ./.venv/bin/python -m pytest \
   scripts/tests/test_pdf_parser.py -v
 ```
 
-| 分类 | 文件 | 用例数 | 价值 | 说明 |
-|------|------|--------|------|------|
-| **核心基础设施** | `test_graph_store.py` | 77 | 🔴 高 | 图谱存储 CRUD、路径搜索、属性索引、持久化 |
-| | `test_vector_index.py` | 14 | 🔴 高 | FAISS IndexIDMap2 增删查、事务 |
-| | `test_db.py` | 15 | 🔴 高 | SQLite CRUD、事务、冲突日志、反馈 |
-| | `test_knowledge_base_service.py` | 21 | 🔴 高 | 统一服务层、实体-Chunk 桥接 |
-| | `test_knowledge_base_service_queries.py` | 3 | 🔴 高 | 语义-图谱联合查询（核心卖点） |
-| **Pipeline 集成** | `test_pdf_parser.py` | 71 | 🔴 高 | PDF 解析、图片提取、表格检测、14 个真实页面 fixture |
-| | `test_pipeline_stages.py` | 31 | 🔴 高 | 六阶段 pipeline 拆分、增量更新、fallback |
-| | `test_plugin_router.py` | 55 | 🔴 高 | Plugin 工具路由、参数校验、路径沙箱 |
-| **回归测试** | `test_audit_issues.py` | 10 | 🔴 高 | 生产 bug/审计问题的定向回归（FAISS 重复、深拷贝污染、路径沙箱、FAISS/SQLite 事务一致性等） |
-| **模块单元测试** | `test_batch_builder.py` | 14 | 🟡 中 | Batch 文本切分保护（代码块/表格/段落边界） |
-| | `test_batch_clients.py` | 19 | 🟡 中 | Batch API 客户端 JSONL/提交/轮询/超时 |
-| | `test_chapter_parser.py` | 20 | 🟡 中 | 章节树解析、标题层级、代码块保护 |
-| | `test_config_env.py` | 13 | 🟡 中 | 环境变量配置优先级、默认值、敏感 key 脱敏 |
-| | `test_content_blocks.py` | 10 | 🟡 中 | 内容块切分、heading_maps 构建 |
-| | `test_llm_client.py` | 9 | 🟡 中 | Embedding/Chat 客户端、重试退避 |
-| | `test_image_utils.py` | 13 | 🟡 中 | 图片压缩、三分类（彩色/灰度/黑白） |
-| | `test_bigmodel_parser_client.py` | 8 | 🟡 中 | BigModel Expert 解析器轮询/下载/ZIP 路径遍历防护 |
-| | `test_office_parser.py` | 3 | 🟡 中 | DOCX/XLSX 解析（尚未接入 pipeline） |
-| | `test_borderless_table_extractor.py` | 3 | 🟡 中 | AMBA 风格无边框表格提取 |
-| | `test_table_utils.py` | 4 | 🟡 中 | Markdown 表格规范化 |
-| | `test_parsed_docs_jsonl.py` | 2 | 🟡 中 | 真实文档端到端 JSONL 生成 |
-| **检索与评估** | `test_sparse_index.py` | 9 | 🟡 中 | BM25 稀疏索引构建与 CJK/英文分词测试 |
-| | `test_hybrid_retriever.py` | 3 | 🟡 中 | RRF 融合检索（稠密 + 稀疏）测试 |
-| | `test_reranker.py` | 9 | 🟡 中 | LLM 重排序解析与排序测试 |
-| | `test_agentic_search.py` | 11 | 🟡 中 | Agentic 搜索规划器步骤解析测试 |
-| | `test_evaluation.py` | 21 | 🟡 中 | 检索指标（hit rate/MRR/NDCG）与 LLM-as-judge 指标测试 |
-| **接口测试** | `test_mcp_server.py` | 10 | 🟡 中 | MCP Server 工具暴露与调用协议测试 |
-| | `test_status_tool.py` | 13 | 🟡 中 | 结构化状态仪表盘各 scope 测试 |
+| 分类 | 文件 | 价值 | 说明 |
+|------|------|------|------|
+| **核心基础设施** | `test_graph_store.py` | 🔴 高 | 图谱存储 CRUD、路径搜索、属性索引、持久化 |
+| | `test_vector_index.py` | 🔴 高 | FAISS IndexIDMap2 增删查、事务 |
+| | `test_db.py` | 🔴 高 | SQLite CRUD、事务、冲突日志、反馈 |
+| | `test_knowledge_base_service.py` | 🔴 高 | 统一服务层、实体-Chunk 桥接 |
+| | `test_query_service.py` | 🔴 高 | 语义-图谱联合查询（核心卖点） |
+| **Pipeline 集成** | `test_pdf_parser.py` | 🔴 高 | PDF 解析、图片提取、表格检测、真实页面 fixture |
+| | `test_pipeline_stages.py` | 🔴 高 | 六阶段 pipeline 拆分、增量更新、fallback |
+| | `test_plugin_router.py` | 🔴 高 | Plugin 工具路由、参数校验、路径沙箱 |
+| **回归测试** | `test_audit_issues.py` | 🔴 高 | 生产 bug/审计问题的定向回归（FAISS 重复、深拷贝污染、路径沙箱、FAISS/SQLite 事务一致性等） |
+| **API 客户端** | `test_api_client.py` | 🔴 高 | 统一 `APIClient` + Provider 错误分类与重试退避 |
+| | `test_batch_clients.py` | 🟡 中 | Batch API 客户端 JSONL/提交/轮询/超时 |
+| | `test_embedding_client.py` | 🟡 中 | Embedding 超长拆分与单条失败隔离 |
+| | `test_llm_client.py` | 🟡 中 | LLM 对话客户端请求与响应校验 |
+| | `test_bigmodel_parser_client.py` | 🟡 中 | BigModel Expert 解析器轮询/下载/ZIP 路径遍历防护 |
+| **模块单元测试** | `test_batch_builder.py` | 🟡 中 | Batch 文本切分保护（代码块/表格/段落边界） |
+| | `test_chapter_parser.py` | 🟡 中 | 章节树解析、标题层级、代码块保护 |
+| | `test_config_env.py` | 🟡 中 | 环境变量配置优先级、默认值、敏感 key 脱敏 |
+| | `test_content_blocks.py` | 🟡 中 | 内容块切分、heading_maps 构建 |
+| | `test_image_utils.py` | 🟡 中 | 图片压缩、三分类（彩色/灰度/黑白） |
+| | `test_office_parser.py` | 🟡 中 | DOCX/XLSX 解析（尚未接入 pipeline） |
+| | `test_borderless_table_extractor.py` | 🟡 中 | AMBA 风格无边框表格提取 |
+| | `test_table_utils.py` | 🟡 中 | Markdown 表格规范化 |
+| | `test_parsed_docs_jsonl.py` | 🟡 中 | 真实文档端到端 JSONL 生成 |
+| **检索与评估** | `test_sparse_index.py` | 🟡 中 | BM25 稀疏索引构建与 CJK/英文分词测试 |
+| | `test_hybrid_retriever.py` | 🟡 中 | RRF 融合检索（稠密 + 稀疏）测试 |
+| | `test_reranker.py` | 🟡 中 | LLM/CrossEncoder 重排序解析与排序测试 |
+| | `test_agentic_search.py` | 🟡 中 | Agentic 搜索规划器步骤解析测试 |
+| | `test_evaluation.py` | 🟡 中 | 检索指标（hit rate/MRR/NDCG）与 LLM-as-judge 指标测试 |
+| **接口与审计** | `test_mcp_server.py` | 🟡 中 | MCP Server 工具暴露与调用协议测试 |
+| | `test_status_tool.py` | 🟡 中 | 结构化状态仪表盘各 scope 测试 |
+| | `test_status_trace.py` | 🟡 中 | 查询路径回放（status scope=trace） |
+| | `test_status_usage.py` | 🟡 中 | 使用热点/冷点审计（status scope=usage） |
+| | `test_usage_logger.py` | 🟡 中 | 统一使用日志记录与保留策略 |
 
 #### 当前状态
 
-核心测试集已稳定在 **506 个用例**（0 skipped）。
+核心测试集已稳定在 **524 个用例**（0 skipped）。
 
 ### 常用测试文档
 

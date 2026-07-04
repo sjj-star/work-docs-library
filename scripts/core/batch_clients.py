@@ -382,7 +382,7 @@ class BatchClient(BaseBatchClient):
 
     def _download_file(self, file_id: str) -> str:
         url = self.download_url_template.format(base_url=self.base_url, file_id=file_id)
-        # 兼容旧版模板：若模板包含 base_url，则剥离为相对 path
+        # 将完整 URL 归一化为相对 path，交由 APIClient 拼接 base_url
         path = url
         if path.startswith(self.base_url):
             path = path[len(self.base_url) :]

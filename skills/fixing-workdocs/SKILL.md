@@ -48,7 +48,7 @@ This skill closes the loop between "user finds a problem" and "knowledge base ge
 
 7. Verify
    → explore(mode=entity, ...) to confirm the fix
-   → optionally verify_entity / verify_relation to mark it as checked
+   → optionally re-run graph_upsert_entity / graph_upsert_relation with verified=true to mark it as checked
 ```
 
 ## How to Identify the Problem Object
