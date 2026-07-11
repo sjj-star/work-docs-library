@@ -59,7 +59,6 @@ class BaseJudgeMetric:
         try:
             raw = self.client.chat(
                 [{"role": "system", "content": system}, {"role": "user", "content": user}],
-                temperature=0.0,
             )
         except Exception as exc:  # noqa: BLE001
             logger.error(f"Judge LLM call failed for {user_prompt_name}: {exc}")
@@ -286,7 +285,6 @@ class EvalHarness:
         try:
             return self.llm_client.chat(
                 [{"role": "system", "content": system}, {"role": "user", "content": user}],
-                temperature=0.0,
             )
         except Exception as exc:  # noqa: BLE001
             logger.error(f"Answer generation failed: {exc}")

@@ -1524,7 +1524,7 @@ class DocGraphPipeline:
                     f"text_len={text_len} | images={img_count}"
                 )
                 try:
-                    response_data = self.llm_chat._post(Config.LLM_BATCH_ENDPOINT, body)
+                    response_data = self.llm_chat._post(Config.LLM_CHAT_ENDPOINT, body)
                     result = {
                         "custom_id": custom_id,
                         "response": {
@@ -1961,9 +1961,7 @@ class DocGraphPipeline:
                 self.db.update_block_status(bid, "done")
                 success_count += 1
             else:
-                logger.warning(
-                    f"Block 未生成 embedding | block_db_id={bid} | doc_id={doc_id}"
-                )
+                logger.warning(f"Block 未生成 embedding | block_db_id={bid} | doc_id={doc_id}")
                 self.db.update_block_status(bid, "failed")
 
         logger.info(

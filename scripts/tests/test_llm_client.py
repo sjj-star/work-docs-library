@@ -106,10 +106,10 @@ def test_chat_client_post_uses_apiclient(monkeypatch):
         return Resp()
 
     monkeypatch.setattr(client._client, "request", _fake_request)
-    result = client._post("/v1/chat/completions", {"model": "test"})
+    result = client._post("/chat/completions", {"model": "test"})
     assert result["choices"][0]["message"]["content"] == "ok"
     assert calls[0][0] == "POST"
-    assert calls[0][1] == "/v1/chat/completions"
+    assert calls[0][1] == "/chat/completions"
     assert client._client.user_agent.startswith("KimiCLI/")
 
 

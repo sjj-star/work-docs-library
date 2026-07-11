@@ -149,7 +149,7 @@ class FakeChatClient:
             ]
         }
 
-    def chat(self, messages, temperature=0.3, **kwargs):
+    def chat(self, messages, **kwargs):
         return '{"entities": [], "relationships": [], "image_descriptions": []}'
 
     def close(self):

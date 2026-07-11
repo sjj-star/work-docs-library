@@ -138,7 +138,6 @@ class LLMReranker(Reranker):
                     {"role": "system", "content": system},
                     {"role": "user", "content": user},
                 ],
-                temperature=0.0,
             )
         except Exception:
             logger.exception("LLMReranker failed to score passages; returning neutral scores")

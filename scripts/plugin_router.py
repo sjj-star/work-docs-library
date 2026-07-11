@@ -971,6 +971,7 @@ def tool_config(params: dict) -> dict:
         "LLM_BATCH_MAX_CHARS": "LLM 配置",
         "LLM_BATCH_TIMEOUT": "LLM 配置",
         "LLM_BATCH_COMPLETION_WINDOW": "LLM 配置",
+        "LLM_CHAT_ENDPOINT": "LLM 配置",
         "LLM_TIMEOUT": "LLM 配置",
         "HTTP_TIMEOUT": "HTTP 重试配置",
         "HTTP_RETRY_MAX_ATTEMPTS": "HTTP 重试配置",

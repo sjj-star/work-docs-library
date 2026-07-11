@@ -74,6 +74,7 @@ class Config:
     BLOCK_MAX_CHARS: int = 0  # 将在下方初始化
 
     # --- API Endpoint 配置（服务商无感化） ---
+    LLM_CHAT_ENDPOINT: str = _resolve_config("WORKDOCS_LLM_CHAT_ENDPOINT", "/chat/completions")
     LLM_BATCH_ENDPOINT: str = _resolve_config("WORKDOCS_LLM_BATCH_ENDPOINT", "/v1/chat/completions")
     EMBEDDING_ENDPOINT: str = _resolve_config(
         "WORKDOCS_EMBEDDING_ENDPOINT",

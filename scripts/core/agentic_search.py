@@ -104,7 +104,6 @@ class AgenticSearchPlanner:
         try:
             raw = self.client.chat(
                 [{"role": "system", "content": system}, {"role": "user", "content": user}],
-                temperature=0.2,
             )
         except Exception:
             logger.exception("Agentic search planning failed")

@@ -259,7 +259,7 @@ def test_faithfulness_metric_with_custom_client():
     from core.llm_chat_client import BaseLLMClient
 
     class FakeClient(BaseLLMClient):
-        def chat(self, messages, temperature=0.3, **kwargs):
+        def chat(self, messages, **kwargs):
             return (
                 '{"supported": ["The SPI reset starts with CS low."], '
                 '"unsupported": [], "not_found": []}'
@@ -580,7 +580,7 @@ def test_run_rag_eval(monkeypatch):
             ]
 
     class FakeLLMClient(BaseLLMClient):
-        def chat(self, messages, temperature=0.3, **kwargs):
+        def chat(self, messages, **kwargs):
             return "{}"
 
     harness = EvalHarness(FakeService(), llm_client=FakeLLMClient())  # type: ignore[arg-type]
@@ -652,7 +652,7 @@ def test_run_rag_eval_llm_failure(monkeypatch):
             return [{"chunk": FakeChunk(1, "Pull CS low first.")}]
 
     class FakeLLMClient(BaseLLMClient):
-        def chat(self, messages, temperature=0.3, **kwargs):
+        def chat(self, messages, **kwargs):
             raise RuntimeError("LLM generation failed")
 
     harness = EvalHarness(FakeService(), llm_client=FakeLLMClient())  # type: ignore[arg-type]

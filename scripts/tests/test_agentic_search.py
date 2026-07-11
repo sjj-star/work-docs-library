@@ -94,7 +94,7 @@ def test_planner_handles_non_list_json(monkeypatch):
 
 def test_planner_uses_custom_client(monkeypatch):
     class FakeClient(BaseLLMClient):
-        def chat(self, messages, temperature=0.3, **kwargs):
+        def chat(self, messages, **kwargs):
             return '[{"step_type": "chapter", "query": "reset"}]'
 
     planner = AgenticSearchPlanner(client=FakeClient())

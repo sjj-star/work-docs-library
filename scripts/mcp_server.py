@@ -129,8 +129,7 @@ MCP_TOOL_SCHEMAS: dict[str, dict] = {
     "read": {
         "type": "object",
         "description": (
-            "读取内容。必须提供 chunk_db_id，或提供 doc_id 与 "
-            "chapter/chapter_regex/concept 之一"
+            "读取内容。必须提供 chunk_db_id，或提供 doc_id 与 chapter/chapter_regex/concept 之一"
         ),
         "properties": {
             "chunk_db_id": {"type": "integer", "description": "Block 数据库 ID"},

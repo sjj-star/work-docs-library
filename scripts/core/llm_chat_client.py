@@ -64,7 +64,7 @@ class BaseLLMClient:
 
         保留此接口以便现有调用点与部分单测 monkeypatch 兼容。
         实际请求由 APIClient 处理，包含统一的错误分类与重试。
-        url 参数为相对 path（APIClient 会拼接 base_url）。
+        url 参数为相对 path（APIClient 会拼接 base_url），例如 `/chat/completions`。
         """
         messages = payload.get("messages", [])
         text_len = sum(len(str(m.get("content", ""))) for m in messages)
@@ -90,9 +90,9 @@ class BaseLLMClient:
         logger.info(f"LLM 请求成功 | elapsed={elapsed:.1f}s | status={response.status_code}")
         return response.json()
 
-    def chat(self, messages: list[dict], temperature: float = 0.3, **kwargs) -> str:
+    def chat(self, messages: list[dict], **kwargs) -> str:
         """基础对话功能."""
-        data = {"model": self.model, "messages": messages, "temperature": temperature}
+        data = {"model": self.model, "messages": messages}
 
         # 添加思考模式支持（OpenAI 兼容格式，始终传递确保模型行为可控）
         thinking_type = "enabled" if self.thinking_enabled else "disabled"
@@ -103,7 +103,7 @@ class BaseLLMClient:
         data.update(kwargs)
 
         try:
-            response_data = self._post(Config.LLM_BATCH_ENDPOINT, data)
+            response_data = self._post(Config.LLM_CHAT_ENDPOINT, data)
         except ContentTooLargeError as exc:
             total_len = sum(len(str(m.get("content", ""))) for m in messages)
             logger.warning(f"LLM 请求内容超长 | text_len={total_len} | message={exc.message!r}")

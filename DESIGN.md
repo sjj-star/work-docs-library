@@ -1795,9 +1795,14 @@ HTTP API 调用都经由它发出。
 - **Embedding**：超长文本按边界预拆分后 embed 再平均（`EMBED_SPLIT_OVERLONG` /
   `EMBED_MAX_CHARS_PER_TEXT`）；单条失败隔离为零向量，不影响整批。
 
-### 变更历史（死配置清理，2026-07）
+### 变更历史（死配置清理与 endpoint 职责分离，2026-07）
 
 统一到 `HTTP_RETRY_*` 后，旧的每客户端重试旋钮 `LLM_MAX_RETRIES`、`LLM_RETRY_BACKOFF`、
 `EMBED_MAX_RETRIES`、`EMBED_RETRY_BACKOFF`、`EMBED_TIMEOUT` 已不再驱动任何行为，连同
 `BaseLLMClient` 的失效类常量 `MAX_RETRY_ATTEMPTS` / `RETRY_BACKOFF_BASE` 一并删除；
 `LLM_TIMEOUT` 因仍用于 LLM 同步对话超时而保留。
+
+同步新增 `LLM_CHAT_ENDPOINT`（默认 `/chat/completions`），与 `LLM_BATCH_ENDPOINT`
+（默认 `/v1/chat/completions`）职责分离：前者供 `BaseLLMClient` 及 Chat 模式 pipeline 使用，
+后者仅作为 Batch API 请求体中的 `endpoint` 字段。`LLM_BASE_URL` 默认已包含 `/v1`，
+因此 `LLM_CHAT_ENDPOINT` 采用相对 `/chat/completions` 即可得到正确的完整 URL。
