@@ -190,6 +190,9 @@ class KimiProvider(APIProvider):
                 return ServerOverloadedError(message, **kwargs)
             return RateLimitError(message, **kwargs)
 
+        if status_code == 499:
+            return TransientError(message or "Client closed request", **kwargs)
+
         if status_code in (500, 502, 503, 504):
             return ServerError(message, **kwargs)
 
@@ -254,6 +257,9 @@ class BigModelProvider(APIProvider):
 
         if status_code == 429:
             return RateLimitError(message, **kwargs)
+
+        if status_code == 499:
+            return TransientError(message or "Client closed request", **kwargs)
 
         if status_code in (500, 502, 504):
             return ServerError(message, **kwargs)

@@ -17,6 +17,7 @@ from core.api_client import (
     QuotaExceededError,
     RateLimitError,
     RetryPolicy,
+    TransientError,
 )
 from core.config import Config
 
@@ -155,6 +156,40 @@ def test_request_retry_on_500(monkeypatch):
     resp = client.get("/chat")
     assert resp.json()["ok"] is True
     assert call_count[0] == 2
+
+
+def test_request_retry_on_499(monkeypatch):
+    """499 Client Closed Request 应作为瞬时错误重试."""
+    client = _make_client(base_delay=0.0)
+    call_count = [0]
+
+    class FakeSession:
+        def request(self, method, url, **kwargs):
+            call_count[0] += 1
+            if call_count[0] == 1:
+                return FakeResponse(status_code=499, text="")
+            return FakeResponse(json_data={"ok": True})
+
+    monkeypatch.setattr(client, "_session", FakeSession())
+    resp = client.get("/chat")
+    assert resp.json()["ok"] is True
+    assert call_count[0] == 2
+
+
+def test_kimi_provider_classify_499():
+    """KimiProvider 将 499 分类为 TransientError."""
+    provider = KimiProvider(api_key="k", base_url="https://kimi.com")
+    err = provider.classify(499, None)
+    assert isinstance(err, TransientError)
+    assert err.status_code == 499
+
+
+def test_bigmodel_provider_classify_499():
+    """BigModelProvider 将 499 分类为 TransientError."""
+    provider = BigModelProvider(api_key="k", base_url="https://bigmodel.com")
+    err = provider.classify(499, None)
+    assert isinstance(err, TransientError)
+    assert err.status_code == 499
 
 
 def test_request_respects_retry_after(monkeypatch):

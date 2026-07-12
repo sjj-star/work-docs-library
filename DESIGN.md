@@ -1763,7 +1763,7 @@ HTTP API 调用都经由它发出。
 | `RateLimitError` | 429（频率限制） | 是 |
 | `ServerOverloadedError` | 服务端过载（Kimi 429 含 `overloaded`、BigModel 503） | 是 |
 | `ServerError` | 500/502/504（Kimi 亦含 503） | 是 |
-| `TransientError` | 网络超时/连接错误 | 是 |
+| `TransientError` | 网络超时/连接错误、**499 Client Closed Request** | 是 |
 | `ContentTooLargeError` | 400 输入超长 | 否（由调用方拆分/截断） |
 | `ContentFilterError` | 400 内容安全拦截 | 否 |
 | `RequestFormatError` | 400 其他/404 | 否 |
@@ -1773,6 +1773,8 @@ HTTP API 调用都经由它发出。
   `QuotaExceededError`；命中 `overloaded` → `ServerOverloadedError`；否则 `RateLimitError`。
   503 归入 `ServerError`。
 - BigModel 对 429 一律归为 `RateLimitError`（不做配额细分）；503 单独归为 `ServerOverloadedError`。
+- **499 Client Closed Request**：两个 Provider 均归为 `TransientError`（可重试）。该状态码通常由
+  Nginx/代理在客户端或代理提前关闭连接时返回，属于网络层面的瞬时错误，按 `HTTP_RETRY_*` 策略退避重试。
 
 ### 退避策略
 
