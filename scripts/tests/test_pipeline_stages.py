@@ -809,7 +809,47 @@ def test_stage5_sync_queue_jsonl(patched_config, monkeypatch):
     assert records[1]["text"] == "foo bar"
 
 
-def test_split_for_embedding_paragraph_boundary():
+def test_stage6_embedding_failure_does_not_pollute_faiss(patched_config, monkeypatch):
+    """Embedding 失败时不应将零向量写入 FAISS."""
+    from core.api_client import APIError
+
+    _mock_external_clients(monkeypatch)
+
+    pipe = DocGraphPipeline()
+    pipe.db.insert_block(
+        doc_id="test_doc",
+        block_id="b_0",
+        content="hello world",
+        seq_index=0,
+        metadata={},
+    )
+
+    # 让 embed_single 持续失败
+    monkeypatch.setattr(
+        "core.doc_graph_pipeline.EmbeddingClient",
+        lambda: type(
+            "FailingEmbedder",
+            (),
+            {
+                "embed": lambda self, texts: (_ for _ in ()).throw(APIError("embedding down")),
+                "embed_single": lambda self, text: (_ for _ in ()).throw(
+                    APIError("embedding down")
+                ),
+                "close": lambda self: None,
+            },
+        )(),
+    )
+
+    embed_jsonl_path = pipe.stage5_build_embed_jsonl("test_doc")
+    pipe.stage6_submit_embed_batches("test_doc", embed_jsonl_path)
+
+    # FAISS 中不应有向量
+    assert pipe.vec.index_info()["total_vectors"] == 0
+    # block 状态应为 failed
+    block = pipe.db.get_block_by_db_id(1)
+    assert block is not None
+    assert block["status"] == "failed"
+
     """_split_for_embedding 应按段落边界切分超长文本."""
     from core.doc_graph_pipeline import _split_for_embedding
 
@@ -990,7 +1030,64 @@ def test_stage3_chat_mode_error_continue(patched_config, monkeypatch, tmp_path):
     assert results[1]["response"]["status_code"] == 200
 
 
-def test_stage3_batch_mode_fallback_to_chat(patched_config, monkeypatch, tmp_path):
+def test_stage3_chat_mode_retries_retryable_errors(patched_config, monkeypatch, tmp_path):
+    """Chat mode 对可重试错误应重试，对不可重试错误不重试."""
+    from core.api_client import RequestFormatError, TransientError
+
+    _mock_external_clients(monkeypatch)
+    monkeypatch.setattr("core.doc_graph_pipeline.BatchClient", FakeBatchClient)
+    monkeypatch.setattr(Config, "LLM_MODE", "chat")
+    monkeypatch.setattr("time.sleep", lambda s: None)
+
+    pipe = DocGraphPipeline()
+    batch_dir = Config.DB_PATH.parent / "batch"
+    batch_dir.mkdir(parents=True, exist_ok=True)
+
+    # 场景 1：TransientError 前两次失败，第三次成功
+    call_count = 0
+
+    def _transient_then_success(url, payload, timeout=None):
+        nonlocal call_count
+        call_count += 1
+        if call_count <= 2:
+            raise TransientError("timeout")
+        return {
+            "choices": [
+                {
+                    "message": {
+                        "content": json.dumps(
+                            {"entities": [], "relationships": [], "image_descriptions": []}
+                        )
+                    }
+                }
+            ]
+        }
+
+    assert pipe.llm_chat is not None
+    pipe.llm_chat._post = _transient_then_success
+
+    requests = [{"custom_id": "batch_0", "body": {}}]
+    results_path = batch_dir / "retry_success_results.jsonl"
+    results = pipe._submit_via_chat(requests, results_path)
+
+    assert call_count == 3
+    assert results[0]["response"]["status_code"] == 200
+
+    # 场景 2：RequestFormatError 不可重试，只调用一次
+    error_count = 0
+
+    def _format_error(url, payload, timeout=None):
+        nonlocal error_count
+        error_count += 1
+        raise RequestFormatError("bad request", status_code=400)
+
+    pipe.llm_chat._post = _format_error
+    results_path2 = batch_dir / "retry_skip_results.jsonl"
+    results2 = pipe._submit_via_chat(requests, results_path2)
+
+    assert error_count == 1
+    assert results2[0]["response"]["status_code"] == 400
+
     """Batch mode when BatchClient unavailable should auto fallback to Chat."""
     _mock_external_clients(monkeypatch)
     monkeypatch.setattr("core.doc_graph_pipeline.BaseLLMClient", FakeChatClient)

@@ -161,13 +161,13 @@ PYTHONPATH=scripts ./.venv/bin/python -m pytest scripts/tests/ -v
   2. 阻止 `load_dotenv` 重新加载 `.env` 文件
   3. 重定向 Config 默认路径到临时目录（DB、FAISS、Graph 均隔离）
 - **回归即修复**：任何导致测试失败的变更必须当场修复
-- **524 个测试用例必须全部通过**（0 skipped）
+- **529 个测试用例必须全部通过**（0 skipped）
 
 ### 测试文件清单
 
 > 完整的测试文件清单与分类见 `README.md`「开发与测试」（唯一权威详表），此处不再重复维护，避免双份漂移。
 
-**当前状态**：524 passed, 0 skipped, 0 failed。
+**当前状态**：529 passed, 0 skipped, 0 failed。
 
 ### Mock 方法
 使用 `monkeypatch.setattr` 替换客户端类方法：
@@ -312,7 +312,7 @@ monkeypatch.setattr(
 - ✅ 质量：`confidence`/`verified`/`feedback_score`、冲突日志、`usage_logs`/`block_activation` 使用跟踪、`fixing-workdocs` 修正闭环
 - ✅ API 错误处理：统一 `APIClient` + Provider + `RetryPolicy`，429/5xx 重试，401/402/403/配额类 429 快速失败；Embedding 超长拆分、单条失败隔离
 - ✅ Skill：`using-workdocs`、`ingesting-workdocs`、`exploring-workdocs`、`agentic-search`、`synthesizing-workdocs`、`fixing-workdocs`
-- ✅ 测试：524 passed, 0 skipped, 0 failed
+- ✅ 测试：529 passed, 0 skipped, 0 failed
 
 详细历史见 git log 与 `DESIGN.md` 各章节。
 

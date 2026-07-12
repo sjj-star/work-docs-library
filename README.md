@@ -306,7 +306,7 @@ work-docs-library/
 │   │   ├── pdf_parser.py         # PDF 本地解析器（fallback，输出与 BigModel 一致）
 │   │   ├── office_parser.py      # DOCX / XLSX 解析器（代码存在，尚未接入 pipeline）
 │   │   └── image_utils.py        # 图片压缩工具
-│   └── tests/                    # pytest 测试集（524 个用例）
+│   └── tests/                    # pytest 测试集（529 个用例）
 ├── knowledge_base/               # 运行时自动生成
 │   ├── workdocs.db               # SQLite 元数据
 │   ├── faiss.index               # FAISS 向量索引（IndexIDMap2，直接存储 block_db_id）
@@ -644,7 +644,7 @@ python scripts/admin_tools.py run_eval --params '{"dataset_name":"my_eval","retr
 | `WORKDOCS_BLOCK_MAX_CHARS` | `6000` | content_blocks 存储切分粒度（向量化粒度），基于 BigModel embedding-3 经验值 |
 | `WORKDOCS_LLM_BATCH_TIMEOUT` | `3600` | LLM Batch API 轮询超时（秒） |
 | `WORKDOCS_LLM_CHAT_ENDPOINT` | `/chat/completions` | LLM 同步对话 endpoint（相对路径；与 `LLM_BASE_URL` 拼接成完整 URL） |
-| `WORKDOCS_LLM_TIMEOUT` | `120` | LLM 同步对话请求超时（秒） |
+| `WORKDOCS_LLM_TIMEOUT` | `300` | LLM 同步对话请求超时（秒） |
 | `WORKDOCS_HTTP_TIMEOUT` | `120` | 统一 HTTP 请求超时（秒） |
 | `WORKDOCS_HTTP_RETRY_MAX_ATTEMPTS` | `3` | 统一 HTTP 请求最大重试次数 |
 | `WORKDOCS_HTTP_RETRY_BASE_DELAY` | `1.0` | 统一 HTTP 重试基础退避（秒） |
@@ -663,7 +663,7 @@ python scripts/admin_tools.py run_eval --params '{"dataset_name":"my_eval","retr
 | `WORKDOCS_EMBEDDING_BASE_URL` | `https://open.bigmodel.cn/api/paas/v4` | BigModel Base URL |
 | `WORKDOCS_EMBEDDING_MODEL` | `embedding-3` | 向量化模型 |
 | `WORKDOCS_EMBEDDING_DIMENSION` | `1024` | 向量维度 |
-| `WORKDOCS_EMBEDDING_ENDPOINT` | `/v4/embeddings` | Embedding API endpoint（相对路径） |
+| `WORKDOCS_EMBEDDING_ENDPOINT` | `/embeddings` | Embedding API endpoint（相对路径；`EMBEDDING_BASE_URL` 已包含 `/v4`） |
 | `WORKDOCS_EMBED_MAX_CHARS_PER_TEXT` | `8192` | 单条 Embedding 文本最大字符数，超过则拆分 |
 | `WORKDOCS_EMBED_SPLIT_OVERLONG` | `true` | 是否对超长文本自动拆分后 embed |
 | **Parser 配置** | | | |
@@ -918,7 +918,7 @@ cd /path/to/work-docs-library
 PYTHONPATH=scripts ./.venv/bin/python -m pytest scripts/tests/ -v
 ```
 
-**当前状态：524 passed, 0 skipped, 0 failed。**
+**当前状态：529 passed, 0 skipped, 0 failed。**
 
 ### 测试分类与审计
 
@@ -978,7 +978,7 @@ PYTHONPATH=scripts ./.venv/bin/python -m pytest \
 
 #### 当前状态
 
-核心测试集已稳定在 **524 个用例**（0 skipped）。
+核心测试集已稳定在 **529 个用例**（0 skipped）。
 
 ### 常用测试文档
 

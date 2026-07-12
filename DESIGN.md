@@ -655,7 +655,7 @@ explore(mode="entity", entity_type="Product", name="TMS320F28379D")
 **背景**：
 - 2026-04 代码审计发现 21 项缺陷（9 个 P0 数据损坏风险、7 个 P1 可靠性缺陷、5 个 P2 代码质量问题），已全部修复并通过 514 个测试验证。
 - 2026-06 再次审计发现 Critical/High 级安全与数据完整性问题，按「最小紧急修复」方案修复后测试数达到 514 个。
-- 2026-06 接口精简：基于审计发现 Agent 在 14 个 MCP 工具间混淆的问题，将工具面收敛到 5 个，并将 `KnowledgeBaseService` 的查询组合逻辑拆出为 `QueryService`（当时测试数精简为 506 个）。此后随统一 `APIClient`、使用跟踪与评估等能力补充，测试集当前为 524 个（以最近一次 pytest 输出为准）。
+- 2026-06 接口精简：基于审计发现 Agent 在 14 个 MCP 工具间混淆的问题，将工具面收敛到 5 个，并将 `KnowledgeBaseService` 的查询组合逻辑拆出为 `QueryService`（当时测试数精简为 506 个）。此后随统一 `APIClient`、使用跟踪与评估等能力补充，测试集当前为 529 个（以最近一次 pytest 输出为准）。
 
 **关键教训**：
 
@@ -1782,7 +1782,7 @@ HTTP API 调用都经由它发出。
 - 若开启 `respect_retry_after` 且响应含 `Retry-After` 头，则优先采用该值。
 - 配置族（默认值见 README「配置说明」）：`HTTP_RETRY_MAX_ATTEMPTS`(3)、`HTTP_RETRY_BASE_DELAY`(1.0)、
   `HTTP_RETRY_MAX_DELAY`(60.0)、`HTTP_RETRY_JITTER`(true)、`HTTP_RETRY_RESPECT_RETRY_AFTER`(true)、
-  `HTTP_TIMEOUT`(120)。LLM 同步对话额外用 `LLM_TIMEOUT`(120) 作为超时，PDF 解析用 `PARSER_TIMEOUT`(60)。
+  `HTTP_TIMEOUT`(120)。LLM 同步对话额外用 `LLM_TIMEOUT`(300) 作为超时，PDF 解析用 `PARSER_TIMEOUT`(60)。
 
 ### 错误重试 vs 状态轮询
 
@@ -1795,7 +1795,7 @@ HTTP API 调用都经由它发出。
 ### 应用层容错（非重试）
 
 - **Embedding**：超长文本按边界预拆分后 embed 再平均（`EMBED_SPLIT_OVERLONG` /
-  `EMBED_MAX_CHARS_PER_TEXT`）；单条失败隔离为零向量，不影响整批。
+  `EMBED_MAX_CHARS_PER_TEXT`）；单条失败时抛出 `APIError`，由调用方记录为失败 block，不再静默返回零向量。
 
 ### 变更历史（死配置清理与 endpoint 职责分离，2026-07）
 
@@ -1808,3 +1808,9 @@ HTTP API 调用都经由它发出。
 （默认 `/v1/chat/completions`）职责分离：前者供 `BaseLLMClient` 及 Chat 模式 pipeline 使用，
 后者仅作为 Batch API 请求体中的 `endpoint` 字段。`LLM_BASE_URL` 默认已包含 `/v1`，
 因此 `LLM_CHAT_ENDPOINT` 采用相对 `/chat/completions` 即可得到正确的完整 URL。
+
+同步修正 `EMBEDDING_ENDPOINT` 默认值为 `/embeddings`（2026-07）：`EMBEDDING_BASE_URL`
+默认已包含 `/v4`，原默认值 `/v4/embeddings` 会导致拼接出 `/v4/v4/embeddings` 而 404；
+同时修正 `status_collector` 将 `done` 状态 block 计入已嵌入统计，并取消 embedding 失败时
+的零向量降级，避免污染 FAISS 索引。Chat 模式 pipeline 对 `TransientError` 等可重试错误
+增加应用层重试，并将 `LLM_TIMEOUT` 默认值从 120s 提高到 300s。

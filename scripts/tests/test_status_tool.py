@@ -129,6 +129,15 @@ def test_status_vectors_scope(status_svc):
     assert result["index"]["dimension"] == Config.EMBEDDING_DIMENSION
 
 
+def test_status_vectors_scope_counts_done_as_embedded(status_svc):
+    """状态为 done 的 block 也应计入 embedded_blocks."""
+    # 将 doc-a 的部分 block 改为 done，模拟 stage6 最终状态
+    with status_svc.db._connect() as conn:
+        conn.execute("UPDATE content_blocks SET status = 'done' WHERE doc_id = 'doc-a' LIMIT 2")
+    result = plugin_router.tool_status({"scope": "vectors"})
+    assert result["database"]["embedded_blocks"] == 3
+
+
 def test_status_graph_scope(status_svc):
     """Graph scope 返回图谱统计和分布."""
     result = plugin_router.tool_status({"scope": "graph"})

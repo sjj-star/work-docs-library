@@ -8,14 +8,10 @@
 
 from __future__ import annotations
 
-import logging
-
 import numpy as np
 
 from .api_client import APIClient, APIError, BigModelProvider, ContentTooLargeError
 from .config import Config
-
-logger = logging.getLogger(__name__)
 
 
 class EmbeddingClient:
@@ -145,8 +141,8 @@ class EmbeddingClient:
     def embed(self, texts: list[str]) -> list[list[float]]:
         """批量获取文本向量.
 
-        超长文本会被拆分后 embed 再平均；单条失败时记录日志并返回零向量，
-        不会导致整个批次失败。
+        超长文本会被拆分后 embed 再平均；任何单条失败都会抛出 APIError，
+        由调用方决定是否重试或降级，避免零向量污染索引。
         """
         results: list[list[float]] = []
         for text in texts:
@@ -161,15 +157,10 @@ class EmbeddingClient:
                 if embedding is None:
                     raise APIError("Empty embedding returned")
                 results.append(embedding)
-            except APIError as exc:
-                logger.error(
-                    f"Embedding failed for single text | text_len={len(text)} | "
-                    f"status={exc.status_code} | message={exc.message!r}"
-                )
-                results.append(self._zero_vector())
-            except Exception:
-                logger.exception(f"Unexpected embedding error | text_len={len(text)}")
-                results.append(self._zero_vector())
+            except APIError:
+                raise
+            except Exception as exc:
+                raise APIError(str(exc)) from exc
         return results
 
     def embed_single(self, text: str) -> list[float]:
@@ -177,7 +168,7 @@ class EmbeddingClient:
         return self.embed([text])[0]
 
     def _zero_vector(self) -> list[float]:
-        """返回与当前维度一致的零向量."""
+        """返回与当前维度一致的零向量（保留作兼容，当前不再主动使用）."""
         dim = self._dimension or Config.EMBEDDING_DIMENSION
         return [0.0] * dim
 

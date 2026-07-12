@@ -20,6 +20,7 @@ import json
 import logging
 import math
 import re
+import time
 from pathlib import Path
 from typing import Any
 
@@ -28,7 +29,13 @@ import numpy as np
 from parsers.pdf_parser import PDFParser
 from PIL import Image
 
-from .api_client import APIError
+from .api_client import (
+    APIError,
+    RateLimitError,
+    ServerError,
+    ServerOverloadedError,
+    TransientError,
+)
 from .batch_clients import BatchClient
 from .bigmodel_parser_client import BigModelParserClient
 from .config import Config
@@ -1523,22 +1530,53 @@ class DocGraphPipeline:
                     f"Chat 请求 {idx + 1}/{total} | {custom_id} | "
                     f"text_len={text_len} | images={img_count}"
                 )
-                try:
-                    response_data = self.llm_chat._post(Config.LLM_CHAT_ENDPOINT, body)
+                result: dict[str, Any] | None = None
+                last_error: Exception | None = None
+                retryable_errors = (
+                    RateLimitError,
+                    ServerError,
+                    ServerOverloadedError,
+                    TransientError,
+                )
+                for attempt in range(3):
+                    try:
+                        response_data = self.llm_chat._post(Config.LLM_CHAT_ENDPOINT, body)
+                        result = {
+                            "custom_id": custom_id,
+                            "response": {
+                                "status_code": 200,
+                                "body": response_data,
+                            },
+                        }
+                        break
+                    except retryable_errors as e:
+                        last_error = e
+                        if attempt == 2:
+                            break
+                        delay = min(
+                            Config.HTTP_RETRY_BASE_DELAY * (2**attempt),
+                            Config.HTTP_RETRY_MAX_DELAY,
+                        )
+                        logger.warning(
+                            f"Chat API 可重试错误 | {custom_id} ({idx + 1}/{total}) | "
+                            f"attempt={attempt + 1}/3 | error={e} | retry_after={delay:.2f}s"
+                        )
+                        time.sleep(delay)
+                    except Exception as e:
+                        last_error = e
+                        break
+
+                if result is None:
+                    status_code = getattr(last_error, "status_code", 500)
+                    logger.error(
+                        f"Chat API 调用失败 | {custom_id} ({idx + 1}/{total}) | "
+                        f"status={status_code} | error={last_error}"
+                    )
                     result = {
                         "custom_id": custom_id,
                         "response": {
-                            "status_code": 200,
-                            "body": response_data,
-                        },
-                    }
-                except Exception as e:
-                    logger.error(f"Chat API 调用失败 | {custom_id} ({idx + 1}/{total}) | error={e}")
-                    result = {
-                        "custom_id": custom_id,
-                        "response": {
-                            "status_code": 500,
-                            "body": {"error": str(e)},
+                            "status_code": status_code,
+                            "body": {"error": str(last_error)},
                         },
                     }
                 f.write(json.dumps(result, ensure_ascii=False) + "\n")

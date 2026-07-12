@@ -86,7 +86,7 @@ class StatusCollector:
         """向量索引状态."""
         index_info = self.svc.vec.index_info()
         block_status = self.svc.db.count_blocks_by_status()
-        db_embedded = int(block_status.get("embedded", 0))
+        db_embedded = int(block_status.get("embedded", 0)) + int(block_status.get("done", 0))
         db_pending = int(block_status.get("pending", 0))
         db_failed = int(block_status.get("failed", 0))
         faiss_count = int(index_info["total_vectors"])
@@ -291,7 +291,7 @@ class StatusCollector:
 
         # FAISS 一致性
         index_info = self.svc.vec.index_info()
-        db_embedded = block_status.get("embedded", 0)
+        db_embedded = block_status.get("embedded", 0) + block_status.get("done", 0)
         faiss_count = index_info["total_vectors"]
         metrics["embedded_blocks"] = db_embedded
         metrics["faiss_vectors"] = faiss_count

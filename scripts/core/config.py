@@ -78,7 +78,7 @@ class Config:
     LLM_BATCH_ENDPOINT: str = _resolve_config("WORKDOCS_LLM_BATCH_ENDPOINT", "/v1/chat/completions")
     EMBEDDING_ENDPOINT: str = _resolve_config(
         "WORKDOCS_EMBEDDING_ENDPOINT",
-        "/v4/embeddings",
+        "/embeddings",
     )
     LLM_BATCH_COMPLETION_WINDOW: str = _resolve_config(
         "WORKDOCS_LLM_BATCH_COMPLETION_WINDOW",
@@ -180,7 +180,7 @@ class Config:
         cls.BATCH_PARALLEL_WORKERS = int(_resolve_config("WORKDOCS_BATCH_PARALLEL_WORKERS", "4"))
 
         # LLM 客户端
-        cls.LLM_TIMEOUT = int(_resolve_config("WORKDOCS_LLM_TIMEOUT", "120"))
+        cls.LLM_TIMEOUT = int(_resolve_config("WORKDOCS_LLM_TIMEOUT", "300"))
         # 统一 HTTP 客户端重试配置
         cls.HTTP_TIMEOUT = int(_resolve_config("WORKDOCS_HTTP_TIMEOUT", "120"))
         cls.HTTP_RETRY_MAX_ATTEMPTS = int(_resolve_config("WORKDOCS_HTTP_RETRY_MAX_ATTEMPTS", "3"))

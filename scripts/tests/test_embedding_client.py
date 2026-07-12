@@ -65,21 +65,29 @@ def test_embed_overlong_text_splits(monkeypatch):
     assert len(result) == 4
 
 
-def test_embed_single_failure_returns_zero_vector(monkeypatch, caplog):
-    """单条失败时不影响其他 texts，并返回零向量."""
+def test_embed_single_failure_raises(monkeypatch, caplog):
+    """单条失败时应抛出 APIError，而不是返回零向量."""
+    from core.api_client import APIError
+
     client = EmbeddingClient()
-    call_count = [0]
 
     def _fake_request(method, path, *, headers=None, **kwargs):
-        call_count[0] += 1
-        if call_count[0] == 1:
-            raise RuntimeError("boom")
-        json_body = kwargs.get("json", {})
-        inputs = json_body.get("input", [])
-        return FakeResponse(embeddings=[[0.1, 0.2, 0.3, 0.4]] * len(inputs))
+        raise RuntimeError("boom")
 
     monkeypatch.setattr(client._client, "request", _fake_request)
-    with caplog.at_level("ERROR"):
-        results = client.embed(["bad", "good"])
-    assert results[0] == [0.0, 0.0, 0.0, 0.0]
-    assert results[1] == [0.1, 0.2, 0.3, 0.4]
+    with pytest.raises(APIError):
+        client.embed_single("bad")
+
+
+def test_embed_endpoint_default(monkeypatch):
+    """默认 endpoint 与 base_url 拼接后不应重复版本路径."""
+    client = EmbeddingClient()
+    calls = []
+
+    def _fake_request(method, path, *, headers=None, **kwargs):
+        calls.append(path)
+        return FakeResponse(embeddings=[[0.1, 0.2, 0.3, 0.4]])
+
+    monkeypatch.setattr(client._client, "request", _fake_request)
+    client.embed_single("hello")
+    assert calls == ["/embeddings"]
