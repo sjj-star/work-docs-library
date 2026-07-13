@@ -967,7 +967,6 @@ def tool_config(params: dict) -> dict:
         "LLM_MODEL": "LLM 配置",
         "LLM_THINKING_ENABLED": "LLM 配置",
         "LLM_MODE": "LLM 配置",
-        "LLM_BATCH_ENDPOINT": "LLM 配置",
         "LLM_BATCH_MAX_CHARS": "LLM 配置",
         "LLM_BATCH_TIMEOUT": "LLM 配置",
         "LLM_BATCH_COMPLETION_WINDOW": "LLM 配置",

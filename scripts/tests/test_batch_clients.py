@@ -336,7 +336,23 @@ def test_batch_client_init_missing_key(monkeypatch):
         BatchClient()
 
 
-def test_batch_client_init_with_custom_params(monkeypatch, tmp_path):
+def test_batch_client_init_default_endpoint_derived(monkeypatch, tmp_path):
+    """测试 BatchClient 默认 batch_endpoint 由 LLM_BASE_URL + LLM_CHAT_ENDPOINT 推导."""
+    monkeypatch.setattr(Config, "DB_PATH", tmp_path / "workdocs.db")
+    monkeypatch.setattr(Config, "LLM_BASE_URL", "https://api.moonshot.cn/v1")
+    monkeypatch.setattr(Config, "LLM_CHAT_ENDPOINT", "/chat/completions")
+    client = BatchClient(api_key="test-key")
+    assert client.batch_endpoint == "/v1/chat/completions"
+
+
+def test_batch_client_init_default_endpoint_with_coding_path(monkeypatch, tmp_path):
+    """测试 base_url 含多级路径时仍能正确推导 batch_endpoint."""
+    monkeypatch.setattr(Config, "DB_PATH", tmp_path / "workdocs.db")
+    monkeypatch.setattr(Config, "LLM_BASE_URL", "https://api.kimi.com/coding/v1")
+    monkeypatch.setattr(Config, "LLM_CHAT_ENDPOINT", "/chat/completions")
+    client = BatchClient(api_key="test-key")
+    assert client.batch_endpoint == "/coding/v1/chat/completions"
+
     """测试 BatchClient 支持自定义参数."""
     monkeypatch.setattr(Config, "DB_PATH", tmp_path / "workdocs.db")
     client = BatchClient(

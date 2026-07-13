@@ -14,6 +14,7 @@ import uuid
 from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 from .api_client import APIClient, KimiProvider
 from .config import Config
@@ -325,7 +326,8 @@ class BatchClient(BaseBatchClient):
         Args:
             api_key: API 密钥，默认从 Config.LLM_API_KEY 读取
             base_url: API 基础 URL，默认从 Config.LLM_BASE_URL 读取
-            batch_endpoint: Batch 任务 endpoint，默认从 Config.LLM_BATCH_ENDPOINT 读取
+            batch_endpoint: Batch 任务 endpoint。默认由 `LLM_BASE_URL` 路径与
+                `Config.LLM_CHAT_ENDPOINT` 自动推导。显式传入可覆盖（如测试）。
             completion_window: Batch 完成窗口，默认从 Config.LLM_BATCH_COMPLETION_WINDOW 读取
             files_url_path: 文件上传 URL 路径，默认 "files"
             batches_url_path: Batch 任务 URL 路径，默认 "batches"
@@ -339,7 +341,12 @@ class BatchClient(BaseBatchClient):
         if not api_key:
             raise RuntimeError("API key not configured")
         super().__init__(api_key, base_url)
-        self.batch_endpoint = batch_endpoint or Config.LLM_BATCH_ENDPOINT
+        # Batch API 请求体中的 endpoint 需要完整 path（含 base_url 中的版本路径）。
+        # 当调用方未显式传入时，由 LLM_BASE_URL 路径 + LLM_CHAT_ENDPOINT 自动推导。
+        if batch_endpoint is None:
+            base_path = urlparse(self.base_url).path.rstrip("/")
+            batch_endpoint = f"{base_path}{Config.LLM_CHAT_ENDPOINT}"
+        self.batch_endpoint = batch_endpoint
         self.completion_window = completion_window or Config.LLM_BATCH_COMPLETION_WINDOW
         # 保留完整 URL 属性供外部读取/测试
         self.files_url = f"{self.base_url}/{files_url_path.lstrip('/')}"

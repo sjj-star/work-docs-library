@@ -74,8 +74,9 @@ class Config:
     BLOCK_MAX_CHARS: int = 0  # 将在下方初始化
 
     # --- API Endpoint 配置（服务商无感化） ---
+    # LLM Batch 请求体中的 endpoint 由 LLM_BASE_URL 路径 + LLM_CHAT_ENDPOINT 自动推导，
+    # 无需单独配置。保留 LLM_CHAT_ENDPOINT 即可同时驱动同步 Chat 与 Batch 两种模式。
     LLM_CHAT_ENDPOINT: str = _resolve_config("WORKDOCS_LLM_CHAT_ENDPOINT", "/chat/completions")
-    LLM_BATCH_ENDPOINT: str = _resolve_config("WORKDOCS_LLM_BATCH_ENDPOINT", "/v1/chat/completions")
     EMBEDDING_ENDPOINT: str = _resolve_config(
         "WORKDOCS_EMBEDDING_ENDPOINT",
         "/embeddings",

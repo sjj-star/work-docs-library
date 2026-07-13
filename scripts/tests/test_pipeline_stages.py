@@ -1483,7 +1483,34 @@ def test_close_releases_llm_chat(patched_config, monkeypatch):
 # -- 从 test_entity_extractor.py 合并的 EntityExtractor 测试 --
 
 
-def test_build_batch_requests_replaces_doc_context():
+def test_build_batch_requests_derives_batch_endpoint(monkeypatch):
+    """_build_batch_requests 默认从 LLM_BASE_URL + LLM_CHAT_ENDPOINT 推导 url."""
+    monkeypatch.setattr(Config, "LLM_BASE_URL", "https://api.moonshot.cn/v1")
+    monkeypatch.setattr(Config, "LLM_CHAT_ENDPOINT", "/chat/completions")
+    extractor = EntityExtractor()
+    batches = [[{"title": "Ch1", "content": "content1"}]]
+
+    requests = extractor._build_batch_requests(batches, image_base_dir=None, doc_context="")
+
+    assert len(requests) == 1
+    assert requests[0]["url"] == "/v1/chat/completions"
+
+
+def test_build_batch_requests_uses_provided_batch_endpoint():
+    """_build_batch_requests 允许调用方显式传入 batch_endpoint."""
+    extractor = EntityExtractor()
+    batches = [[{"title": "Ch1", "content": "content1"}]]
+
+    requests = extractor._build_batch_requests(
+        batches,
+        image_base_dir=None,
+        doc_context="",
+        batch_endpoint="/custom/endpoint",
+    )
+
+    assert len(requests) == 1
+    assert requests[0]["url"] == "/custom/endpoint"
+
     """_build_batch_requests 应正确替换 {{doc_context}} 占位符."""
     extractor = EntityExtractor()
     batches = [[{"title": "GPIO Registers", "content": "GPIO content"}]]

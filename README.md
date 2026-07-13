@@ -638,12 +638,11 @@ python scripts/admin_tools.py run_eval --params '{"dataset_name":"my_eval","retr
 | `WORKDOCS_LLM_MODEL` | `kimi-k2.5` | 对话模型 |
 | `WORKDOCS_LLM_THINKING_ENABLED` | `0` | 是否启用 thinking 模式（`1`=`enabled`，`0`=`disabled`）。Kimi K2.6 等模型 thinking 默认开启，**必须显式传递**才能可靠关闭 |
 | `WORKDOCS_LLM_MODE` | `batch` | LLM 实体提取模式：`batch`（Batch API，成本为同步的 50%，默认）或 `chat`（同步 Chat API，逐条调用，适合调试或 Batch API 不可用时回退） |
-| `WORKDOCS_LLM_BATCH_ENDPOINT` | `/v1/chat/completions` | LLM Batch API endpoint |
 | `WORKDOCS_LLM_BATCH_COMPLETION_WINDOW` | `24h` | Batch 完成窗口（如 `24h`） |
 | `WORKDOCS_LLM_BATCH_MAX_CHARS` | `10000` | 每个 LLM batch 最大文本字符数（LLM 聚合粒度） |
 | `WORKDOCS_BLOCK_MAX_CHARS` | `6000` | content_blocks 存储切分粒度（向量化粒度），基于 BigModel embedding-3 经验值 |
 | `WORKDOCS_LLM_BATCH_TIMEOUT` | `3600` | LLM Batch API 轮询超时（秒） |
-| `WORKDOCS_LLM_CHAT_ENDPOINT` | `/chat/completions` | LLM 同步对话 endpoint（相对路径；与 `LLM_BASE_URL` 拼接成完整 URL） |
+| `WORKDOCS_LLM_CHAT_ENDPOINT` | `/chat/completions` | LLM 同步对话 endpoint（相对路径；与 `LLM_BASE_URL` 拼接成完整 URL）。Batch 模式请求体中的 endpoint 由 `LLM_BASE_URL` 路径与本值自动推导，无需单独配置 |
 | `WORKDOCS_LLM_TIMEOUT` | `300` | LLM 同步对话请求超时（秒） |
 | `WORKDOCS_HTTP_TIMEOUT` | `120` | 统一 HTTP 请求超时（秒） |
 | `WORKDOCS_HTTP_RETRY_MAX_ATTEMPTS` | `3` | 统一 HTTP 请求最大重试次数 |

@@ -23,6 +23,7 @@ import re
 import time
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 import fitz
 import numpy as np
@@ -876,14 +877,23 @@ class EntityExtractor:
             logger.info(f"Batch {i} 构建完成 | images={len(image_meta)}")
         return chat_requests
 
-    def _build_batch_requests(self, batches, image_base_dir, doc_context=""):
+    def _build_batch_requests(
+        self,
+        batches,
+        image_base_dir,
+        doc_context="",
+        batch_endpoint: str | None = None,
+    ):
         """构建 LLM Batch API envelope requests（含 method/url/body）."""
+        if batch_endpoint is None:
+            base_path = urlparse(Config.LLM_BASE_URL).path.rstrip("/")
+            batch_endpoint = f"{base_path}{Config.LLM_CHAT_ENDPOINT}"
         chat_requests = self._build_chat_requests(batches, image_base_dir, doc_context)
         return [
             {
                 "custom_id": req["custom_id"],
                 "method": "POST",
-                "url": Config.LLM_BATCH_ENDPOINT,
+                "url": batch_endpoint,
                 "body": req["body"],
             }
             for req in chat_requests
@@ -1451,10 +1461,16 @@ class DocGraphPipeline:
                     doc_context=doc_context,
                 )
             else:
+                batch_endpoint = (
+                    getattr(self.llm_batch, "batch_endpoint", None)
+                    if self.llm_batch is not None
+                    else None
+                )
                 requests = self.entity_extractor._build_batch_requests(
                     batches=batches,
                     image_base_dir=parsed_output_dir,
                     doc_context=doc_context,
+                    batch_endpoint=batch_endpoint,
                 )
 
         # 删除旧结果文件（如果存在）
