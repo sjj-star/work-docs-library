@@ -306,7 +306,7 @@ work-docs-library/
 │   │   ├── pdf_parser.py         # PDF 本地解析器（fallback，输出与 BigModel 一致）
 │   │   ├── office_parser.py      # DOCX / XLSX 解析器（代码存在，尚未接入 pipeline）
 │   │   └── image_utils.py        # 图片压缩工具
-│   └── tests/                    # pytest 测试集（529 个用例）
+│   └── tests/                    # pytest 测试集（531 个用例）
 ├── knowledge_base/               # 运行时自动生成
 │   ├── workdocs.db               # SQLite 元数据
 │   ├── faiss.index               # FAISS 向量索引（IndexIDMap2，直接存储 block_db_id）
@@ -437,7 +437,7 @@ python scripts/admin_tools.py stage3_submit_batches --params '{"doc_id":"{doc_id
 - **产物格式**: `results.jsonl` 每行是一个 JSON response，`response.body.choices[0].message.content` 是 LLM 提取的 entities/relations/image_descriptions
 - **干预**: 编辑 `results.jsonl`（修正 LLM 提取错误：修改 entity 名称、添加遗漏的关系、修正图片描述）
 - **注意**: `incremental.json` 是机器生成的 hash 校验文件，**不要手动编辑**
-- **模式切换**: 设置 `WORKDOCS_LLM_MODE=chat`（`.env` 中）可切换到同步 Chat API 模式。Chat 模式逐条调用同步 API，结果以与 Batch API 完全一致的格式写入 `results.jsonl`，Stage 4 无需任何修改即可复用。单条失败不中断流程，适合调试或 Batch API 不可用时作为回退
+- **模式切换**: 设置 `WORKDOCS_LLM_MODE=chat`（`.env` 中）可切换到同步 Chat API 模式。Chat 模式逐条调用同步 API，结果以与 Batch API 完全一致的格式写入 `results.jsonl`，Stage 4 无需任何修改即可复用。`chat` 模式支持断点续传：若 `results.jsonl` 已存在，仅重试失败或缺失的请求；单条失败不中断流程。注意：大文档在 `chat` 模式下容易因模型处理慢触发 read timeout/499，建议调大 `WORKDOCS_LLM_TIMEOUT` 系列参数，或使用默认的 `batch` 模式
 - **触发下一阶段**: `python scripts/admin_tools.py stage4_ingest_results --params '{"doc_id":"{doc_id}"}'`
 
 #### 阶段4: 解析入库（不含向量化）
@@ -637,13 +637,16 @@ python scripts/admin_tools.py run_eval --params '{"dataset_name":"my_eval","retr
 | `WORKDOCS_LLM_BASE_URL` | `https://api.moonshot.cn/v1` | Kimi Base URL |
 | `WORKDOCS_LLM_MODEL` | `kimi-k2.5` | 对话模型 |
 | `WORKDOCS_LLM_THINKING_ENABLED` | `0` | 是否启用 thinking 模式（`1`=`enabled`，`0`=`disabled`）。Kimi K2.6 等模型 thinking 默认开启，**必须显式传递**才能可靠关闭 |
-| `WORKDOCS_LLM_MODE` | `batch` | LLM 实体提取模式：`batch`（Batch API，成本为同步的 50%，默认）或 `chat`（同步 Chat API，逐条调用，适合调试或 Batch API 不可用时回退） |
+| `WORKDOCS_LLM_MODE` | `batch` | LLM 实体提取模式：`batch`（Batch API，成本为同步的 50%，默认，推荐大文档使用）或 `chat`（同步 Chat API，逐条调用，适合调试或 Batch API 不可用时回退）。**Chat 模式处理长文档时可能因模型处理慢触发 read timeout/499**，建议调大 `WORKDOCS_LLM_TIMEOUT` 系列参数 |
 | `WORKDOCS_LLM_BATCH_COMPLETION_WINDOW` | `24h` | Batch 完成窗口（如 `24h`） |
 | `WORKDOCS_LLM_BATCH_MAX_CHARS` | `10000` | 每个 LLM batch 最大文本字符数（LLM 聚合粒度） |
 | `WORKDOCS_BLOCK_MAX_CHARS` | `6000` | content_blocks 存储切分粒度（向量化粒度），基于 BigModel embedding-3 经验值 |
 | `WORKDOCS_LLM_BATCH_TIMEOUT` | `3600` | LLM Batch API 轮询超时（秒） |
 | `WORKDOCS_LLM_CHAT_ENDPOINT` | `/chat/completions` | LLM 同步对话 endpoint（相对路径；与 `LLM_BASE_URL` 拼接成完整 URL）。Batch 模式请求体中的 endpoint 由 `LLM_BASE_URL` 路径与本值自动推导，无需单独配置 |
-| `WORKDOCS_LLM_TIMEOUT` | `300` | LLM 同步对话请求超时（秒） |
+| `WORKDOCS_LLM_TIMEOUT` | `300` | LLM 同步对话请求基础超时（秒）。`chat` 模式下会根据内容自动追加超时 |
+| `WORKDOCS_LLM_TIMEOUT_PER_10K_CHARS` | `60` | `chat` 模式下每 10,000 字符追加的超时（秒） |
+| `WORKDOCS_LLM_TIMEOUT_PER_IMAGE` | `30` | `chat` 模式下每张图片追加的超时（秒） |
+| `WORKDOCS_LLM_TIMEOUT_MAX` | `1800` | `chat` 模式下最大超时（秒），避免无限等待 |
 | `WORKDOCS_HTTP_TIMEOUT` | `120` | 统一 HTTP 请求超时（秒） |
 | `WORKDOCS_HTTP_RETRY_MAX_ATTEMPTS` | `3` | 统一 HTTP 请求最大重试次数 |
 | `WORKDOCS_HTTP_RETRY_BASE_DELAY` | `1.0` | 统一 HTTP 重试基础退避（秒） |
@@ -915,7 +918,7 @@ cd /path/to/work-docs-library
 PYTHONPATH=scripts ./.venv/bin/python -m pytest scripts/tests/ -v
 ```
 
-**当前状态：529 passed, 0 skipped, 0 failed。**
+**当前状态：531 passed, 0 skipped, 0 failed。**
 
 ### 测试分类与审计
 
@@ -975,7 +978,7 @@ PYTHONPATH=scripts ./.venv/bin/python -m pytest \
 
 #### 当前状态
 
-核心测试集已稳定在 **529 个用例**（0 skipped）。
+核心测试集已稳定在 **531 个用例**（0 skipped）。
 
 ### 常用测试文档
 

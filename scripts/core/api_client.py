@@ -397,7 +397,8 @@ class APIClient:
                 last_error = TransientError(str(exc))
                 if attempt == policy.max_attempts - 1:
                     raise last_error from exc
-                delay = policy.compute_delay(attempt)
+                # 网络/超时类瞬态错误使用至少 5s 退避，避免立即重试
+                delay = max(policy.compute_delay(attempt), 5.0)
                 logger.warning(
                     f"API transient error | provider={self.provider.__class__.__name__} "
                     f"| method={method} | path={path} | error={exc} | "

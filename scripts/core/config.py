@@ -100,6 +100,10 @@ class Config:
     # 注：LLM/Embedding 的重试与超时统一由下方 HTTP_* 配置驱动（见 core/api_client.py）。
     # LLM_TIMEOUT 单独用于 LLM 同步对话请求的超时。
     LLM_TIMEOUT: int = 0  # 将在下方初始化
+    # Chat 模式动态超时参数（仅当 LLM_MODE=chat 时生效）
+    LLM_TIMEOUT_PER_10K_CHARS: int = 0  # 将在下方初始化
+    LLM_TIMEOUT_PER_IMAGE: int = 0  # 将在下方初始化
+    LLM_TIMEOUT_MAX: int = 0  # 将在下方初始化
     # --- 统一 HTTP 客户端重试配置 ---
     HTTP_TIMEOUT: int = 0  # 将在下方初始化
     HTTP_RETRY_MAX_ATTEMPTS: int = 0  # 将在下方初始化
@@ -176,6 +180,11 @@ class Config:
 
         # LLM 客户端
         cls.LLM_TIMEOUT = int(_resolve_config("WORKDOCS_LLM_TIMEOUT", "300"))
+        cls.LLM_TIMEOUT_PER_10K_CHARS = int(
+            _resolve_config("WORKDOCS_LLM_TIMEOUT_PER_10K_CHARS", "60")
+        )
+        cls.LLM_TIMEOUT_PER_IMAGE = int(_resolve_config("WORKDOCS_LLM_TIMEOUT_PER_IMAGE", "30"))
+        cls.LLM_TIMEOUT_MAX = int(_resolve_config("WORKDOCS_LLM_TIMEOUT_MAX", "1800"))
         # 统一 HTTP 客户端重试配置
         cls.HTTP_TIMEOUT = int(_resolve_config("WORKDOCS_HTTP_TIMEOUT", "120"))
         cls.HTTP_RETRY_MAX_ATTEMPTS = int(_resolve_config("WORKDOCS_HTTP_RETRY_MAX_ATTEMPTS", "3"))

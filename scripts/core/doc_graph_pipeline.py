@@ -1343,15 +1343,12 @@ class DocGraphPipeline:
                 if (
                     existing.status == DocumentStatus.BATCH_SUBMITTED
                     and self._is_valid_results_file(results_path)
+                    and Config.LLM_MODE != "chat"
                 ):
                     logger.info(
                         f"Batch 已提交且结果文件有效，跳过 | file={file_path} | doc_id={doc_id}"
                     )
                     return results_path
-            # 如果结果文件已存在且有效且非 force，直接返回
-            if self._is_valid_results_file(results_path):
-                logger.info(f"结果文件已存在且有效，跳过提交 | path={results_path}")
-                return results_path
 
         logger.info(f"开始阶段3 Batch 提交 | file={file_path} | doc_id={doc_id}")
         self.db.update_document_status(doc_id, DocumentStatus.PROCESSING)
@@ -1473,8 +1470,11 @@ class DocGraphPipeline:
                     batch_endpoint=batch_endpoint,
                 )
 
-        # 删除旧结果文件（如果存在）
-        if results_path.exists():
+        # Chat 模式下保留已有 results.jsonl，以支持断点续传；
+        # Batch 模式或显式 force 时删除旧结果，避免脏数据。
+        if results_path.exists() and (
+            force or Config.LLM_MODE != "chat" or not self.llm_batch
+        ):
             results_path.unlink()
 
         # 提交并保存结果
@@ -1517,6 +1517,10 @@ class DocGraphPipeline:
     ) -> list[dict[str, Any]]:
         """Chat 模式：从 JSONL requests 逐个调用同步 Chat API，结果以 Batch 格式写入 results.jsonl.
 
+        支持断点续传：若 results.jsonl 已存在，读取其中成功/失败记录，仅重试失败或缺失的请求。
+        支持动态超时：根据文本长度与图片数量计算单次请求超时，避免固定 300s 导致大请求超时。
+        失败请求会落盘为错误结果并继续处理后续请求，不会阻塞整个 pipeline。
+
         写入格式与 Batch API 返回格式完全一致：
         {"custom_id": "...", "response": {"status_code": 200, "body": {"choices": [...]}}}
 
@@ -1524,80 +1528,160 @@ class DocGraphPipeline:
         """
         assert self.llm_chat is not None, "ChatClient 未初始化"
         total = len(requests)
-        logger.info(
-            f"Chat 模式提交 | requests={total} | timeout={Config.LLM_TIMEOUT}s | "
-            f"output={results_path}"
-        )
-        results: list[dict[str, Any]] = []
-        with open(results_path, "w", encoding="utf-8") as f:
-            for idx, req in enumerate(requests):
-                body = req.get("body", {})
-                custom_id = req.get("custom_id", "")
-                messages = body.get("messages", [])
-                text_len = sum(len(str(m.get("content", ""))) for m in messages)
-                img_count = sum(
-                    1
-                    for m in messages
-                    if isinstance(m.get("content"), list)
-                    for item in m["content"]
-                    if isinstance(item, dict) and item.get("type") == "image_url"
-                )
-                logger.info(
-                    f"Chat 请求 {idx + 1}/{total} | {custom_id} | "
-                    f"text_len={text_len} | images={img_count}"
-                )
-                result: dict[str, Any] | None = None
-                last_error: Exception | None = None
-                retryable_errors = (
-                    RateLimitError,
-                    ServerError,
-                    ServerOverloadedError,
-                    TransientError,
-                )
-                for attempt in range(3):
-                    try:
-                        response_data = self.llm_chat._post(Config.LLM_CHAT_ENDPOINT, body)
-                        result = {
-                            "custom_id": custom_id,
-                            "response": {
-                                "status_code": 200,
-                                "body": response_data,
-                            },
-                        }
-                        break
-                    except retryable_errors as e:
-                        last_error = e
-                        if attempt == 2:
-                            break
-                        delay = min(
-                            Config.HTTP_RETRY_BASE_DELAY * (2**attempt),
-                            Config.HTTP_RETRY_MAX_DELAY,
-                        )
-                        logger.warning(
-                            f"Chat API 可重试错误 | {custom_id} ({idx + 1}/{total}) | "
-                            f"attempt={attempt + 1}/3 | error={e} | retry_after={delay:.2f}s"
-                        )
-                        time.sleep(delay)
-                    except Exception as e:
-                        last_error = e
-                        break
 
-                if result is None:
-                    status_code = getattr(last_error, "status_code", 500)
-                    logger.error(
-                        f"Chat API 调用失败 | {custom_id} ({idx + 1}/{total}) | "
-                        f"status={status_code} | error={last_error}"
+        # 1. 加载已有结果，实现断点续传
+        existing: dict[str, dict[str, Any]] = {}
+        if results_path.exists() and results_path.stat().st_size > 0:
+            try:
+                with open(results_path, encoding="utf-8") as f:
+                    for line in f:
+                        line = line.strip()
+                        if not line:
+                            continue
+                        try:
+                            record = json.loads(line)
+                        except json.JSONDecodeError:
+                            continue
+                        cid = record.get("custom_id")
+                        if not cid:
+                            continue
+                        existing[cid] = record
+                logger.info(
+                    f"Chat 模式恢复 | existing={len(existing)} | "
+                    f"output={results_path}"
+                )
+            except OSError as e:
+                logger.warning(f"读取已有 results.jsonl 失败，将重新提交 | error={e}")
+
+        # 2. 过滤出需要处理的请求
+        pending_requests: list[tuple[int, dict[str, Any]]] = []
+        for idx, req in enumerate(requests):
+            custom_id = req.get("custom_id", "")
+            record = existing.get(custom_id)
+            if record and record.get("response", {}).get("status_code") == 200:
+                continue
+            pending_requests.append((idx, req))
+
+        logger.info(
+            f"Chat 模式提交 | total={total} | pending={len(pending_requests)} | "
+            f"base_timeout={Config.LLM_TIMEOUT}s | output={results_path}"
+        )
+
+        # 3. 以追加模式写入结果；已有成功记录保留，失败/缺失请求重新执行
+        results: list[dict[str, Any]] = []
+        # 先收集所有结果，保持与 requests 顺序一致
+        result_map: dict[str, dict[str, Any]] = {
+            cid: record for cid, record in existing.items()
+        }
+
+        for idx, req in pending_requests:
+            body = req.get("body", {})
+            custom_id = req.get("custom_id", "")
+            messages = body.get("messages", [])
+            text_len = sum(len(str(m.get("content", ""))) for m in messages)
+            img_count = sum(
+                1
+                for m in messages
+                if isinstance(m.get("content"), list)
+                for item in m["content"]
+                if isinstance(item, dict) and item.get("type") == "image_url"
+            )
+            timeout = self._compute_chat_timeout(text_len, img_count)
+            logger.info(
+                f"Chat 请求 {idx + 1}/{total} | {custom_id} | "
+                f"text_len={text_len} | images={img_count} | timeout={timeout}s"
+            )
+            result: dict[str, Any] | None = None
+            last_error: Exception | None = None
+            retryable_errors = (
+                RateLimitError,
+                ServerError,
+                ServerOverloadedError,
+                TransientError,
+            )
+            for attempt in range(3):
+                try:
+                    response_data = self.llm_chat._post(
+                        Config.LLM_CHAT_ENDPOINT, body, timeout=timeout
                     )
                     result = {
                         "custom_id": custom_id,
                         "response": {
-                            "status_code": status_code,
-                            "body": {"error": str(last_error)},
+                            "status_code": 200,
+                            "body": response_data,
+                        },
+                    }
+                    break
+                except retryable_errors as e:
+                    last_error = e
+                    if attempt == 2:
+                        break
+                    # 对读取超时类错误使用更长的退避，避免刚超时立即重试
+                    delay = self._compute_chat_retry_delay(timeout, attempt, str(e))
+                    logger.warning(
+                        f"Chat API 可重试错误 | {custom_id} ({idx + 1}/{total}) | "
+                        f"attempt={attempt + 1}/3 | error={e} | retry_after={delay:.2f}s"
+                    )
+                    time.sleep(delay)
+                except Exception as e:
+                    last_error = e
+                    break
+
+            if result is None:
+                status_code = getattr(last_error, "status_code", None)
+                # 保持兼容性：非 TransientError 且未显式携带 status_code 时，默认按 500 落盘
+                if status_code is None and not isinstance(last_error, TransientError):
+                    status_code = 500
+                logger.error(
+                    f"Chat API 调用失败 | {custom_id} ({idx + 1}/{total}) | "
+                    f"status={status_code} | error={last_error}"
+                )
+                result = {
+                    "custom_id": custom_id,
+                    "response": {
+                        "status_code": status_code,
+                        "body": {"error": str(last_error)},
+                    },
+                }
+            result_map[custom_id] = result
+
+        # 4. 按 requests 顺序写出全部结果，保证 extract_from_results_file 顺序稳定
+        with open(results_path, "w", encoding="utf-8") as f:
+            for req in requests:
+                custom_id = req.get("custom_id", "")
+                result = result_map.get(custom_id)
+                if result is None:
+                    # 防御性兜底：理论上不会出现
+                    result = {
+                        "custom_id": custom_id,
+                        "response": {
+                            "status_code": None,
+                            "body": {"error": "Result missing"},
                         },
                     }
                 f.write(json.dumps(result, ensure_ascii=False) + "\n")
                 results.append(result)
         return results
+
+    @staticmethod
+    def _compute_chat_timeout(text_len: int, img_count: int) -> int:
+        """根据内容大小计算 Chat 请求超时（秒）."""
+        extra = (
+            (text_len / 10000) * Config.LLM_TIMEOUT_PER_10K_CHARS
+            + img_count * Config.LLM_TIMEOUT_PER_IMAGE
+        )
+        timeout = Config.LLM_TIMEOUT + int(extra)
+        return min(timeout, Config.LLM_TIMEOUT_MAX)
+
+    @staticmethod
+    def _compute_chat_retry_delay(timeout: int, attempt: int, error_text: str) -> float:
+        """计算 Chat 请求重试前的等待时间."""
+        # 对读取超时错误使用更长退避，避免立即重试再次超时
+        base = 5.0
+        if "timed out" in error_text.lower() or "timeout" in error_text.lower():
+            base = min(60.0, timeout / 5.0)
+        delay = base * (2**attempt)
+        return min(delay, Config.HTTP_RETRY_MAX_DELAY)
 
     def stage4_ingest_results(
         self,
@@ -2038,10 +2122,44 @@ class DocGraphPipeline:
         file_hash = hashlib.md5(Path(file_path).read_bytes()).hexdigest()
         doc_id = file_hash[:16]
 
+        # 尽早持久化 documents 记录，避免 stage3 超时中断后 documents 表为空
+        total_pages = 0
+        suffix = Path(file_path).suffix.lower()
+        if suffix == ".pdf":
+            try:
+                with fitz.open(str(file_path)) as doc:
+                    total_pages = len(doc)
+            except Exception:
+                pass
+        self.db.upsert_document(
+            Document(
+                doc_id=doc_id,
+                title=Path(file_path).stem,
+                source_path=file_path,
+                file_type=suffix.lstrip("."),
+                total_pages=total_pages,
+                file_hash=file_hash,
+                status=DocumentStatus.PROCESSING,
+            )
+        )
+
         try:
             # 阶段1: PDF → Markdown
-            doc_id, _parsed_output_dir, _extracted_text, _bigmodel_images = self.stage1_parse(
+            doc_id, parsed_output_dir, extracted_text, _bigmodel_images = self.stage1_parse(
                 file_path
+            )
+
+            # 阶段1 结束后再次更新文档状态，记录解析完成
+            self.db.upsert_document(
+                Document(
+                    doc_id=doc_id,
+                    title=Path(file_path).stem,
+                    source_path=file_path,
+                    file_type=suffix.lstrip("."),
+                    total_pages=total_pages,
+                    file_hash=file_hash,
+                    status=DocumentStatus.PROCESSING,
+                )
             )
 
             # 阶段2: Markdown → JSONL

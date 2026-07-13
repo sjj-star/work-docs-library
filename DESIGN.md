@@ -655,7 +655,7 @@ explore(mode="entity", entity_type="Product", name="TMS320F28379D")
 **背景**：
 - 2026-04 代码审计发现 21 项缺陷（9 个 P0 数据损坏风险、7 个 P1 可靠性缺陷、5 个 P2 代码质量问题），已全部修复并通过 514 个测试验证。
 - 2026-06 再次审计发现 Critical/High 级安全与数据完整性问题，按「最小紧急修复」方案修复后测试数达到 514 个。
-- 2026-06 接口精简：基于审计发现 Agent 在 14 个 MCP 工具间混淆的问题，将工具面收敛到 5 个，并将 `KnowledgeBaseService` 的查询组合逻辑拆出为 `QueryService`（当时测试数精简为 506 个）。此后随统一 `APIClient`、使用跟踪与评估等能力补充，测试集当前为 529 个（以最近一次 pytest 输出为准）。
+- 2026-06 接口精简：基于审计发现 Agent 在 14 个 MCP 工具间混淆的问题，将工具面收敛到 5 个，并将 `KnowledgeBaseService` 的查询组合逻辑拆出为 `QueryService`（当时测试数精简为 506 个）。此后随统一 `APIClient`、使用跟踪与评估等能力补充，测试集当前为 531 个（以最近一次 pytest 输出为准）。
 
 **关键教训**：
 
@@ -687,6 +687,7 @@ explore(mode="entity", entity_type="Product", name="TMS320F28379D")
 | **MCP 工具面过宽会降低 Agent 调用质量** | 14 个查询类工具导致 Agent 频繁选错检索策略 | 收敛为 5 个原子工具：search/explore/read/ingest/status |
 | **服务层职责过重会阻碍演进** | `KnowledgeBaseService` 同时承载生命周期、持久化、检索、图谱、桥接、重排序等 ~1,200 行 | 拆出 `core/bridge.py` 与 `core/query_service.py`，让服务层回归生命周期与原子能力 |
 | **私有内部类难以独立测试** | `_EntityChunkBridge` 作为 `KnowledgeBaseService` 内部类 | 提升为独立模块 `core/bridge.py`，可单独测试和复用 |
+| **Chat 模式长文档必须支持断点续传与动态超时** | `spru430f` 551 页文档在 `chat` 模式下因 300s 固定超时触发 499，且失败后丢失全部进度；`documents` 表未在 stage1 持久化 | `_submit_via_chat` 读取已有 `results.jsonl`，仅重试失败/缺失请求；按文本长度和图片数计算动态 timeout；`_process_one` 起始处 `upsert_document(PROCESSING)`；API 层对 `TransientError` 使用至少 5s 退避 |
 
 **新增开发原则**：详见本章（审计教训），包含副作用隔离、索引一致性、失败回滚、输入验证、跨阶段校验、配置统一、资源生命周期管理、接口面精简、模块职责单一 10 条原则。
 
