@@ -705,21 +705,19 @@ python scripts/admin_tools.py run_eval --params '{"dataset_name":"my_eval","retr
 | **Pipeline / Graph** | | | |
 | `WORKDOCS_GRAPH_MAX_PATH_DEPTH` | `6` | 图谱路径搜索最大深度 |
 | `WORKDOCS_GRAPH_OUTPUT_DIR` | `graphs` | 图谱 JSON 输出目录 |
-| **重排序配置** | | | |
-| `WORKDOCS_RERANK_CROSS_ENCODER_MODEL` | `BAAI/bge-reranker-v2-m3` | 本地 CrossEncoder 重排序模型名称或路径（`sentence-transformers`） |
 | **使用日志 / 审计** | | | |
 | `WORKDOCS_USAGE_LOG_MAX_DAYS` | `30` | usage_logs 保留天数 |
 | `WORKDOCS_USAGE_LOG_MAX_ROWS` | `10000` | usage_logs 最大行数 |
 
 ### 超时调节指南
 
-处理长文档或多图文档时，若遇到 `Read timed out. (read timeout=120)` 错误，需要调大同步请求超时参数。
+处理长文档或多图文档时，若遇到 `Read timed out. (read timeout=300)` 错误，需要调大同步请求超时参数。
 
 **什么情况下需要调节？**
 - 使用 Chat 模式（`LLM_MODE=chat`）处理长文档
 - 请求包含 multimodal 图片（图片越多、越大，模型处理时间越长）
 - 单个 chapter 的文本超过 500KB
-- 当前默认 120 秒不足以完成模型推理
+- 当前默认 300 秒仍不足以完成模型推理
 
 **超时后会发生什么？**
 - 超时被统一 `APIClient` 视为可重试的瞬时错误（`TransientError`），按 `HTTP_RETRY_*` 策略指数退避重试（默认最多 3 次）
