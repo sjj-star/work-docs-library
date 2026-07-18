@@ -416,7 +416,7 @@ def tool_status(params: dict) -> dict:
         doc_id: 可选，提供时返回该文档的详细状态和进度统计（与 scope=overview 兼容）
         scope: 状态维度，可选值：
             overview（默认）, documents, vectors, graph, blocks, headings,
-            conflicts, feedback, config, quality, ingest_pipeline, toc,
+            conflicts, feedback, config, quality, ingest_pipeline, pipeline, toc,
             trace, usage, all
         top_n: 列表类数据默认返回条数（默认 20）
         session_id: scope=trace 时用于过滤会话路径
@@ -506,6 +506,8 @@ def tool_status(params: dict) -> dict:
             return collector.collect_quality_status()
         if scope == "ingest_pipeline":
             return collector.collect_ingest_pipeline_status()
+        if scope == "pipeline":
+            return collector.collect_pipeline_status(top_n)
         if scope == "trace":
             return collector.collect_trace_status(session_id=session_id, top_n=top_n)
         if scope == "usage":

@@ -134,6 +134,14 @@ class FakeBigModelParserClient:
 
 def _mock_external_clients(monkeypatch):
     """统一 mock 外部 API 客户端."""
+    # 模拟 LLM 与 Embedding API 均已配置
+    monkeypatch.setattr(Config, "LLM_API_KEY", "test-llm-key")
+    monkeypatch.setattr(Config, "LLM_MODEL", "test-llm-model")
+    monkeypatch.setattr(Config, "LLM_BASE_URL", "http://test-llm.local")
+    monkeypatch.setattr(Config, "EMBEDDING_API_KEY", "test-embedding-key")
+    monkeypatch.setattr(Config, "EMBEDDING_BASE_URL", "http://test-embedding.local")
+    monkeypatch.setattr(Config, "EMBEDDING_MODEL", "test-embedding-model")
+
     monkeypatch.setattr(
         "core.doc_graph_pipeline.BigModelParserClient",
         FakeBigModelParserClient,
@@ -1567,3 +1575,172 @@ def test_build_batch_requests_multiple_batches():
         text_parts = [c["text"] for c in user_content if c["type"] == "text"]
         full_text = "".join(text_parts)
         assert "文档《Test》" in full_text
+
+
+# ---------------------------------------------------------------------------
+# 阶段状态与断点续传测试
+# ---------------------------------------------------------------------------
+
+
+def test_process_one_skips_stage3_when_llm_not_configured(patched_config, monkeypatch):
+    """LLM API 未配置时，stage3 应被跳过，stage4 写入空实体，stage6 可正常执行."""
+    _mock_external_clients(monkeypatch)
+    # 清除 LLM 配置，使 _llm_configured() 返回 False
+    monkeypatch.setattr(Config, "LLM_API_KEY", "")
+    monkeypatch.setattr(Config, "LLM_MODEL", "")
+    monkeypatch.setattr(Config, "LLM_BASE_URL", "")
+
+    pdf = patched_config / "test.pdf"
+    _make_pdf(pdf, ["## Intro\n\nIntroduction content here."])
+
+    pipe = DocGraphPipeline()
+    doc_id = pipe._process_one(str(pdf))
+
+    assert doc_id is not None
+    db = KnowledgeDB()
+    doc = db.get_document_by_path(str(pdf))
+    assert doc is not None
+    assert doc.status == "processing"
+
+    stages = db.get_pipeline_stages(doc_id)
+    assert stages.get("stage3", {}).get("status") == "skipped"
+    assert stages.get("stage4", {}).get("status") == "done"
+    assert stages.get("stage6", {}).get("status") == "done"
+
+    blocks = db.query_blocks_by_doc(doc_id)
+    assert len(blocks) > 0
+    assert blocks[0]["metadata"].get("extracted_entities") == []
+
+
+def test_process_one_resumes_stage3_when_llm_becomes_available(patched_config, monkeypatch):
+    """先无 LLM API 导入，配置后再次导入应补跑 stage3/stage4."""
+    _mock_external_clients(monkeypatch)
+    # 第一次：无 LLM API
+    monkeypatch.setattr(Config, "LLM_API_KEY", "")
+    monkeypatch.setattr(Config, "LLM_MODEL", "")
+    monkeypatch.setattr(Config, "LLM_BASE_URL", "")
+
+    pdf = patched_config / "test.pdf"
+    _make_pdf(pdf, ["## Intro\n\nIntroduction content here."])
+
+    pipe = DocGraphPipeline()
+    doc_id = pipe._process_one(str(pdf))
+    assert doc_id is not None
+
+    db = KnowledgeDB()
+    doc = db.get_document_by_path(str(pdf))
+    assert doc is not None
+    assert doc.status == "processing"
+
+    # 第二次：配置 LLM API
+    monkeypatch.setattr(Config, "LLM_API_KEY", "fake-llm-key")
+    monkeypatch.setattr(Config, "LLM_MODEL", "test-model")
+    monkeypatch.setattr(Config, "LLM_BASE_URL", "http://test.local")
+
+    pipe2 = DocGraphPipeline()
+    doc_id2 = pipe2._process_one(str(pdf))
+    assert doc_id2 == doc_id
+
+    doc2 = db.get_document_by_path(str(pdf))
+    assert doc2 is not None
+    assert doc2.status == "done"
+
+    stages = db.get_pipeline_stages(doc_id)
+    assert stages.get("stage3", {}).get("status") == "done"
+    assert stages.get("stage4", {}).get("status") == "done"
+    assert stages.get("stage6", {}).get("status") == "done"
+
+    # 第二次后 blocks 应包含实体
+    blocks = db.query_blocks_by_doc(doc_id)
+    assert len(blocks) > 0
+    # FakeChatClient 返回空实体，但至少 metadata 存在
+    assert "extracted_entities" in blocks[0]["metadata"]
+
+
+def test_process_one_skips_stage6_when_embedding_not_configured(patched_config, monkeypatch):
+    """Embedding API 未配置时，stage6 应被跳过，文档状态保持 processing."""
+    _mock_external_clients(monkeypatch)
+    # 清除 Embedding 配置
+    monkeypatch.setattr(Config, "EMBEDDING_API_KEY", "")
+    monkeypatch.setattr(Config, "EMBEDDING_MODEL", "")
+    monkeypatch.setattr(Config, "EMBEDDING_BASE_URL", "")
+
+    pdf = patched_config / "test.pdf"
+    _make_pdf(pdf, ["## Intro\n\nIntroduction content here."])
+
+    pipe = DocGraphPipeline()
+    doc_id = pipe._process_one(str(pdf))
+
+    assert doc_id is not None
+    db = KnowledgeDB()
+    doc = db.get_document_by_path(str(pdf))
+    assert doc is not None
+    assert doc.status == "processing"
+
+    stages = db.get_pipeline_stages(doc_id)
+    assert stages.get("stage3", {}).get("status") == "done"
+    assert stages.get("stage6", {}).get("status") == "skipped"
+
+
+def test_process_one_resumes_stage6_when_embedding_becomes_available(patched_config, monkeypatch):
+    """先无 Embedding API 导入，配置后再次导入应补跑 stage6."""
+    _mock_external_clients(monkeypatch)
+    # 第一次：无 Embedding API
+    monkeypatch.setattr(Config, "EMBEDDING_API_KEY", "")
+    monkeypatch.setattr(Config, "EMBEDDING_MODEL", "")
+    monkeypatch.setattr(Config, "EMBEDDING_BASE_URL", "")
+
+    pdf = patched_config / "test.pdf"
+    _make_pdf(pdf, ["## Intro\n\nIntroduction content here."])
+
+    pipe = DocGraphPipeline()
+    doc_id = pipe._process_one(str(pdf))
+    assert doc_id is not None
+
+    db = KnowledgeDB()
+    doc = db.get_document_by_path(str(pdf))
+    assert doc is not None
+    assert doc.status == "processing"
+
+    blocks = db.query_blocks_by_doc(doc_id)
+    assert all(b["status"] != "done" for b in blocks)
+
+    # 第二次：配置 Embedding API
+    monkeypatch.setattr(Config, "EMBEDDING_API_KEY", "fake-emb-key")
+    monkeypatch.setattr(Config, "EMBEDDING_MODEL", "test-model")
+    monkeypatch.setattr(Config, "EMBEDDING_BASE_URL", "http://test.local")
+
+    pipe2 = DocGraphPipeline()
+    doc_id2 = pipe2._process_one(str(pdf))
+    assert doc_id2 == doc_id
+
+    doc2 = db.get_document_by_path(str(pdf))
+    assert doc2 is not None
+    assert doc2.status == "done"
+
+    blocks2 = db.query_blocks_by_doc(doc_id)
+    assert all(b["status"] == "done" for b in blocks2)
+
+
+def test_pipeline_stage_status_crud(patched_config):
+    """pipeline_stage_status 表的 CRUD 应正常工作."""
+    db = KnowledgeDB()
+    doc_id = "test_doc"
+
+    db.upsert_pipeline_stage(doc_id, "stage1", "done")
+    record = db.get_pipeline_stage(doc_id, "stage1")
+    assert record is not None
+    assert record["status"] == "done"
+
+    db.upsert_pipeline_stage(doc_id, "stage1", "failed", "test error")
+    record = db.get_pipeline_stage(doc_id, "stage1")
+    assert record is not None
+    assert record["status"] == "failed"
+    assert record["error_message"] == "test error"
+
+    stages = db.get_pipeline_stages(doc_id)
+    assert "stage1" in stages
+
+    db.delete_pipeline_stages(doc_id)
+    stages = db.get_pipeline_stages(doc_id)
+    assert stages == {}

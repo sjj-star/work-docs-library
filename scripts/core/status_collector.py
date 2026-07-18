@@ -51,6 +51,7 @@ class StatusCollector:
                 doc_id,
                 {"total": 0, "pending": 0, "embedded": 0, "done": 0, "skipped": 0, "failed": 0},
             )
+            pipeline_stages = self.svc.db.get_pipeline_stages(doc_id)
             doc_list.append(
                 {
                     "doc_id": doc_id,
@@ -62,6 +63,9 @@ class StatusCollector:
                     "vectors": vector_by_doc.get(doc_id, 0),
                     "graph_entities": graph_by_doc.get(doc_id, {}).get("entities", 0),
                     "graph_relations": graph_by_doc.get(doc_id, {}).get("relations", 0),
+                    "pipeline_stages": {
+                        stage: record["status"] for stage, record in pipeline_stages.items()
+                    },
                     "extracted_at": doc.extracted_at,
                 }
             )
@@ -531,6 +535,37 @@ class StatusCollector:
         }
 
     # ------------------------------------------------------------------
+    # pipeline stage status
+    # ------------------------------------------------------------------
+
+    def collect_pipeline_status(self, top_n: int = 20) -> dict[str, Any]:
+        """返回所有文档的 pipeline 阶段状态."""
+        docs = self.svc.list_documents()
+        result = []
+        for doc in docs[:top_n]:
+            stages = self.svc.db.get_pipeline_stages(doc.doc_id)
+            result.append(
+                {
+                    "doc_id": doc.doc_id,
+                    "title": doc.title,
+                    "document_status": doc.status,
+                    "stages": {
+                        stage: {
+                            "status": record["status"],
+                            "error_message": record.get("error_message"),
+                            "updated_at": record.get("updated_at"),
+                        }
+                        for stage, record in stages.items()
+                    },
+                }
+            )
+        return {
+            "success": True,
+            "scope": "pipeline",
+            "documents": result,
+        }
+
+    # ------------------------------------------------------------------
     # all
     # ------------------------------------------------------------------
 
@@ -549,6 +584,7 @@ class StatusCollector:
             "config": self.collect_config_status(),
             "quality": self.collect_quality_status(),
             "ingest_pipeline": self.collect_ingest_pipeline_status(),
+            "pipeline": self.collect_pipeline_status(top_n),
             "trace": self.collect_trace_status(top_n=top_n),
             "usage": self.collect_usage_status(top_n=top_n),
         }

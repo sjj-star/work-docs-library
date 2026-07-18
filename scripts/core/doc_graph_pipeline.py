@@ -1689,9 +1689,17 @@ class DocGraphPipeline:
         file_path: str,
         results_path: Path,
         force: bool = False,
+        mark_done: bool = True,
     ) -> str:
         """阶段4: 从 Batch 结果文件解析并入库.
 
+        Args:
+            doc_id: 文档 ID
+            file_path: 原始文件路径
+            results_path: Batch/Chat 结果 JSONL 路径
+            force: 是否强制重跑
+            mark_done: 是否在完成后将 documents.status 设为 DONE。
+                在 _process_one 的恢复流程中应设为 False，由外层统一判断。
         Returns:
             doc_id
         """
@@ -1943,19 +1951,21 @@ class DocGraphPipeline:
                 logger.info(f"已删除旧图谱文件 | {old_graph_path}")
 
         # --- 更新文档状态 ---
-        self.db.upsert_document(
-            Document(
-                doc_id=doc_id,
-                title=Path(file_path).stem,
-                source_path=file_path,
-                file_type=suffix.lstrip("."),
-                total_pages=pdf_page_count,
-                file_hash=file_hash,
-                status=DocumentStatus.DONE,
+        if mark_done:
+            self.db.upsert_document(
+                Document(
+                    doc_id=doc_id,
+                    title=Path(file_path).stem,
+                    source_path=file_path,
+                    file_type=suffix.lstrip("."),
+                    total_pages=pdf_page_count,
+                    file_hash=file_hash,
+                    status=DocumentStatus.DONE,
+                )
             )
-        )
-
-        logger.info(f"文档入库完成 | doc_id={doc_id}")
+            logger.info(f"文档入库完成 | doc_id={doc_id}")
+        else:
+            logger.info(f"文档入库完成（保留 processing 状态） | doc_id={doc_id}")
         return doc_id
 
     def stage5_build_embed_jsonl(self, doc_id: str) -> Path:
@@ -2108,13 +2118,57 @@ class DocGraphPipeline:
         )
         return doc_id
 
+    # ------------------------------------------------------------------
+    # 阶段状态辅助
+    # ------------------------------------------------------------------
+
+    def _get_pipeline_stage_status(self, doc_id: str, stage: str) -> str:
+        """获取指定阶段的状态，不存在时返回 pending."""
+        record = self.db.get_pipeline_stage(doc_id, stage)
+        return record["status"] if record else "pending"
+
+    def _should_run_stage(self, doc_id: str, stage: str) -> bool:
+        """判断指定阶段是否需要执行（非 done 状态都需要执行）."""
+        return self._get_pipeline_stage_status(doc_id, stage) != "done"
+
+    def _set_stage_running(self, doc_id: str, stage: str) -> None:
+        """标记阶段开始执行."""
+        self.db.upsert_pipeline_stage(doc_id, stage, "running")
+
+    def _set_stage_done(self, doc_id: str, stage: str) -> None:
+        """标记阶段执行成功."""
+        self.db.upsert_pipeline_stage(doc_id, stage, "done")
+
+    def _set_stage_failed(self, doc_id: str, stage: str, error: Exception) -> None:
+        """标记阶段执行失败."""
+        self.db.upsert_pipeline_stage(doc_id, stage, "failed", str(error))
+
+    def _set_stage_skipped(self, doc_id: str, stage: str, reason: str) -> None:
+        """标记阶段因依赖未配置而跳过."""
+        self.db.upsert_pipeline_stage(doc_id, stage, "skipped", reason)
+
+    def _llm_configured(self) -> bool:
+        """检查 LLM API 是否已配置."""
+        return Config.llm_configured()
+
+    def _embedding_configured(self) -> bool:
+        """检查 Embedding API 是否已配置."""
+        return Config.embedding_configured()
+
+    def _read_result_md_if_exists(self, doc_id: str) -> str:
+        """读取 result.md，不存在时返回空字符串."""
+        result_md_path = Config.DB_PATH.parent / Config.PARSE_OUTPUT_DIR / doc_id / "result.md"
+        if not result_md_path.exists():
+            return ""
+        return result_md_path.read_text(encoding="utf-8")
+
     def _process_one(
         self,
         file_path: str,
         dry_run: bool = False,
         force: bool = False,
     ) -> str | None:
-        """处理单个文档（完整流程，兼容入口）."""
+        """处理单个文档（完整流程，支持阶段状态恢复）."""
         if dry_run:
             file_hash = hashlib.md5(Path(file_path).read_bytes()).hexdigest()
             return file_hash[:16]
@@ -2122,7 +2176,7 @@ class DocGraphPipeline:
         file_hash = hashlib.md5(Path(file_path).read_bytes()).hexdigest()
         doc_id = file_hash[:16]
 
-        # 尽早持久化 documents 记录，避免 stage3 超时中断后 documents 表为空
+        # 尽早持久化 documents 记录，避免阶段中断后 documents 表为空
         total_pages = 0
         suffix = Path(file_path).suffix.lower()
         if suffix == ".pdf":
@@ -2145,49 +2199,147 @@ class DocGraphPipeline:
 
         try:
             # 阶段1: PDF → Markdown
-            doc_id, parsed_output_dir, extracted_text, _bigmodel_images = self.stage1_parse(
-                file_path
-            )
-
-            # 阶段1 结束后再次更新文档状态，记录解析完成
-            self.db.upsert_document(
-                Document(
-                    doc_id=doc_id,
-                    title=Path(file_path).stem,
-                    source_path=file_path,
-                    file_type=suffix.lstrip("."),
-                    total_pages=total_pages,
-                    file_hash=file_hash,
-                    status=DocumentStatus.PROCESSING,
-                )
-            )
+            if self._should_run_stage(doc_id, "stage1"):
+                self._set_stage_running(doc_id, "stage1")
+                try:
+                    doc_id, parsed_output_dir, extracted_text, _bigmodel_images = (
+                        self.stage1_parse(file_path)
+                    )
+                    self.db.upsert_document(
+                        Document(
+                            doc_id=doc_id,
+                            title=Path(file_path).stem,
+                            source_path=file_path,
+                            file_type=suffix.lstrip("."),
+                            total_pages=total_pages,
+                            file_hash=file_hash,
+                            status=DocumentStatus.PROCESSING,
+                        )
+                    )
+                    self._set_stage_done(doc_id, "stage1")
+                except Exception as e:
+                    self._set_stage_failed(doc_id, "stage1", e)
+                    raise
+            else:
+                # stage1 已完成，result.md 已存在，stage2 会从磁盘读取
+                pass
 
             # 阶段2: Markdown → JSONL
-            jsonl_path, _batches, _requests, _content_blocks, _heading_maps = (
-                self.stage2_build_jsonl(doc_id)
-            )
+            if self._should_run_stage(doc_id, "stage2"):
+                self._set_stage_running(doc_id, "stage2")
+                try:
+                    jsonl_path, _batches, _requests, _content_blocks, _heading_maps = (
+                        self.stage2_build_jsonl(doc_id)
+                    )
+                    self._set_stage_done(doc_id, "stage2")
+                except Exception as e:
+                    self._set_stage_failed(doc_id, "stage2", e)
+                    raise
+            else:
+                jsonl_path = Config.DB_PATH.parent / Config.BATCH_OUTPUT_DIR / f"{doc_id}.jsonl"
 
             # 阶段3: 提交 Batch API 并保存结果
-            results_path = self.stage3_submit_batches(
-                doc_id=doc_id,
-                file_path=file_path,
-                jsonl_path=jsonl_path,
-                force=force,
-            )
+            results_path: Path | None = None
+            stage3_was_done = self._get_pipeline_stage_status(doc_id, "stage3") == "done"
+            if not self._should_run_stage(doc_id, "stage3"):
+                results_path = (
+                    Config.DB_PATH.parent / Config.BATCH_OUTPUT_DIR / f"{doc_id}_results.jsonl"
+                )
+            elif not self._llm_configured():
+                reason = "LLM API key not configured"
+                logger.info(f"跳过阶段3 | doc_id={doc_id} | reason={reason}")
+                self._set_stage_skipped(doc_id, "stage3", reason)
+                # 写入空 results.jsonl，使 stage4 能解析为空结果并写入基础 blocks
+                results_path = (
+                    Config.DB_PATH.parent / Config.BATCH_OUTPUT_DIR / f"{doc_id}_results.jsonl"
+                )
+                results_path.write_text("", encoding="utf-8")
+            else:
+                self._set_stage_running(doc_id, "stage3")
+                try:
+                    results_path = self.stage3_submit_batches(
+                        doc_id=doc_id,
+                        file_path=file_path,
+                        jsonl_path=jsonl_path,
+                        force=force,
+                    )
+                    self._set_stage_done(doc_id, "stage3")
+                except Exception as e:
+                    self._set_stage_failed(doc_id, "stage3", e)
+                    raise
+
+            # 若 stage3 本次从非 done 变为 done，需要重跑 stage4 补充实体
+            if not stage3_was_done and self._get_pipeline_stage_status(doc_id, "stage3") == "done":
+                self.db.upsert_pipeline_stage(doc_id, "stage4", "pending")
+
+            # 数据一致性检查：stage4 已完成但 blocks 不存在时重跑
+            if self._get_pipeline_stage_status(doc_id, "stage4") == "done":
+                if not self.db.query_blocks_by_doc(doc_id):
+                    self.db.upsert_pipeline_stage(doc_id, "stage4", "pending")
 
             # 阶段4: 从结果文件解析并入库
-            self.stage4_ingest_results(
-                doc_id=doc_id,
-                file_path=file_path,
-                results_path=results_path,
-                force=force,
-            )
+            stage4_was_done = self._get_pipeline_stage_status(doc_id, "stage4") == "done"
+            if self._should_run_stage(doc_id, "stage4"):
+                self._set_stage_running(doc_id, "stage4")
+                try:
+                    assert results_path is not None
+                    self.stage4_ingest_results(
+                        doc_id=doc_id,
+                        file_path=file_path,
+                        results_path=results_path,
+                        force=force,
+                        mark_done=False,
+                    )
+                    self._set_stage_done(doc_id, "stage4")
+                except Exception as e:
+                    self._set_stage_failed(doc_id, "stage4", e)
+                    raise
+
+            # 若 stage4 本次从非 done 变为 done，需要重跑 stage5/stage6
+            if not stage4_was_done and self._get_pipeline_stage_status(doc_id, "stage4") == "done":
+                self.db.upsert_pipeline_stage(doc_id, "stage5", "pending")
+                self.db.upsert_pipeline_stage(doc_id, "stage6", "pending")
 
             # 阶段5: 构建 Embedding Batch JSONL
-            embed_jsonl_path = self.stage5_build_embed_jsonl(doc_id)
+            if self._should_run_stage(doc_id, "stage5"):
+                self._set_stage_running(doc_id, "stage5")
+                try:
+                    embed_jsonl_path = self.stage5_build_embed_jsonl(doc_id)
+                    self._set_stage_done(doc_id, "stage5")
+                except Exception as e:
+                    self._set_stage_failed(doc_id, "stage5", e)
+                    raise
+            else:
+                embed_jsonl_path = (
+                    Config.DB_PATH.parent / Config.BATCH_OUTPUT_DIR / f"{doc_id}_embed.jsonl"
+                )
+
+            # 数据一致性检查：stage6 已完成但仍有未完成 embedding 的 blocks 时重跑
+            if self._get_pipeline_stage_status(doc_id, "stage6") == "done":
+                blocks = self.db.query_blocks_by_doc(doc_id)
+                if any(b["status"] != "done" for b in blocks):
+                    self.db.upsert_pipeline_stage(doc_id, "stage6", "pending")
 
             # 阶段6: 提交 Embedding Batch API 并解析入库
-            return self.stage6_submit_embed_batches(doc_id, embed_jsonl_path)
+            if not self._should_run_stage(doc_id, "stage6"):
+                self._finalize_document_status(doc_id, file_path, file_hash, total_pages, suffix)
+                return doc_id
+            if not self._embedding_configured():
+                reason = "Embedding API key not configured"
+                logger.info(f"跳过阶段6 | doc_id={doc_id} | reason={reason}")
+                self._set_stage_skipped(doc_id, "stage6", reason)
+                self._finalize_document_status(doc_id, file_path, file_hash, total_pages, suffix)
+                return doc_id
+
+            self._set_stage_running(doc_id, "stage6")
+            try:
+                result = self.stage6_submit_embed_batches(doc_id, embed_jsonl_path)
+                self._set_stage_done(doc_id, "stage6")
+                self._finalize_document_status(doc_id, file_path, file_hash, total_pages, suffix)
+                return result
+            except Exception as e:
+                self._set_stage_failed(doc_id, "stage6", e)
+                raise
         except Exception as e:
             logger.error(f"文档处理失败 | file={file_path} | doc_id={doc_id} | error={e}")
             try:
@@ -2195,6 +2347,43 @@ class DocGraphPipeline:
             except Exception:
                 pass
             raise
+
+    def _finalize_document_status(
+        self,
+        doc_id: str,
+        file_path: str,
+        file_hash: str,
+        total_pages: int,
+        suffix: str,
+    ) -> None:
+        """根据各阶段状态统一设置 documents.status."""
+        stages = self.db.get_pipeline_stages(doc_id)
+        required = ["stage1", "stage2", "stage3", "stage4", "stage5", "stage6"]
+        has_failed = any(stages.get(s, {}).get("status") == "failed" for s in required)
+        has_incomplete = any(
+            stages.get(s, {}).get("status") not in ("done", "skipped") for s in required
+        )
+        has_skipped = any(stages.get(s, {}).get("status") == "skipped" for s in required)
+
+        if has_failed:
+            status = DocumentStatus.FAILED
+        elif has_incomplete or has_skipped:
+            status = DocumentStatus.PROCESSING
+        else:
+            status = DocumentStatus.DONE
+
+        self.db.upsert_document(
+            Document(
+                doc_id=doc_id,
+                title=Path(file_path).stem,
+                source_path=file_path,
+                file_type=suffix.lstrip("."),
+                total_pages=total_pages,
+                file_hash=file_hash,
+                status=status,
+            )
+        )
+        logger.info(f"文档状态更新 | doc_id={doc_id} | status={status}")
 
     def _save_blocks_to_db(
         self,

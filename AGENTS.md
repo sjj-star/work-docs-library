@@ -161,13 +161,13 @@ PYTHONPATH=scripts ./.venv/bin/python -m pytest scripts/tests/ -v
   2. 阻止 `load_dotenv` 重新加载 `.env` 文件
   3. 重定向 Config 默认路径到临时目录（DB、FAISS、Graph 均隔离）
 - **回归即修复**：任何导致测试失败的变更必须当场修复
-- **531 个测试用例必须全部通过**（0 skipped）
+- **536 个测试用例必须全部通过**（0 skipped）
 
 ### 测试文件清单
 
 > 完整的测试文件清单与分类见 `README.md`「开发与测试」（唯一权威详表），此处不再重复维护，避免双份漂移。
 
-**当前状态**：531 passed, 0 skipped, 0 failed。
+**当前状态**：536 passed, 0 skipped, 0 failed。
 
 ### Mock 方法
 使用 `monkeypatch.setattr` 替换客户端类方法：

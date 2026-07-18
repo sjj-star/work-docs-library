@@ -137,6 +137,15 @@ class KnowledgeDB:
         CREATE INDEX IF NOT EXISTS idx_eval_q_dataset ON eval_questions(dataset_name);
         CREATE INDEX IF NOT EXISTS idx_conflict_entity ON conflict_logs(entity_type, name);
         CREATE INDEX IF NOT EXISTS idx_feedback_entity ON feedback(entity_type, entity_name);
+        CREATE TABLE IF NOT EXISTS pipeline_stage_status (
+            doc_id TEXT NOT NULL,
+            stage TEXT NOT NULL,
+            status TEXT NOT NULL,
+            error_message TEXT,
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY (doc_id, stage)
+        );
+        CREATE INDEX IF NOT EXISTS idx_pipeline_stage_doc ON pipeline_stage_status(doc_id);
         """
         with self._connect() as conn:
             conn.executescript(sql)
@@ -234,6 +243,58 @@ class KnowledgeDB:
         if not doc:
             return []
         return doc.chapters
+
+    # -- pipeline stage status --
+
+    def upsert_pipeline_stage(
+        self,
+        doc_id: str,
+        stage: str,
+        status: str,
+        error_message: str | None = None,
+    ) -> None:
+        """更新指定文档指定阶段的执行状态."""
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO pipeline_stage_status (doc_id, stage, status, error_message, updated_at)
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(doc_id, stage) DO UPDATE SET
+                    status=excluded.status,
+                    error_message=excluded.error_message,
+                    updated_at=excluded.updated_at
+                """,
+                (
+                    doc_id,
+                    stage,
+                    status,
+                    error_message,
+                    datetime.now().isoformat(timespec="seconds"),
+                ),
+            )
+
+    def get_pipeline_stage(self, doc_id: str, stage: str) -> dict[str, Any] | None:
+        """获取指定文档指定阶段的状态."""
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM pipeline_stage_status WHERE doc_id = ? AND stage = ?",
+                (doc_id, stage),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def get_pipeline_stages(self, doc_id: str) -> dict[str, dict[str, Any]]:
+        """获取指定文档所有阶段的状态，返回 {stage: record} 字典."""
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM pipeline_stage_status WHERE doc_id = ? ORDER BY stage",
+                (doc_id,),
+            ).fetchall()
+        return {row["stage"]: dict(row) for row in rows}
+
+    def delete_pipeline_stages(self, doc_id: str) -> None:
+        """删除指定文档的所有阶段状态（用于强制重跑）."""
+        with self._connect() as conn:
+            conn.execute("DELETE FROM pipeline_stage_status WHERE doc_id = ?", (doc_id,))
 
     # -- v3: content_blocks + heading_maps (方案C) --
 

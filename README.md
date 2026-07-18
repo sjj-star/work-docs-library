@@ -306,7 +306,7 @@ work-docs-library/
 │   │   ├── pdf_parser.py         # PDF 本地解析器（fallback，输出与 BigModel 一致）
 │   │   ├── office_parser.py      # DOCX / XLSX 解析器（代码存在，尚未接入 pipeline）
 │   │   └── image_utils.py        # 图片压缩工具
-│   └── tests/                    # pytest 测试集（531 个用例）
+│   └── tests/                    # pytest 测试集（536 个用例）
 ├── knowledge_base/               # 运行时自动生成
 │   ├── workdocs.db               # SQLite 元数据
 │   ├── faiss.index               # FAISS 向量索引（IndexIDMap2，直接存储 block_db_id）
@@ -386,6 +386,12 @@ mcp__workdocs__ingest {"path": "path/to/document.pdf"}
 ### 2. 分阶段导入（支持人工干预，不通过 MCP）
 
 当需要审查或修正中间产物时，可使用六阶段流程。每个阶段的产物均持久化到磁盘，支持人工编辑后重新触发下游阶段。
+
+> **阶段状态与断点续传**：自 v2.1 起，每个阶段的状态（`pending`/`running`/`done`/`skipped`/`failed`）会持久化到 `pipeline_stage_status` 表。再次导入同一文档时，系统会自动跳过已完成阶段，只执行未完成或因 API 未配置而跳过的阶段。
+> - LLM API 未配置时，stage3 标记为 `skipped`，stage4 仍会写入基础 content_blocks（实体为空），stage5/6 可正常向量化；
+> - Embedding API 未配置时，stage6 标记为 `skipped`；
+> - 后续配置齐全后再次导入，会自动补跑 `skipped` 阶段；
+> - 可通过 `python scripts/admin_tools.py status --params '{"scope":"pipeline"}'` 查看各阶段状态。
 
 > 阶段工具（`doc_parse`、`doc_build_batches` 等）以及 `reprocess`、`rebuild_global_graph` 属于数据改写/管理操作，**不通过 MCP 暴露给 Agent**。它们通过 `scripts/admin_tools.py` 提供命令行入口，或可直接调用 `KnowledgeBaseService` Python API。
 > （内部函数名 `doc_parse` 对应 admin 命令 `stage1_parse`，`doc_build_batches` 对应 `stage2_build_jsonl`，`doc_submit_batches` 对应 `stage3_submit_batches`，`doc_ingest_results` 对应 `stage4_ingest_results`，`doc_build_embed_jsonl` 对应 `stage5_build_embed_jsonl`，`doc_submit_embed_batches` 对应 `stage6_submit_embed_batches`。）
@@ -918,7 +924,7 @@ cd /path/to/work-docs-library
 PYTHONPATH=scripts ./.venv/bin/python -m pytest scripts/tests/ -v
 ```
 
-**当前状态：531 passed, 0 skipped, 0 failed。**
+**当前状态：536 passed, 0 skipped, 0 failed。**
 
 ### 测试分类与审计
 
@@ -978,7 +984,7 @@ PYTHONPATH=scripts ./.venv/bin/python -m pytest \
 
 #### 当前状态
 
-核心测试集已稳定在 **531 个用例**（0 skipped）。
+核心测试集已稳定在 **536 个用例**（0 skipped）。
 
 ### 常用测试文档
 

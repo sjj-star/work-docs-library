@@ -28,12 +28,13 @@ Ingestion parses PDFs, extracts chapters, builds LLM batches, runs entity/relati
    - Call `mcp__workdocs__status` (no params) to list existing documents.
    - If you already know the doc_id, call `mcp__workdocs__status` with `{"doc_id": "..."}` to see whether it is `done`, `processing`, or `failed`.
    - To view a document outline, call `mcp__workdocs__status` with `{"doc_id": "...", "scope": "toc"}`.
+   - To view per-stage pipeline status, call `mcp__workdocs__status` with `{"scope": "pipeline"}`.
 
 4. **Choose the action**
    - New PDF or directory → `mcp__workdocs__ingest` with `{"path": "..."}`.
    - Preview before ingesting → `mcp__workdocs__ingest` with `{"path": "...", "dry_run": true}` (parses and builds batches without calling LLM API).
    - Document already `done` but some content_blocks failed embedding (e.g., `vectors < blocks` in status) → **safe to re-run `mcp__workdocs__ingest`**. The pipeline will skip completed LLM extraction and entity ingestion; only missing embeddings are recomputed.
-   - Document stuck in `processing` / `batch_submitted` because of transient API errors → **safe to re-run `mcp__workdocs__ingest`**. Chat mode will resume from the existing `results.jsonl` and retry only failed/missing requests.
+   - Document stuck in `processing` because LLM or Embedding API was missing → **safe to re-run `mcp__workdocs__ingest`**. The pipeline records per-stage status; previously `skipped` stages are retried automatically once the API is configured.
    - Document `failed` or you need a forced full re-run (e.g., changed prompts, fixed parser, suspect corrupted graph/vector state) → **admin-only**: run `python scripts/admin_tools.py reprocess --params '{"doc_id": "..."}'`. This is not exposed as an MCP tool because it removes and rebuilds graph/vector contributions.
    - Fine-grained stage-by-stage control (e.g., only re-run Stage 6 embedding) → **admin-only**: use `python scripts/admin_tools.py stage6_submit_embed_batches --params '{"doc_id": "..."}'`.
 
@@ -43,15 +44,16 @@ The `ingest` MCP tool is idempotent for already-completed stages. When you call 
 
 - Stage 1 re-parses the PDF (small overhead).
 - Stage 2 rebuilds the JSONL.
-- Stage 3 skips already-submitted Batch/Chat results when the document is `done`.
-- Stage 4 skips entity ingestion when the document is `done`.
+- Stage 3 is skipped if LLM API is not configured; otherwise retries failed/missing Chat requests.
+- Stage 4 writes content_blocks (entities may be empty if stage3 was skipped).
 - Stage 5 rebuilds the embedding JSONL, including only blocks without embeddings.
-- Stage 6 retries embedding for those blocks only.
+- Stage 6 is skipped if Embedding API is not configured; otherwise retries embedding for missing blocks only.
 
-This makes `ingest` the correct MCP-level recovery tool for:
+Document-level status remains `processing` until all non-skipped stages are `done`. This makes `ingest` the correct MCP-level recovery tool for:
 
 - Transient Embedding API failures (`status` shows `failed_blocks > 0` but document is `done`).
-- Transient Chat API timeouts in Chat mode (`status` shows document `processing`/`batch_submitted`).
+- Transient Chat API timeouts in Chat mode.
+- LLM/Embedding API was missing during a previous run (`status` shows `processing` with `skipped` stages in `scope=pipeline`).
 
 It is NOT suitable for:
 
@@ -110,3 +112,4 @@ It is NOT suitable for:
 - Ignoring a `failed` status or retrying indefinitely without checking logs.
 - Using absolute paths outside the allowed directories.
 - Confusing `ingest` (safe resume) with `reprocess` (forced full rebuild). Use `reprocess` only when graph/vector state is suspect.
+- Assuming a document is incomplete just because its status is `processing` — check `scope=pipeline` to see which stages are `skipped` or `failed`.
