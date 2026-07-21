@@ -9,7 +9,6 @@ class ChunkStatus(StrEnum):
     PENDING = "pending"
     EMBEDDED = "embedded"
     DONE = "done"
-    SKIPPED = "skipped"
     FAILED = "failed"
 
 

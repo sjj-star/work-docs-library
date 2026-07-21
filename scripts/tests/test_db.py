@@ -57,15 +57,6 @@ def test_get_document_by_path(db, sample_doc):
     assert found.doc_id == "doc1"
 
 
-def test_search_documents_by_title(db, sample_doc):
-    """Test search documents by title."""
-    db.upsert_document(sample_doc)
-    results = db.search_documents_by_title("Test")
-    assert len(results) == 1
-    results = db.search_documents_by_title("Nothing")
-    assert len(results) == 0
-
-
 def test_update_document_status(db, sample_doc):
     """Test update document status."""
     db.upsert_document(sample_doc)
@@ -111,16 +102,6 @@ def test_delete_blocks_by_doc(db, sample_doc):
     db.insert_block(doc_id="doc1", block_id="b1", content="c", seq_index=0)
     db.delete_blocks_by_doc("doc1")
     assert db.query_blocks_by_doc("doc1") == []
-
-
-def test_get_pending_blocks(db, sample_doc):
-    """Test get pending blocks."""
-    db.upsert_document(sample_doc)
-    db.insert_block(doc_id="doc1", block_id="b1", content="pending", seq_index=0)
-
-    pending = db.get_pending_blocks("doc1")
-    assert len(pending) == 1
-    assert pending[0][3] == "pending"
 
 
 def test_conflict_logs(db):

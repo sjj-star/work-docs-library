@@ -92,9 +92,9 @@ flowchart TB
         S6G --> S6H["content_block status: done"]
     end
 
-    subgraph Global["全局图谱重建"]
-        G1["所有 {doc_id}.json"] --> G2["clear() + 遍历加载\nNetworkX DiGraph"]
-        G2 --> G3["global.json\n跨文档实体对齐"]
+    subgraph Global["全局图谱增量合并"]
+        G1["新导入 {doc_id}.json"] --> G2["_merge_graph()\n增量合并进 NetworkX DiGraph"]
+        G2 --> G3["_save_global_graph()\n原子持久化 global.json"]
     end
 
     S1D --> S2A
@@ -117,7 +117,7 @@ flowchart TB
 5. **阶段5（构建 Embedding JSONL）**：从 SQLite 查询状态为 `embedded` 且暂无 `metadata.embedding` 的 content_blocks，每个 block 生成一条 `{db_id, text}` 记录，生成 `{doc_id}_embed.jsonl`
 6. **阶段6（同步 Embedding 向量化）**：读取 `{doc_id}_embed.jsonl`，逐条调用同步 Embedding API（默认 BigModel `embedding-3`），在 FAISS 事务内用 `block_db_id` 作为存储 ID 写入 `IndexIDMap2`，事务提交后再写入 SQLite `metadata.embedding`，content_block 状态更新为 `done`。FAISS 与 SQLite 通过事务保证双写一致性
 7. **跨粒度桥接索引**：`KnowledgeBaseService` 内部维护 `_EntityChunkBridge`，在 `__init__` 时从所有 content_blocks 的 `metadata.extracted_entities` 全量构建 `block_db_id ↔ (entity_type, entity_name)` 双向映射。`ingest_document` / `reprocess_document` 完成后自动同步。提供 O(1) 的正向查询（block→entities）和反向查询（entity→blocks），打通向量空间与图谱空间
-8. **全局图谱重建**：`KnowledgeBaseService.ingest_document()` 完成后**全量重建**全局图 `graphs/global.json`（`clear()` + 遍历所有子图重新加载），确保无幽灵残留，实现**跨文档知识互通**
+8. **全局图谱增量合并**：`KnowledgeBaseService.ingest_document()` 完成后，仅将新导入文档的子图**增量合并**进内存全局图（`_merge_graph()`），并原子持久化到 `graphs/global.json`（`_save_global_graph()`），避免每次全量重建的开销，实现**跨文档知识互通**。仅在启动自检发现全局图不完整或手动执行 `rebuild_global_graph` 时才全量重建（`clear()` + 遍历所有子图重新加载），确保无幽灵残留
 
 ### 查询数据流
 
@@ -278,26 +278,38 @@ work-docs-library/
 ├── scripts/
 │   ├── mcp_server.py             # MCP stdio server（JSON-RPC，stdout 隔离）
 │   ├── plugin_router.py          # Plugin 工具函数库（被 mcp_server / admin_tools 复用）
+│   ├── admin_tools.py            # 内部管理命令（阶段工具/图谱 CRUD/评估，不经 MCP 暴露）
 │   ├── .env.example              # 环境变量模板
 │   ├── .env                      # 实际环境变量（gitignored）
-│   ├── prompts/                  # LLM 提示词文件（运行时读取，无需重启）
+│   ├── prompts/                  # LLM 提示词文件（运行时读取，无需重启，共 16 个）
 │   │   ├── entity_extraction_system.txt   # 实体提取 system 提示词
-│   │   └── entity_extraction_user.txt     # 实体提取 user 模板
+│   │   ├── entity_extraction_user.txt     # 实体提取 user 模板
+│   │   ├── agentic_search_system.txt / agentic_search_user.txt        # Agentic 搜索规划
+│   │   ├── rerank_passage_system.txt / rerank_passage_user.txt        # LLM 重排序
+│   │   ├── eval_faithfulness_system.txt / eval_faithfulness_user.txt  # 评估：Faithfulness
+│   │   ├── eval_context_precision_system.txt / eval_context_precision_user.txt  # 评估：Context Precision
+│   │   ├── eval_context_recall_system.txt / eval_context_recall_user.txt        # 评估：Context Recall
+│   │   ├── eval_answer_relevancy_system.txt / eval_answer_relevancy_user.txt    # 评估：Answer Relevancy
+│   │   └── eval_generate_answer_system.txt / eval_generate_answer_user.txt      # 评估：答案生成
 │   ├── core/                     # 业务逻辑层
 │   │   ├── config.py             # 配置中心
+│   │   ├── api_client.py         # 统一 APIClient + Provider + RetryPolicy
 │   │   ├── doc_graph_pipeline.py # ⭐ DocGraphPipeline 主管道
 │   │   ├── batch_clients.py      # BaseBatchClient + BatchClient（通用，服务商无感）
 │   │   ├── llm_chat_client.py    # LLM 对话客户端（辅助用途）
 │   │   ├── embedding_client.py   # Embedding 客户端（辅助用途）
 │   │   ├── bigmodel_parser_client.py  # BigModel Expert 文件解析
 │   │   ├── graph_store.py        # 图谱存储（NetworkX）
+│   │   ├── bridge.py             # block ↔ 实体双向桥接索引（纯内存）
 │   │   ├── db.py                 # SQLite 数据库操作
 │   │   ├── vector_index.py       # FAISS 向量索引管理
 │   │   ├── sparse_index.py       # BM25 稀疏索引（CJK 2-gram 分词）
 │   │   ├── hybrid_retriever.py   # RRF 融合稠密 + 稀疏检索
+│   │   ├── query_service.py      # 语义-图谱联合查询服务
 │   │   ├── reranker.py           # LLM cross-encoder 重排序
 │   │   ├── agentic_search.py     # Agentic 搜索规划器（SearchStep 分解）
 │   │   ├── evaluation.py         # 评估框架（检索指标 + LLM-as-judge）
+│   │   ├── usage_logger.py       # 统一使用日志记录与保留策略
 │   │   ├── models.py             # 数据模型 (Document/Chunk/EvalQuestion/EvalDataset)
 │   │   ├── enums.py              # StrEnum 定义 (ChunkStatus/DocumentStatus/ChunkType)
 │   │   ├── knowledge_base_service.py  # 统一服务层封装
@@ -305,8 +317,11 @@ work-docs-library/
 │   ├── parsers/                  # IO / 解析层
 │   │   ├── pdf_parser.py         # PDF 本地解析器（fallback，输出与 BigModel 一致）
 │   │   ├── office_parser.py      # DOCX / XLSX 解析器（代码存在，尚未接入 pipeline）
-│   │   └── image_utils.py        # 图片压缩工具
-│   └── tests/                    # pytest 测试集（536 个用例）
+│   │   ├── image_utils.py        # 图片压缩工具
+│   │   ├── borderless_table_extractor.py  # 无边框/零高度线表格提取
+│   │   ├── gaps_first_scanner.py # 空白优先版面扫描（表格/图片区域检测）
+│   │   └── table_utils.py        # Markdown 表格规范化
+│   └── tests/                    # pytest 测试集（496 个用例）
 ├── knowledge_base/               # 运行时自动生成
 │   ├── workdocs.db               # SQLite 元数据
 │   ├── faiss.index               # FAISS 向量索引（IndexIDMap2，直接存储 block_db_id）
@@ -387,7 +402,7 @@ mcp__workdocs__ingest {"path": "path/to/document.pdf"}
 
 当需要审查或修正中间产物时，可使用六阶段流程。每个阶段的产物均持久化到磁盘，支持人工编辑后重新触发下游阶段。
 
-> **阶段状态与断点续传**：自 v2.1 起，每个阶段的状态（`pending`/`running`/`done`/`skipped`/`failed`）会持久化到 `pipeline_stage_status` 表。再次导入同一文档时，系统会自动跳过已完成阶段，只执行未完成或因 API 未配置而跳过的阶段。
+> **阶段状态与断点续传**：每个阶段的状态（`pending`/`running`/`done`/`skipped`/`failed`）会持久化到 `pipeline_stage_status` 表。再次导入同一文档时，系统会自动跳过已完成阶段，只执行未完成或因 API 未配置而跳过的阶段。
 > - LLM API 未配置时，stage3 标记为 `skipped`，stage4 仍会写入基础 content_blocks（实体为空），stage5/6 可正常向量化；
 > - Embedding API 未配置时，stage6 标记为 `skipped`；
 > - 后续配置齐全后再次导入，会自动补跑 `skipped` 阶段；
@@ -606,7 +621,7 @@ python scripts/admin_tools.py run_eval --params '{"dataset_name":"my_eval","retr
 | `mcp__workdocs__explore` | 统一图谱入口：`mode=entity`/`neighbors`/`subgraph`/`path`/`provenance`/`conflicts` |
 | `mcp__workdocs__read` | 按章节、关键词、概念或 `chunk_db_id` 读取 content_block 完整内容，可选返回关联图谱实体/关系 |
 | `mcp__workdocs__ingest` | 一键导入 PDF/目录，自动完成解析→Batch→入库→向量化 |
-| `mcp__workdocs__status` | 状态仪表盘：`scope=overview`/`documents`/`vectors`/`graph`/`blocks`/`headings`/`conflicts`/`feedback`/`config`/`quality`/`ingest_pipeline`/`toc`/`trace`/`usage`/`all`。`trace` 回放查询路径，`usage` 审计使用热点 |
+| `mcp__workdocs__status` | 状态仪表盘：`scope=overview`/`documents`/`vectors`/`graph`/`blocks`/`headings`/`conflicts`/`feedback`/`config`/`quality`/`ingest_pipeline`/`pipeline`/`toc`/`trace`/`usage`/`all`。`pipeline` 查看 pipeline 阶段状态，`trace` 回放查询路径，`usage` 审计使用热点 |
 
 ### 不暴露为 MCP 的内部功能
 
@@ -822,7 +837,7 @@ export WORKDOCS_LLM_TIMEOUT=300
 | `content` | 文本内容（按 `##` section 聚合后切分） |
 | `seq_index` | 全局序列号，保证文档内顺序 |
 | `metadata` | JSON：嵌入向量、content_hash、**`extracted_entities`**（block→实体映射，桥接索引数据源）、缓存的关系、图片描述等 |
-| `status` | `pending` → `embedded` → `done` |
+| `status` | `pending` → `embedded` → `done`（stage6 失败时标记 `failed`） |
 | `created_at` | 创建时间戳 |
 
 #### `heading_maps` — 标题映射（方案C：查询粒度）
@@ -877,9 +892,13 @@ pending ────────────────────────
                     └─ update_blocks_embedded_batch()          │
                                                                ↓
                                                             done
+                                                               │
+              embedding 失败 / 未生成 embedding ───────────────┤
+                                                               ↓
+                                                           failed
 ```
 
-注意：`pending` 状态在实际流程中几乎不可见——`_save_blocks_to_db` 直接插入 blocks 并设为 `embedded`。`skipped` 和 `failed` 状态当前未使用。
+注意：`pending` 状态在实际流程中几乎不可见——`_save_blocks_to_db` 直接插入 blocks 并设为 `embedded`。stage6 中 embedding 调用失败或未生成 embedding 的 block 会被标记为 `failed`；由于 stage5 按「无 `metadata.embedding`」重新收集 blocks，`failed` 状态的 block 在下次运行 stage5/6 时会自动重试。
 
 ### 跨存储关联矩阵
 
@@ -924,7 +943,7 @@ cd /path/to/work-docs-library
 PYTHONPATH=scripts ./.venv/bin/python -m pytest scripts/tests/ -v
 ```
 
-**当前状态：536 passed, 0 skipped, 0 failed。**
+**当前状态：496 passed, 0 skipped, 0 failed。**
 
 ### 测试分类与审计
 
@@ -984,7 +1003,7 @@ PYTHONPATH=scripts ./.venv/bin/python -m pytest \
 
 #### 当前状态
 
-核心测试集已稳定在 **536 个用例**（0 skipped）。
+核心测试集已稳定在 **496 个用例**（0 skipped）。
 
 ### 常用测试文档
 
@@ -1019,7 +1038,8 @@ WORKDOCS_PARSER_API_KEY=your-api-key
 | `entity_extraction_system.txt` / `entity_extraction_user.txt` | 实体/关系提取的 system 提示词与 user 模板 |
 | `agentic_search_system.txt` / `agentic_search_user.txt` | Agentic 搜索规划器步骤分解 |
 | `rerank_passage_system.txt` / `rerank_passage_user.txt` | LLM cross-encoder passage 重排序 |
-| `eval_faithfulness_*.txt`、`eval_context_precision_*.txt`、`eval_context_recall_*.txt` | LLM-as-judge 评估指标 |
+| `eval_faithfulness_*.txt`、`eval_context_precision_*.txt`、`eval_context_recall_*.txt`、`eval_answer_relevancy_*.txt` | LLM-as-judge 评估指标 |
+| `eval_generate_answer_*.txt` | 评估流程中的答案生成 |
 
 详细 Prompt 设计意图与迭代历史见 `DESIGN.md` 第 22 章。
 

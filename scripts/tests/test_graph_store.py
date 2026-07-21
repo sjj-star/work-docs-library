@@ -68,64 +68,6 @@ def sample_relations():
 # ---------------------------------------------------------------------------
 
 
-def test_graph_entity_to_dict_from_dict():
-    """GraphEntity to_dict / from_dict 往返一致."""
-    e = GraphEntity(
-        entity_type="Register",
-        name="CTRL",
-        properties={"addr": "0x00", "width": 32},
-        source_doc_ids={"doc1"},
-        source_chapter="ch3",
-    )
-    d = e.to_dict()
-    assert d == {
-        "type": "Register",
-        "name": "CTRL",
-        "properties": {"addr": "0x00", "width": 32},
-        "doc_properties": {},
-        "source_doc_ids": ["doc1"],
-        "source_chapter": "ch3",
-        "confidence": 1.0,
-        "verified": False,
-        "created_at": "",
-        "updated_at": "",
-        "feedback_score": 0,
-    }
-    restored = GraphEntity.from_dict(d)
-    assert restored == e
-
-
-def test_graph_relation_to_dict_from_dict():
-    """GraphRelation to_dict / from_dict 往返一致."""
-    r = GraphRelation(
-        rel_type="HAS_REGISTER",
-        from_name="TOP",
-        to_name="CTRL",
-        from_type="Module",
-        to_type="Register",
-        properties={"access": "RW"},
-    )
-    d = r.to_dict()
-    assert d == {
-        "type": "HAS_REGISTER",
-        "from": "TOP",
-        "to": "CTRL",
-        "from_type": "Module",
-        "to_type": "Register",
-        "properties": {"access": "RW"},
-        "doc_properties": {},
-        "source_doc_ids": [],
-        "source_chapter": "",
-        "confidence": 1.0,
-        "verified": False,
-        "created_at": "",
-        "updated_at": "",
-        "feedback_score": 0,
-    }
-    restored = GraphRelation.from_dict(d)
-    assert restored == r
-
-
 def test_graph_entity_defaults():
     """GraphEntity 默认属性为空."""
     e = GraphEntity(entity_type="Module", name="A")
@@ -183,23 +125,6 @@ def test_find_by_type(graph_store, sample_entities):
 
     empty = graph_store.find_by_type("Register")
     assert empty == []
-
-
-def test_find_by_property(graph_store, sample_entities):
-    """find_by_property 按属性键值过滤."""
-    for e in sample_entities:
-        graph_store.add_entity(e)
-
-    results = graph_store.find_by_property("Signal", "clock", True)
-    assert len(results) == 1
-    assert results[0].name == "CLK"
-
-    results = graph_store.find_by_property("Signal", "clock", False)
-    assert results == []
-
-    results = graph_store.find_by_property("Module", "description", "top module")
-    assert len(results) == 1
-    assert results[0].name == "TOP"
 
 
 # ---------------------------------------------------------------------------
@@ -454,26 +379,6 @@ def test_stats(graph_store, sample_entities, sample_relations):
 # ---------------------------------------------------------------------------
 # 7. SubGraphView 只读接口
 # ---------------------------------------------------------------------------
-
-
-def test_subgraph_view_to_text_context(graph_store):
-    """to_text_context 生成预期文本."""
-    graph_store.add_entity(GraphEntity(entity_type="Module", name="M1", properties={"a": 1}))
-    graph_store.add_entity(GraphEntity(entity_type="Signal", name="S1", properties={}))
-    graph_store.add_relation(
-        GraphRelation(
-            rel_type="HAS_SIGNAL",
-            from_name="M1",
-            to_name="S1",
-            from_type="Module",
-            to_type="Signal",
-        )
-    )
-    sg = graph_store.get_subgraph("Module", "M1", depth=1)
-    text = sg.to_text_context()
-    assert "[Module] M1 (a=1)" in text
-    assert "[Signal] S1" in text
-    assert "M1 --[HAS_SIGNAL]--> S1" in text
 
 
 def test_subgraph_view_to_dict(graph_store, sample_entities, sample_relations):
@@ -982,77 +887,6 @@ def test_find_path_with_rel_types_filter(graph_store):
 
 
 # ---------------------------------------------------------------------------
-# 12. 属性索引优化
-# ---------------------------------------------------------------------------
-
-
-def test_find_by_property_uses_index(graph_store):
-    """find_by_property 通过索引正确返回结果."""
-    graph_store.add_entity(GraphEntity(entity_type="Register", name="R1", properties={"width": 32}))
-    graph_store.add_entity(GraphEntity(entity_type="Register", name="R2", properties={"width": 64}))
-    graph_store.add_entity(GraphEntity(entity_type="Signal", name="S1", properties={"width": 32}))
-
-    results = graph_store.find_by_property("Register", "width", 32)
-    assert len(results) == 1
-    assert results[0].name == "R1"
-
-    results = graph_store.find_by_property("Register", "width", 64)
-    assert len(results) == 1
-    assert results[0].name == "R2"
-
-    results = graph_store.find_by_property("Signal", "width", 32)
-    assert len(results) == 1
-    assert results[0].name == "S1"
-
-
-def test_property_index_updated_on_delete(graph_store):
-    """删除实体后属性索引应同步更新."""
-    graph_store.add_entity(GraphEntity(entity_type="Register", name="R1", properties={"width": 32}))
-    assert len(graph_store.find_by_property("Register", "width", 32)) == 1
-    graph_store.delete_entity("Register", "R1")
-    assert len(graph_store.find_by_property("Register", "width", 32)) == 0
-
-
-def test_property_index_updated_on_update(graph_store):
-    """update_entity 后属性索引应同步更新."""
-    graph_store.add_entity(GraphEntity(entity_type="Register", name="R1", properties={"width": 32}))
-    graph_store.update_entity("Register", "R1", properties={"width": 64})
-    assert len(graph_store.find_by_property("Register", "width", 32)) == 0
-    assert len(graph_store.find_by_property("Register", "width", 64)) == 1
-
-
-# ---------------------------------------------------------------------------
-# 13. 子图文本化增强
-# ---------------------------------------------------------------------------
-
-
-def test_subgraph_text_includes_sources_and_verified(graph_store):
-    """to_text_context 包含来源和验证标记."""
-    graph_store.add_entity(
-        GraphEntity(entity_type="Module", name="M1", source_doc_ids={"doc1"}, verified=True)
-    )
-    graph_store.add_entity(
-        GraphEntity(entity_type="Signal", name="S1", source_doc_ids={"doc1", "doc2"})
-    )
-    graph_store.add_relation(
-        GraphRelation(
-            rel_type="HAS_SIGNAL",
-            from_name="M1",
-            to_name="S1",
-            from_type="Module",
-            to_type="Signal",
-            properties={"width": 32},
-        )
-    )
-
-    sg = graph_store.get_subgraph("Module", "M1", depth=1)
-    text = sg.to_text_context()
-    assert "[来源: doc1]" in text
-    assert "✓" in text  # verified mark
-    assert "width=32" in text
-
-
-# ---------------------------------------------------------------------------
 # 14. doc_properties（文档级属性快照）
 # ---------------------------------------------------------------------------
 
@@ -1342,11 +1176,6 @@ def test_new_arch_entity_crud(graph_store):
     graph_store.add_entity(task)
     assert graph_store.get_entity("CLA_Task", "Task1") is not None
 
-    # to_dict / from_dict 往返
-    d = e.to_dict()
-    restored = GraphEntity.from_dict(d)
-    assert restored == e
-
 
 def test_new_arch_rel_types(graph_store):
     """跨层级关系的添加与邻居查询."""
@@ -1422,25 +1251,6 @@ def test_new_arch_rel_types(graph_store):
     )
     assert len(reg_neighbors) == 1
     assert reg_neighbors[0][0].name == "ACC"
-
-
-def test_arch_property_index(graph_store):
-    """新增实体类型的属性索引应正确命中."""
-    entities = [
-        GraphEntity(entity_type="Instruction", name="MAC", properties={"cycle_count": 1}),
-        GraphEntity(entity_type="Instruction", name="MPY", properties={"cycle_count": 1}),
-        GraphEntity(entity_type="Instruction", name="DIV", properties={"cycle_count": 5}),
-    ]
-    for ent in entities:
-        graph_store.add_entity(ent)
-
-    results = graph_store.find_by_property("Instruction", "cycle_count", 1)
-    names = {e.name for e in results}
-    assert names == {"MAC", "MPY"}
-
-    results = graph_store.find_by_property("Instruction", "cycle_count", 5)
-    assert len(results) == 1
-    assert results[0].name == "DIV"
 
 
 def test_arch_cross_level_subgraph(graph_store):

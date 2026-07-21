@@ -4,7 +4,6 @@ import fcntl
 import logging
 import os
 from pathlib import Path
-from types import TracebackType
 from typing import Any
 
 import faiss
@@ -22,28 +21,6 @@ def _index_id_map_to_set(index: faiss.Index) -> set[int]:
         return set()
     size = raw_id_map.size()
     return {int(raw_id_map.at(i)) for i in range(size)}
-
-
-class _VectorIndexTransaction:
-    """VectorIndex 事务上下文管理器."""
-
-    def __init__(self, vec: "VectorIndex") -> None:
-        self._vec = vec
-
-    def __enter__(self) -> "VectorIndex":
-        self._vec.begin_transaction()
-        return self._vec
-
-    def __exit__(
-        self,
-        exc_type: type[BaseException] | None,
-        exc_val: BaseException | None,
-        exc_tb: TracebackType | None,
-    ) -> None:
-        if exc_type is None:
-            self._vec.commit()
-        else:
-            self._vec.rollback()
 
 
 class VectorIndex:
@@ -242,10 +219,6 @@ class VectorIndex:
         self._in_transaction = False
         self._txn_added_ids = []
         self._release_lock()
-
-    def transaction(self) -> _VectorIndexTransaction:
-        """返回事务上下文管理器."""
-        return _VectorIndexTransaction(self)
 
     def list_ids(self) -> set[int]:
         """返回索引中所有存储的 block_db_id."""

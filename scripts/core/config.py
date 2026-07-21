@@ -5,8 +5,10 @@
 2. 代码硬编码默认值
 """
 
+import json
 import logging
 import os
+import re
 import sys
 from pathlib import Path
 from typing import Any
@@ -262,13 +264,8 @@ class Config:
         cls.GRAPH_MAX_PATH_DEPTH = int(_resolve_config("WORKDOCS_GRAPH_MAX_PATH_DEPTH", "6"))
 
     @classmethod
-    def to_dict(cls, mask_sensitive: bool = True) -> dict[str, Any]:
-        """返回当前所有配置项的字典表示.
-
-        Args:
-            mask_sensitive: 若为 True，API Key 等敏感字段以 *** 脱敏显示
-
-        """
+    def to_dict(cls) -> dict[str, Any]:
+        """返回当前所有配置项的字典表示（敏感字段始终脱敏）."""
         sensitive_keys = {
             "LLM_API_KEY",
             "EMBEDDING_API_KEY",
@@ -314,6 +311,37 @@ class Config:
             datefmt="%H:%M:%S",
             stream=sys.stderr,
         )
+
+    @staticmethod
+    def load_prompt(name: str) -> str:
+        """加载 prompts/ 目录下的提示词文件."""
+        path = Config.PROMPT_DIR / f"{name}.txt"
+        if not path.exists():
+            raise FileNotFoundError(f"Prompt file not found: {path}")
+        return path.read_text(encoding="utf-8")
+
+    @staticmethod
+    def parse_llm_json(raw: str) -> dict | None:
+        """解析 LLM 返回的 JSON 字符串（支持 ```json fence 和尾逗号修复）."""
+        if not raw:
+            return None
+        cleaned = raw.strip()
+        if cleaned.startswith("```"):
+            lines = cleaned.splitlines()
+            if lines and lines[0].startswith("```"):
+                lines = lines[1:]
+            if lines and lines[-1].startswith("```"):
+                lines = lines[:-1]
+            cleaned = "\n".join(lines).strip()
+        try:
+            return json.loads(cleaned)
+        except json.JSONDecodeError:
+            try:
+                cleaned = re.sub(r",(\s*[}\]])", r"\1", cleaned)
+                return json.loads(cleaned)
+            except json.JSONDecodeError:
+                logger.warning(f"JSON 解析失败 | raw={raw[:200]}...")
+                return None
 
 
 # 初始化数值配置

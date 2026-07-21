@@ -81,6 +81,16 @@ def _extract_message(body: dict[str, Any] | None) -> str:
     return body.get("message") or body.get("msg") or ""
 
 
+def _extract_error_type(body: dict[str, Any] | None) -> str:
+    """从响应体中提取错误 type（OpenAI 兼容 API 标准字段）."""
+    if not body:
+        return ""
+    error = body.get("error") if isinstance(body.get("error"), dict) else None
+    if error:
+        return error.get("type") or ""
+    return ""
+
+
 def _match_keywords(text: str, keywords: tuple[str, ...]) -> bool:
     """不区分大小写匹配关键字."""
     lowered = text.lower()
@@ -112,7 +122,7 @@ class RetryPolicy:
             delay = self.base_delay * (2**attempt)
         if self.jitter:
             delay *= 1 + random.random()
-        return min(delay, self.max_delay)
+        return max(0.1, min(delay, self.max_delay))
 
 
 class APIProvider(ABC):
@@ -166,23 +176,35 @@ class KimiProvider(APIProvider):
     def classify(self, status_code: int, body: dict[str, Any] | None) -> APIError:
         """将 HTTP 响应分类为项目异常."""
         message = _extract_message(body)
+        error_type = _extract_error_type(body)
         kwargs: dict[str, Any] = {"status_code": status_code, "body": body}
 
         if status_code == 401 or status_code == 402:
             return AuthenticationError(message, **kwargs)
 
         if status_code == 403:
-            return QuotaExceededError(message, **kwargs)
+            return AuthenticationError(message, **kwargs)
 
         if status_code == 404:
             return RequestFormatError(message, **kwargs)
 
         if status_code == 429:
+            # 优先使用官方 error.type 精确分类
+            if error_type == "exceeded_current_quota_error":
+                return QuotaExceededError(message, **kwargs)
+            if error_type == "engine_overloaded_error":
+                return ServerOverloadedError(message, **kwargs)
+            if error_type == "rate_limit_reached_error":
+                return RateLimitError(message, **kwargs)
+            # 关键字 fallback（中英文）
             quota_keywords = (
                 "usage limit",
                 "monthly usage limit",
                 "reached your usage",
                 "billing cycle",
+                "额度不足",
+                "欠费",
+                "已停用",
             )
             if _match_keywords(message, quota_keywords):
                 return QuotaExceededError(message, **kwargs)
@@ -250,7 +272,7 @@ class BigModelProvider(APIProvider):
             return AuthenticationError(message, **kwargs)
 
         if status_code == 403:
-            return QuotaExceededError(message, **kwargs)
+            return AuthenticationError(message, **kwargs)
 
         if status_code == 404:
             return RequestFormatError(message, **kwargs)
@@ -350,6 +372,16 @@ class APIClient:
     ) -> requests.Response:
         """执行 HTTP 请求，带统一重试与错误分类."""
         if path.startswith(("http://", "https://")):
+            # 防止 API Key 泄露到非授权 host
+            from urllib.parse import urlparse
+
+            parsed = urlparse(path)
+            base_parsed = urlparse(self.provider.base_url)
+            if parsed.netloc != base_parsed.netloc:
+                raise APIError(
+                    f"URL host mismatch: {parsed.netloc} != {base_parsed.netloc}",
+                    status_code=400,
+                )
             url = path
         else:
             url = f"{self.provider.base_url}{path}"
@@ -401,6 +433,17 @@ class APIClient:
                 delay = max(policy.compute_delay(attempt), 5.0)
                 logger.warning(
                     f"API transient error | provider={self.provider.__class__.__name__} "
+                    f"| method={method} | path={path} | error={exc} | "
+                    f"attempt={attempt + 1}/{policy.max_attempts} | retry_after={delay:.2f}s"
+                )
+                time.sleep(delay)
+            except requests.RequestException as exc:
+                last_error = TransientError(str(exc))
+                if attempt == policy.max_attempts - 1:
+                    raise last_error from exc
+                delay = max(policy.compute_delay(attempt), 5.0)
+                logger.warning(
+                    f"API request exception | provider={self.provider.__class__.__name__} "
                     f"| method={method} | path={path} | error={exc} | "
                     f"attempt={attempt + 1}/{policy.max_attempts} | retry_after={delay:.2f}s"
                 )

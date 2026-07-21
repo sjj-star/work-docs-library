@@ -2,7 +2,6 @@
 
 import pytest
 from core.db import KnowledgeDB
-from core.models import EvalDataset, EvalQuestion
 
 
 @pytest.fixture(autouse=True)
@@ -11,78 +10,10 @@ def _dummy_llm_api_key(monkeypatch):
     monkeypatch.setattr("core.config.Config.LLM_API_KEY", "dummy-test-key")
 
 
-def test_eval_dataset_crud(tmp_path):
-    db = KnowledgeDB(db_path=tmp_path / "eval.db")
-    q = EvalQuestion(
-        question="What is the reset sequence of SPI?",
-        ground_truth_answer="CS low, clock idle, then data.",
-        ground_truth_context_ids=[1, 2],
-        ground_truth_doc_ids=["doc-a"],
-        tags=["SPI", "reset"],
-        metadata={"difficulty": "easy"},
-    )
-    ds = EvalDataset(name="baseline_v1", questions=[q], metadata={"version": "v1"})
-    db.save_eval_dataset(ds)
-    loaded = db.load_eval_dataset("baseline_v1")
-    assert loaded.name == "baseline_v1"
-    assert loaded.metadata == {"version": "v1"}
-    assert len(loaded.questions) == 1
-    loaded_q = loaded.questions[0]
-    assert loaded_q.question == q.question
-    assert loaded_q.ground_truth_answer == q.ground_truth_answer
-    assert loaded_q.ground_truth_context_ids == q.ground_truth_context_ids
-    assert loaded_q.ground_truth_doc_ids == q.ground_truth_doc_ids
-    assert loaded_q.tags == q.tags
-    assert loaded_q.metadata == q.metadata
-
-
-def test_list_and_delete_eval_datasets(tmp_path):
-    db = KnowledgeDB(db_path=tmp_path / "eval.db")
-    db.save_eval_dataset(EvalDataset(name="ds1", questions=[]))
-    db.save_eval_dataset(EvalDataset(name="ds2", questions=[]))
-    names = db.list_eval_datasets()
-    assert "ds1" in names
-    assert "ds2" in names
-    assert db.delete_eval_dataset("ds1")
-    assert "ds1" not in db.list_eval_datasets()
-    assert not db.delete_eval_dataset("nonexistent")
-
-
 def test_load_missing_eval_dataset_raises(tmp_path):
     db = KnowledgeDB(db_path=tmp_path / "eval.db")
     with pytest.raises(ValueError):
         db.load_eval_dataset("missing")
-
-
-def test_save_eval_dataset_replaces_existing(tmp_path):
-    db = KnowledgeDB(db_path=tmp_path / "eval.db")
-    old_q = EvalQuestion(
-        question="Old question?",
-        ground_truth_answer="Old answer.",
-        ground_truth_context_ids=[1],
-        ground_truth_doc_ids=["old-doc"],
-        tags=["old"],
-    )
-    db.save_eval_dataset(EvalDataset(name="replace_ds", questions=[old_q]))
-
-    new_q = EvalQuestion(
-        question="New question?",
-        ground_truth_answer="New answer.",
-        ground_truth_context_ids=[2, 3],
-        ground_truth_doc_ids=["new-doc"],
-        tags=["new"],
-    )
-    db.save_eval_dataset(EvalDataset(name="replace_ds", questions=[new_q]))
-
-    loaded = db.load_eval_dataset("replace_ds")
-    assert loaded.name == "replace_ds"
-    assert len(loaded.questions) == 1
-    loaded_q = loaded.questions[0]
-    assert loaded_q.question == new_q.question
-    assert loaded_q.ground_truth_answer == new_q.ground_truth_answer
-    assert loaded_q.ground_truth_context_ids == new_q.ground_truth_context_ids
-    assert loaded_q.ground_truth_doc_ids == new_q.ground_truth_doc_ids
-    assert loaded_q.tags == new_q.tags
 
 
 def test_faithfulness_metric(monkeypatch):
@@ -352,63 +283,6 @@ def test_ndcg_at_k():
     assert ndcg_at_k([3, 2, 1], relevance, 2) < 1.0
 
 
-def test_eval_harness_retrieval(tmp_path, monkeypatch):
-    from core.db import KnowledgeDB
-    from core.evaluation import EvalDataset
-    from core.knowledge_base_service import KnowledgeBaseService
-    from core.models import Document, EvalQuestion
-
-    db = KnowledgeDB(db_path=tmp_path / "eval.db")
-
-    class FakeVectorIndex:
-        def __init__(self, dim):
-            self.dim = dim
-
-        def search(self, query_vector, top_k=5):
-            return [(2, 0.8), (1, 0.7)]
-
-    svc = KnowledgeBaseService(
-        db=db,
-        vec=FakeVectorIndex(1024),  # type: ignore[arg-type]
-        graph_store=None,
-    )
-
-    class FakeEmbedder:
-        def embed(self, texts):
-            return [[0.0] * 1024 for _ in texts]
-
-    monkeypatch.setattr(svc, "_get_embedder", lambda: FakeEmbedder())
-
-    db.upsert_document(
-        Document(
-            doc_id="doc-a",
-            title="Test",
-            source_path="/tmp/test.pdf",
-            file_type="pdf",
-            total_pages=1,
-            chapters=[],
-            extracted_at="2026-01-01",
-            file_hash="abc",
-            status="done",
-        )
-    )
-    db.insert_block("doc-a", "b1", "content one", 0, {})
-    db.insert_block("doc-a", "b2", "content two", 1, {})
-
-    q = EvalQuestion(
-        question="test question",
-        ground_truth_context_ids=[1, 2],
-    )
-    ds = EvalDataset(name="baseline", questions=[q])
-    db.save_eval_dataset(ds)
-
-    result = svc.evaluate_dataset("baseline", retriever="semantic", top_k=5)
-    assert result["num_questions"] == 1
-    assert result["avg_hit_rate@5"] == 1.0
-    assert result["avg_mrr"] > 0.0
-    assert "hit_rate@5" in result["per_question"][0]
-
-
 def test_ndcg_at_k_graded():
     from core.evaluation import ndcg_at_k
 
@@ -496,30 +370,6 @@ def test_run_retrieval_eval_reranked():
     assert result["avg_mrr"] == 1.0
 
 
-def test_run_rag_eval_returns_retrieval_metrics():
-    from core.evaluation import EvalHarness
-    from core.models import EvalDataset, EvalQuestion
-
-    class FakeChunk:
-        def __init__(self, chunk_id):
-            self.id = chunk_id
-
-    class FakeService:
-        def search_semantic(self, query, top_k=5):
-            return [{"chunk": FakeChunk(1)}]
-
-    harness = EvalHarness(FakeService())  # type: ignore[arg-type]
-    ds = EvalDataset(
-        name="rag",
-        questions=[EvalQuestion(question="q", ground_truth_context_ids=[1])],
-    )
-    result = harness.run_rag_eval(ds, retriever="semantic", top_k=5)
-    assert "avg_hit_rate@5" in result
-    assert "avg_mrr" in result
-    assert "avg_ndcg@5" in result
-    assert result["num_questions"] == 1
-
-
 def test_eval_harness_lazy_metrics():
     from core.evaluation import EvalHarness
 
@@ -556,124 +406,7 @@ def test_faithfulness_metric_ignores_braces_and_dollar_literals(monkeypatch):
 
 def test_load_missing_prompt_raises_file_not_found():
     """Missing prompt files must raise FileNotFoundError instead of returning empty string."""
-    from core.evaluation import _load_prompt
+    from core.config import Config
 
     with pytest.raises(FileNotFoundError):
-        _load_prompt("definitely_missing_prompt")
-
-
-def test_run_rag_eval(monkeypatch):
-    from core.evaluation import EvalHarness
-    from core.llm_chat_client import BaseLLMClient
-    from core.models import EvalDataset, EvalQuestion
-
-    class FakeChunk:
-        def __init__(self, chunk_id, content):
-            self.id = chunk_id
-            self.content = content
-
-    class FakeService:
-        def search_semantic(self, query, top_k=5):
-            return [
-                {"chunk": FakeChunk(1, "Pull CS low first.")},
-                {"chunk": FakeChunk(2, "Then configure the clock idle state.")},
-            ]
-
-    class FakeLLMClient(BaseLLMClient):
-        def chat(self, messages, **kwargs):
-            return "{}"
-
-    harness = EvalHarness(FakeService(), llm_client=FakeLLMClient())  # type: ignore[arg-type]
-    monkeypatch.setattr(harness, "_generate_answer", lambda question, contexts: "Generated answer.")
-
-    monkeypatch.setattr(harness.faithfulness, "score", lambda q, a, ctx: {"score": 0.8})
-    monkeypatch.setattr(harness.context_precision, "score", lambda q, ctx: {"score": 0.7})
-    monkeypatch.setattr(harness.context_recall, "score", lambda gt, ctx: {"score": 0.6})
-    monkeypatch.setattr(harness.answer_relevancy, "score", lambda q, a: 0.9)
-
-    q = EvalQuestion(
-        id=1,
-        question="What is the SPI reset sequence?",
-        ground_truth_answer="CS low, then clock idle.",
-        ground_truth_context_ids=[1, 2],
-    )
-    ds = EvalDataset(name="rag", questions=[q])
-    result = harness.run_rag_eval(ds, retriever="semantic", top_k=5)
-
-    assert result["eval_type"] == "rag"
-    assert result["dataset_name"] == "rag"
-    assert result["retriever"] == "semantic"
-    assert result["top_k"] == 5
-    assert result["num_questions"] == 1
-
-    average = result["average"]
-    assert "faithfulness" in average
-    assert "context_precision" in average
-    assert "context_recall" in average
-    assert "answer_relevancy" in average
-    assert "hit_rate" in average
-    assert "mrr" in average
-    assert "ndcg" in average
-    assert average["faithfulness"] == 0.8
-    assert average["context_precision"] == 0.7
-    assert average["context_recall"] == 0.6
-    assert average["answer_relevancy"] == 0.9
-    assert average["hit_rate"] == 1.0
-    assert average["mrr"] == 1.0
-    assert average["ndcg"] == 1.0
-
-    assert result["avg_hit_rate@5"] == 1.0
-    assert result["avg_mrr"] == 1.0
-    assert result["avg_ndcg@5"] == 1.0
-
-    per_q = result["per_question"][0]
-    assert per_q["question_id"] == 1
-    assert per_q["question"] == q.question
-    assert per_q["answer"] == "Generated answer."
-    assert per_q["faithfulness"]["score"] == 0.8
-    assert per_q["context_precision"]["score"] == 0.7
-    assert per_q["context_recall"]["score"] == 0.6
-    assert per_q["answer_relevancy"] == 0.9
-    assert per_q["retrieval"]["hit_rate@5"] == 1.0
-
-
-def test_run_rag_eval_llm_failure(monkeypatch):
-    from core.evaluation import EvalHarness
-    from core.llm_chat_client import BaseLLMClient
-    from core.models import EvalDataset, EvalQuestion
-
-    class FakeChunk:
-        def __init__(self, chunk_id, content):
-            self.id = chunk_id
-            self.content = content
-
-    class FakeService:
-        def search_semantic(self, query, top_k=5):
-            return [{"chunk": FakeChunk(1, "Pull CS low first.")}]
-
-    class FakeLLMClient(BaseLLMClient):
-        def chat(self, messages, **kwargs):
-            raise RuntimeError("LLM generation failed")
-
-    harness = EvalHarness(FakeService(), llm_client=FakeLLMClient())  # type: ignore[arg-type]
-
-    monkeypatch.setattr(harness.faithfulness, "score", lambda q, a, ctx: {"score": 0.0})
-    monkeypatch.setattr(harness.context_precision, "score", lambda q, ctx: {"score": 0.0})
-    monkeypatch.setattr(harness.context_recall, "score", lambda gt, ctx: {"score": 0.0})
-    monkeypatch.setattr(harness.answer_relevancy, "score", lambda q, a: 0.0)
-
-    q = EvalQuestion(
-        id=2,
-        question="What is the SPI reset sequence?",
-        ground_truth_answer="CS low first.",
-        ground_truth_context_ids=[1],
-    )
-    ds = EvalDataset(name="rag_fail", questions=[q])
-    result = harness.run_rag_eval(ds, retriever="semantic", top_k=5)
-
-    assert result["num_questions"] == 1
-    assert result["per_question"][0]["answer"] == ""
-    assert result["average"]["faithfulness"] == 0.0
-    assert result["average"]["context_precision"] == 0.0
-    assert result["average"]["context_recall"] == 0.0
-    assert result["average"]["answer_relevancy"] == 0.0
+        Config.load_prompt("definitely_missing_prompt")

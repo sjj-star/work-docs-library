@@ -103,25 +103,3 @@ def test_cleanup_usage_logs(usage_db):
     deleted = db.cleanup_usage_logs(max_days=0, max_rows=10000)
     assert deleted["deleted_by_time"] == 1
 
-
-def test_add_usage_flag(usage_logger, usage_db):
-    chunk = _make_chunk(10000003)
-    result = {"chunks": [{"score": 0.7, "chunk": chunk}], "entities": [], "relations": []}
-    log_id = usage_logger.log_query(
-        tool_name="search",
-        mode="hybrid",
-        params={"text": "flag test"},
-        result=result,
-    )
-
-    ok = usage_db.add_usage_flag(
-        log_id=log_id,
-        kind="entity",
-        identifier={"type": "Module", "name": "X"},
-        reason="wrong",
-    )
-    assert ok
-
-    rows = usage_db.get_usage_trace()
-    assert rows[0]["flagged_items"] is not None
-    assert "wrong" in rows[0]["flagged_items"]

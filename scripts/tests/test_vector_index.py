@@ -97,13 +97,14 @@ def test_persistence(make_index, tmp_path):
 def test_transaction_commit(make_index):
     """事务提交后数据应持久化."""
     vi = make_index(dim=4)
-    with vi.transaction():
-        vi.add_batch(
-            [
-                (10, _norm_vec([1, 0, 0, 0])),
-                (20, _norm_vec([0, 1, 0, 0])),
-            ]
-        )
+    vi.begin_transaction()
+    vi.add_batch(
+        [
+            (10, _norm_vec([1, 0, 0, 0])),
+            (20, _norm_vec([0, 1, 0, 0])),
+        ]
+    )
+    vi.commit()
 
     results = vi.search(_norm_vec([1, 0, 0, 0]), top_k=1)
     assert results[0][0] == 10
@@ -119,15 +120,14 @@ def test_transaction_rollback(make_index):
     vi = make_index(dim=4)
     vi.add(10, _norm_vec([1, 0, 0, 0]))
 
-    with pytest.raises(RuntimeError, match="强制回滚"):
-        with vi.transaction():
-            vi.add_batch(
-                [
-                    (20, _norm_vec([0, 1, 0, 0])),
-                    (30, _norm_vec([0, 0, 1, 0])),
-                ]
-            )
-            raise RuntimeError("强制回滚")
+    vi.begin_transaction()
+    vi.add_batch(
+        [
+            (20, _norm_vec([0, 1, 0, 0])),
+            (30, _norm_vec([0, 0, 1, 0])),
+        ]
+    )
+    vi.rollback()
 
     assert vi._db_ids == {10}
     results = vi.search(_norm_vec([0, 1, 0, 0]), top_k=5)
@@ -145,16 +145,15 @@ def test_transaction_rollback_partial_duplicates(make_index):
     vi = make_index(dim=4)
     vi.add(10, _norm_vec([1, 0, 0, 0]))
 
-    with pytest.raises(RuntimeError):
-        with vi.transaction():
-            vi.add_batch(
-                [
-                    (10, _norm_vec([1, 0, 0, 0])),  # 重复
-                    (20, _norm_vec([0, 1, 0, 0])),
-                    (30, _norm_vec([0, 0, 1, 0])),
-                ]
-            )
-            raise RuntimeError("回滚")
+    vi.begin_transaction()
+    vi.add_batch(
+        [
+            (10, _norm_vec([1, 0, 0, 0])),  # 重复
+            (20, _norm_vec([0, 1, 0, 0])),
+            (30, _norm_vec([0, 0, 1, 0])),
+        ]
+    )
+    vi.rollback()
 
     assert vi._db_ids == {10}
     results = vi.search(_norm_vec([1, 0, 0, 0]), top_k=1)
@@ -170,7 +169,8 @@ def test_transaction_add_batch_exception(make_index):
         raise RuntimeError("normalize 失败")
 
     with pytest.raises(RuntimeError, match="normalize 失败"):
-        with vi.transaction():
+        vi.begin_transaction()
+        try:
             import faiss as _faiss
 
             original = _faiss.normalize_L2
@@ -179,6 +179,9 @@ def test_transaction_add_batch_exception(make_index):
                 vi.add_batch([(20, _norm_vec([0, 1, 0, 0]))])
             finally:
                 _faiss.normalize_L2 = original
+        except Exception:
+            vi.rollback()
+            raise
 
     assert vi._db_ids == {10}
 

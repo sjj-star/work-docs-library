@@ -37,7 +37,6 @@ def test_kbservice_get_document_progress(tmp_path, monkeypatch):
     assert prog["embedded"] == 1
     assert prog["pending"] == 1
     assert prog["failed"] == 1
-    assert prog["skipped"] == 0
 
 
 def test_kbservice_query_chunks_requires_doc_id_for_chapter():
@@ -52,37 +51,6 @@ def test_kbservice_query_chunks_requires_query_type():
     svc = KnowledgeBaseService()
     with pytest.raises(ValueError, match="Provide"):
         svc.query_chunks()
-
-
-def test_kbservice_get_chunk_content_by_chunk_id(tmp_path, monkeypatch):
-    """get_chunk_content 通过 block_db_id 获取内容."""
-    monkeypatch.setattr("core.config.Config.DB_PATH", tmp_path / "test.db")
-    monkeypatch.setattr("core.config.Config.FAISS_INDEX_PATH", tmp_path / "faiss.index")
-
-    svc = KnowledgeBaseService()
-    svc.db.upsert_document(Document(doc_id="d1", title="T", source_path="/x.pdf", file_type="pdf"))
-    db_id = svc.db.insert_block(doc_id="d1", block_id="b0", content="hello world", seq_index=0)
-
-    result = svc.get_chunk_content(chunk_db_id=db_id)
-    assert result["query_type"] == "chunk"
-    assert result["content"] == "hello world"
-    assert len(result["chunks"]) == 1
-
-
-def test_kbservice_get_chunk_content_missing_chunk():
-    """get_chunk_content 找不到 block 时抛出 ValueError."""
-    svc = KnowledgeBaseService()
-    with pytest.raises(ValueError, match="not found"):
-        svc.get_chunk_content(chunk_db_id=99999)
-
-
-def test_kbservice_get_chunk_content_missing_params():
-    """get_chunk_content 缺少参数时抛出 ValueError."""
-    svc = KnowledgeBaseService()
-    with pytest.raises(ValueError, match="Provide"):
-        svc.get_chunk_content()
-    with pytest.raises(ValueError, match="doc_id"):
-        svc.get_chunk_content(doc_id="d1")
 
 
 def test_kbservice_graph_operations():
@@ -122,10 +90,6 @@ def test_kbservice_graph_operations():
     # get_subgraph
     sg = svc.get_subgraph("Module", "M1", depth=1)
     assert sg.node_count == 2
-
-    # graph_stats
-    stats = svc.graph_stats()
-    assert stats == {"nodes": 2, "edges": 1}
 
 
 def test_kbservice_find_path():

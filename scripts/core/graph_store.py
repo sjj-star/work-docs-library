@@ -340,23 +340,6 @@ class GraphEntity:
             "feedback_score": self.feedback_score,
         }
 
-    @classmethod
-    def from_dict(cls, d: dict[str, Any]) -> "GraphEntity":
-        """from_dict 函数."""
-        return cls(
-            entity_type=d.get("type", ""),
-            name=d.get("name", ""),
-            properties=d.get("properties", {}),
-            doc_properties=d.get("doc_properties", {}),
-            source_doc_ids=_normalize_sids(d.get("source_doc_ids", [])),
-            source_chapter=d.get("source_chapter", ""),
-            confidence=d.get("confidence", 1.0),
-            verified=d.get("verified", False),
-            created_at=d.get("created_at", ""),
-            updated_at=d.get("updated_at", ""),
-            feedback_score=d.get("feedback_score", 0),
-        )
-
 
 @dataclass
 class GraphRelation:
@@ -395,26 +378,6 @@ class GraphRelation:
             "updated_at": self.updated_at,
             "feedback_score": self.feedback_score,
         }
-
-    @classmethod
-    def from_dict(cls, d: dict[str, Any]) -> "GraphRelation":
-        """from_dict 函数."""
-        return cls(
-            rel_type=d.get("type", ""),
-            from_name=d.get("from", ""),
-            to_name=d.get("to", ""),
-            from_type=d.get("from_type", ""),
-            to_type=d.get("to_type", ""),
-            properties=d.get("properties", {}),
-            doc_properties=d.get("doc_properties", {}),
-            source_doc_ids=_normalize_sids(d.get("source_doc_ids", [])),
-            source_chapter=d.get("source_chapter", ""),
-            confidence=d.get("confidence", 1.0),
-            verified=d.get("verified", False),
-            created_at=d.get("created_at", ""),
-            updated_at=d.get("updated_at", ""),
-            feedback_score=d.get("feedback_score", 0),
-        )
 
 
 # ---------------------------------------------------------------------------
@@ -468,11 +431,6 @@ class GraphStore(ABC):
     @abstractmethod
     def find_by_type(self, entity_type: str) -> list[GraphEntity]:
         """按类型查找所有实体."""
-        ...
-
-    @abstractmethod
-    def find_by_property(self, entity_type: str, key: str, value: Any) -> list[GraphEntity]:
-        """按属性查找实体."""
         ...
 
     @abstractmethod
@@ -868,16 +826,6 @@ class NetworkXGraphStore(GraphStore):
         for nid, data in self._g.nodes(data=True):
             if data.get("entity_type") == entity_type:
                 results.append(self._node_to_entity(nid, data))
-        return results
-
-    def find_by_property(self, entity_type: str, key: str, value: Any) -> list[GraphEntity]:
-        """find_by_property 函数. 使用属性索引加速（O(1) 查找）."""
-        index_key = (entity_type, key, value)
-        nids = self._property_index.get(index_key, set())
-        results = []
-        for nid in nids:
-            if nid in self._g:
-                results.append(self._node_to_entity(nid, self._g.nodes[nid]))
         return results
 
     def all_entities(self) -> list[GraphEntity]:
@@ -1573,35 +1521,6 @@ class SubGraphView:
             updated_at=data.get("updated_at", ""),
             feedback_score=data.get("feedback_score", 0),
         )
-
-    def to_text_context(self) -> str:
-        """将子图转换为文本上下文，供 LLM 使用."""
-        lines = []
-        for nid, data in self._g.nodes(data=True):
-            entity_type = data.get("entity_type", "")
-            name = data.get("name", "")
-            props = data.get("properties", {})
-            prop_str = ", ".join(f"{k}={v}" for k, v in props.items() if v)
-            sids = sorted(_normalize_sids(data.get("source_doc_ids", set())))
-            sources = f" [来源: {', '.join(sids)}]" if sids else ""
-            verified_mark = " ✓" if data.get("verified", False) else ""
-            lines.append(
-                f"- [{entity_type}] {name}{verified_mark}{sources}"
-                + (f" ({prop_str})" if prop_str else "")
-            )
-
-        if self._g.number_of_edges() > 0:
-            lines.append("\n关系:")
-            for u, v, data in self._g.edges(data=True):
-                u_name = self._g.nodes[u].get("name", u)
-                v_name = self._g.nodes[v].get("name", v)
-                rel = data.get("rel_type", "")
-                rel_props = data.get("properties", {})
-                rel_prop_str = ", ".join(f"{k}={v}" for k, v in rel_props.items() if v)
-                rel_extra = f" ({rel_prop_str})" if rel_prop_str else ""
-                lines.append(f"  {u_name} --[{rel}]{rel_extra}--> {v_name}")
-
-        return "\n".join(lines)
 
     def to_dict(self) -> dict[str, Any]:
         """to_dict 函数."""

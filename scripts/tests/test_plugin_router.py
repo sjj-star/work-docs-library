@@ -877,15 +877,6 @@ def test_graph_delete_relation(monkeypatch, graph_service):
     assert result["success"] is True
 
 
-def test_graph_conflicts_empty(monkeypatch, graph_service):
-    """graph_conflicts 无冲突时返回空列表."""
-    monkeypatch.setattr(plugin_router, "_get_service", lambda: graph_service)
-
-    result = plugin_router.tool_graph_conflicts({})
-    assert result["success"] is True
-    assert result["count"] == 0
-
-
 def test_graph_feedback_submit(monkeypatch, graph_service):
     """graph_feedback action=submit 提交反馈."""
     monkeypatch.setattr(plugin_router, "_get_service", lambda: graph_service)
@@ -919,19 +910,6 @@ def test_graph_feedback_query(monkeypatch, graph_service):
     assert result["count"] >= 1
     # 验证返回的 feedbacks 中包含目标实体
     assert any(f.get("entity_name") == "M1" for f in result["feedbacks"])
-
-
-def test_graph_provenance(monkeypatch, graph_service):
-    """graph_provenance 实体来源溯源."""
-    monkeypatch.setattr(plugin_router, "_get_service", lambda: graph_service)
-
-    result = plugin_router.tool_graph_provenance({"entity_type": "Module", "name": "TOP"})
-    assert result["success"] is True
-    assert result["entity_type"] == "Module"
-    assert result["name"] == "TOP"
-    # 测试图中 TOP 没有 source_doc_ids，所以 sources 为空
-    assert result["count"] == 0
-    assert result["sources"] == []
 
 
 # ---------------------------------------------------------------------------

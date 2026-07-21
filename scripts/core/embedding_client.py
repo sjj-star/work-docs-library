@@ -51,6 +51,7 @@ class EmbeddingClient:
 
     def _split_text(self, text: str, max_chars: int) -> list[str]:
         """按段落、行、句子边界拆分超长文本."""
+        max_chars = max(2, max_chars)
         if len(text) <= max_chars:
             return [text]
 
@@ -118,7 +119,7 @@ class EmbeddingClient:
                 len(c) > Config.EMBED_MAX_CHARS_PER_TEXT for c in chunks
             ):
                 smaller: list[str] = []
-                half = Config.EMBED_MAX_CHARS_PER_TEXT // 2
+                half = max(1, Config.EMBED_MAX_CHARS_PER_TEXT // 2)
                 for c in chunks:
                     if len(c) > Config.EMBED_MAX_CHARS_PER_TEXT:
                         for i in range(0, len(c), half):
@@ -166,11 +167,6 @@ class EmbeddingClient:
     def embed_single(self, text: str) -> list[float]:
         """获取单条文本向量."""
         return self.embed([text])[0]
-
-    def _zero_vector(self) -> list[float]:
-        """返回与当前维度一致的零向量（保留作兼容，当前不再主动使用）."""
-        dim = self._dimension or Config.EMBEDDING_DIMENSION
-        return [0.0] * dim
 
     def close(self) -> None:
         """关闭底层 HTTP 客户端."""

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import logging
 import math
 from string import Template
@@ -21,21 +20,6 @@ logger = logging.getLogger(__name__)
 ALLOWED_RETRIEVERS: set[str] = {"semantic", "hybrid", "reranked"}
 
 
-def _load_prompt(name: str) -> str:
-    path = Config.PROMPT_DIR / f"{name}.txt"
-    if not path.exists():
-        raise FileNotFoundError(f"Prompt file not found: {path}")
-    return path.read_text(encoding="utf-8")
-
-
-def _parse_json_response(raw: str) -> dict[str, Any]:
-    try:
-        return json.loads(raw)
-    except json.JSONDecodeError:
-        logger.warning(f"Judge returned non-JSON: {raw[:200]}")
-        return {}
-
-
 class BaseJudgeMetric:
     """Base class for LLM-as-judge metrics."""
 
@@ -45,7 +29,7 @@ class BaseJudgeMetric:
 
     @staticmethod
     def _format_prompt(name: str, **kwargs: Any) -> str:
-        template = _load_prompt(name)
+        template = Config.load_prompt(name)
         return Template(template).safe_substitute(**kwargs)
 
     def _judge(
@@ -54,7 +38,7 @@ class BaseJudgeMetric:
         user_prompt_name: str,
         **user_kwargs: Any,
     ) -> dict[str, Any]:
-        system = _load_prompt(system_prompt_name)
+        system = Config.load_prompt(system_prompt_name)
         user = self._format_prompt(user_prompt_name, **user_kwargs)
         try:
             raw = self.client.chat(
@@ -63,7 +47,7 @@ class BaseJudgeMetric:
         except Exception as exc:  # noqa: BLE001
             logger.error(f"Judge LLM call failed for {user_prompt_name}: {exc}")
             raw = ""
-        return _parse_json_response(raw)
+        return Config.parse_llm_json(raw) or {}
 
     @staticmethod
     def _ensure_list(value: Any, key: str) -> list[Any]:
@@ -277,8 +261,8 @@ class EvalHarness:
 
     def _generate_answer(self, question: EvalQuestion, contexts: list[str]) -> str:
         """Generate an answer for the question using only the provided contexts."""
-        system = _load_prompt("eval_generate_answer_system")
-        user = Template(_load_prompt("eval_generate_answer_user")).safe_substitute(
+        system = Config.load_prompt("eval_generate_answer_system")
+        user = Template(Config.load_prompt("eval_generate_answer_user")).safe_substitute(
             question=question.question,
             contexts="\n\n---\n\n".join(contexts),
         )
@@ -335,111 +319,4 @@ class EvalHarness:
             "avg_mrr": _avg("mrr"),
             f"avg_ndcg@{top_k}": _avg(f"ndcg@{top_k}"),
             "per_question": results,
-        }
-
-    def run_rag_eval(
-        self,
-        dataset: EvalDataset,
-        retriever: str = "semantic",
-        top_k: int = 5,
-    ) -> dict[str, Any]:
-        """Run full RAG evaluation including generation metrics.
-
-        For each question the harness retrieves contexts, generates an answer,
-        and scores both the retrieval and the generated answer.
-        """
-        if retriever not in ALLOWED_RETRIEVERS:
-            raise ValueError(f"Unsupported retriever: {retriever}")
-
-        search_method = getattr(self.service, f"search_{retriever}", None)
-        if search_method is None:
-            raise ValueError(f"Unsupported retriever: {retriever}")
-
-        per_question: list[dict[str, Any]] = []
-        for question in dataset.questions:
-            hits = search_method(question.question, top_k=top_k)
-            retrieved_contexts = [self._extract_hit_text(hit) for hit in hits]
-            answer = self._generate_answer(question, retrieved_contexts)
-
-            retrieved_ids = [hit["chunk"].id for hit in hits]
-            relevant_ids = set(question.ground_truth_context_ids)
-            relevance = {cid: 1.0 for cid in relevant_ids}
-
-            faithfulness_result = self.faithfulness.score(
-                question.question, answer, retrieved_contexts
-            )
-            context_precision_result = self.context_precision.score(
-                question.question, retrieved_contexts
-            )
-            context_recall_result = self.context_recall.score(
-                question.ground_truth_answer, retrieved_contexts
-            )
-            answer_relevancy_result = self.answer_relevancy.score(question.question, answer)
-
-            per_question.append(
-                {
-                    "question_id": question.id,
-                    "question": question.question,
-                    "answer": answer,
-                    "faithfulness": faithfulness_result,
-                    "context_precision": context_precision_result,
-                    "context_recall": context_recall_result,
-                    "answer_relevancy": answer_relevancy_result,
-                    "retrieval": {
-                        "retrieved_ids": retrieved_ids,
-                        f"hit_rate@{top_k}": hit_rate_at_k(retrieved_ids, relevant_ids, top_k),
-                        "mrr": mean_reciprocal_rank(retrieved_ids, relevant_ids),
-                        f"ndcg@{top_k}": ndcg_at_k(retrieved_ids, relevance, top_k),
-                    },
-                }
-            )
-
-        def _avg_score(key: str) -> float:
-            values = [q[key]["score"] for q in per_question]
-            return sum(values) / len(values) if values else 0.0
-
-        avg_faithfulness = _avg_score("faithfulness")
-        avg_context_precision = _avg_score("context_precision")
-        avg_context_recall = _avg_score("context_recall")
-        avg_answer_relevancy = (
-            sum(q["answer_relevancy"] for q in per_question) / len(per_question)
-            if per_question
-            else 0.0
-        )
-        avg_hit_rate = (
-            sum(q["retrieval"][f"hit_rate@{top_k}"] for q in per_question) / len(per_question)
-            if per_question
-            else 0.0
-        )
-        avg_mrr = (
-            sum(q["retrieval"]["mrr"] for q in per_question) / len(per_question)
-            if per_question
-            else 0.0
-        )
-        avg_ndcg = (
-            sum(q["retrieval"][f"ndcg@{top_k}"] for q in per_question) / len(per_question)
-            if per_question
-            else 0.0
-        )
-
-        return {
-            "eval_type": "rag",
-            "dataset_name": dataset.name,
-            "retriever": retriever,
-            "top_k": top_k,
-            "num_questions": len(per_question),
-            "average": {
-                "faithfulness": round(avg_faithfulness, 4),
-                "context_precision": round(avg_context_precision, 4),
-                "context_recall": round(avg_context_recall, 4),
-                "answer_relevancy": round(avg_answer_relevancy, 4),
-                "hit_rate": round(avg_hit_rate, 4),
-                "mrr": round(avg_mrr, 4),
-                "ndcg": round(avg_ndcg, 4),
-            },
-            "per_question": per_question,
-            # Backward-compatible keys for consumers expecting retrieval-only output.
-            f"avg_hit_rate@{top_k}": round(avg_hit_rate, 4),
-            "avg_mrr": round(avg_mrr, 4),
-            f"avg_ndcg@{top_k}": round(avg_ndcg, 4),
         }

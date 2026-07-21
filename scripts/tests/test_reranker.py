@@ -1,7 +1,5 @@
-from typing import Any
-
 import pytest
-from core.reranker import CrossEncoderReranker, LLMReranker
+from core.reranker import LLMReranker
 
 
 @pytest.fixture(autouse=True)
@@ -204,34 +202,3 @@ def test_search_reranked_falls_back_on_llm_error(tmp_path, monkeypatch):
     results = svc.search_reranked("SPI", top_k=2)
     assert len(results) == 2
     assert all(r["score"] > 0 for r in results)
-
-
-def test_cross_encoder_reranker_ranking(monkeypatch):
-    """CrossEncoderReranker scores and sorts passages using the local model."""
-    import numpy as np
-
-    class FakeCrossEncoder:
-        def __init__(self, model_name: str) -> None:
-            self.model_name = model_name
-
-        def predict(self, pairs: list[tuple[str, str]]) -> Any:
-            return np.array([0.1, 0.9, 0.5])
-
-    monkeypatch.setattr(
-        "sentence_transformers.CrossEncoder",
-        FakeCrossEncoder,
-    )
-
-    reranker = CrossEncoderReranker(model_name="fake-model")
-    passages = [(1, "SPI reset sequence"), (2, "GPIO config"), (3, "Timers")]
-    result = reranker.rank("SPI reset", passages)
-    assert len(result) == 3
-    assert result[0] == (2, 0.9)
-    assert result[1] == (3, 0.5)
-    assert result[2] == (1, 0.1)
-
-
-def test_cross_encoder_reranker_empty():
-    """CrossEncoderReranker returns an empty list when no passages are provided."""
-    reranker = CrossEncoderReranker(model_name="fake-model")
-    assert reranker.rank("query", []) == []

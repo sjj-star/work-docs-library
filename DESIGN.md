@@ -146,7 +146,7 @@
 - **单用户场景**：本项目为本地部署的 Kimi CLI Plugin，无多用户并发需求
 - **零运维**：无需安装、配置、维护数据库服务，一个 `.db` 文件即完整数据库
 - **事务简单**：`KnowledgeDB._connect()` 使用上下文管理器，自动 commit/close
-- **足够当前需求**：当前 Schema 包含九张表：`documents`（文档元数据）、`content_blocks`（内容块）、`heading_maps`（标题映射）、`conflict_logs`（同名实体属性冲突日志）、`feedback`（实体/关系用户反馈）、`usage_logs`（统一使用/审计日志）、`block_activation`（向量 block 命中计数）、`eval_datasets`/`eval_questions`（评估数据集），无复杂查询
+- **足够当前需求**：当前 Schema 包含十张表：`documents`（文档元数据）、`content_blocks`（内容块）、`heading_maps`（标题映射）、`conflict_logs`（同名实体属性冲突日志）、`feedback`（实体/关系用户反馈）、`usage_logs`（统一使用/审计日志）、`block_activation`（向量 block 命中计数）、`pipeline_stage_status`（六阶段 Pipeline 阶段级状态机）、`eval_datasets`/`eval_questions`（评估数据集），无复杂查询
 
 **权衡**：
 - 单进程写入为主；FAISS 已加 `fcntl` 进程级文件锁防并发覆盖，但不建议多进程并发 reprocess
@@ -223,7 +223,7 @@
 **实现细节**：
 - `content_blocks.metadata` 存储 `content_hash`、`extracted_entities`、`extracted_relations`、`image_descriptions`、`embedding`
 - `_save_blocks_to_db()` 向量化阶段分离 `reuse_pairs`（未变 section 复用 embedding）和 `reembed_pairs`（变更/新增 section 重新调用 Embedding API）
-- 全局图重建策略：`DocGraphPipeline._process_one()` 保存独立子图 `{doc_id}.json`；`KnowledgeBaseService.ingest_document()` 完成后清空内存全局图，从所有现有 `{doc_id}.json` 子图重新加载合并，确保无幽灵残留
+- 全局图合并策略：**增量合并**——`DocGraphPipeline._process_one()` 保存独立子图 `{doc_id}.json`；`KnowledgeBaseService.ingest_document()` 完成后仅将本次导入的 `{doc_id}.json` 子图增量合并进内存全局图（`reprocess` 前先 `remove_document_contributions(doc_id)` 精确移除旧贡献），避免全量重建，同时确保无幽灵残留
 
 **权衡**：
 - 需要存储每个章节的实体/关系缓存，增加 SQLite 存储开销（通常 < 1%）
@@ -384,7 +384,7 @@ def _collect_section_content(node):
 
 ### 入库（`_save_blocks_to_db`）
 
-1. **清理旧数据**：删除旧 blocks、heading_maps，同时清理 FAISS 中旧向量（使用偏移 ID）
+1. **清理旧数据**：删除旧 blocks、heading_maps，同时清理 FAISS 中旧向量
 2. **插入 content_blocks**：每个 block 的 metadata 包含 `content_hash`、按 `section_title` 过滤的 `extracted_entities` / `extracted_relations` / `image_descriptions`
 3. **插入 heading_maps**：`block_ids` 替换为 SQLite `db_id`，`##` 和 `###` 都指向同一 block 集合
 4. ~~兼容层已删除~~：不再写入 `chunks` 表
@@ -498,7 +498,7 @@ score(d) = Σ 1 / (k + rank_d)
 
 **设计**：可选的第二级精排，接收 hybrid 检索的候选 passages，对每个 `(query, passage)` 打分后重排。提供两种实现：
 - `LLMReranker`：由 LLM 判断每个 passage 与 query 的相关度（0-10），成本较高、无需本地依赖。
-- `CrossEncoderReranker`：基于 `sentence-transformers.CrossEncoder` 的本地交叉编码器，模型由 `RERANK_CROSS_ENCODER_MODEL` 配置（默认 `BAAI/bge-reranker-v2-m3`），无需外部 API 调用。
+- `CrossEncoderReranker`：基于 `sentence-transformers.CrossEncoder` 的本地交叉编码器，无需外部 API 调用。
 
 **实现要点**：
 - 提示词使用 `string.Template.safe_substitute`，防止用户 query/passages 中包含 `$` 字符时触发异常
@@ -634,7 +634,7 @@ explore(mode="entity", entity_type="Product", name="TMS320F28379D")
 | Stage 3 | results.jsonl | `batch/{doc_id}_results.jsonl` | LLM Batch API 原始返回结果（Chat 模式下格式完全一致，Stage 4 零修改复用） |
 | Stage 3 | incremental.json | `batch/{doc_id}_incremental.json` | 增量分析摘要 + result.md hash |
 | Stage 4 | 子图谱 | `graphs/{doc_id}.json` | 文档级图谱快照 |
-| Stage 5 | embed.jsonl | `batch/{doc_id}_embed.jsonl` | Embedding 同步 API 输入请求（单文本，custom_id 编码 db_id） |
+| Stage 5 | embed.jsonl | `batch/{doc_id}_embed.jsonl` | Embedding 同步 API 输入请求 |
 | Stage 6 | — | — | 同步调用 Embedding API 逐条处理，结果直接入库（无中间产物文件） |
 
 **状态管理**（`DocumentStatus`）：
@@ -655,7 +655,7 @@ explore(mode="entity", entity_type="Product", name="TMS320F28379D")
 **背景**：
 - 2026-04 代码审计发现 21 项缺陷（9 个 P0 数据损坏风险、7 个 P1 可靠性缺陷、5 个 P2 代码质量问题），已全部修复并通过 514 个测试验证。
 - 2026-06 再次审计发现 Critical/High 级安全与数据完整性问题，按「最小紧急修复」方案修复后测试数达到 514 个。
-- 2026-06 接口精简：基于审计发现 Agent 在 14 个 MCP 工具间混淆的问题，将工具面收敛到 5 个，并将 `KnowledgeBaseService` 的查询组合逻辑拆出为 `QueryService`（当时测试数精简为 506 个）。此后随统一 `APIClient`、使用跟踪与评估等能力补充，测试集当前为 536 个（以最近一次 pytest 输出为准）。
+- 2026-06 接口精简：基于审计发现 Agent 在 14 个 MCP 工具间混淆的问题，将工具面收敛到 5 个，并将 `KnowledgeBaseService` 的查询组合逻辑拆出为 `QueryService`（当时测试数精简为 506 个）。此后随统一 `APIClient`、使用跟踪与评估等能力补充，测试集当前为 496 个（以最近一次 pytest 输出为准）。
 
 **关键教训**：
 
@@ -1806,9 +1806,8 @@ HTTP API 调用都经由它发出。
 `BaseLLMClient` 的失效类常量 `MAX_RETRY_ATTEMPTS` / `RETRY_BACKOFF_BASE` 一并删除；
 `LLM_TIMEOUT` 因仍用于 LLM 同步对话超时而保留。
 
-同步新增 `LLM_CHAT_ENDPOINT`（默认 `/chat/completions`），与 `LLM_BATCH_ENDPOINT`
-（默认 `/v1/chat/completions`）职责分离：前者供 `BaseLLMClient` 及 Chat 模式 pipeline 使用，
-后者仅作为 Batch API 请求体中的 `endpoint` 字段。`LLM_BASE_URL` 默认已包含 `/v1`，
+同步新增 `LLM_CHAT_ENDPOINT`（默认 `/chat/completions`），供 `BaseLLMClient` 及
+Chat 模式 pipeline 使用。`LLM_BASE_URL` 默认已包含 `/v1`，
 因此 `LLM_CHAT_ENDPOINT` 采用相对 `/chat/completions` 即可得到正确的完整 URL。
 
 同步修正 `EMBEDDING_ENDPOINT` 默认值为 `/embeddings`（2026-07）：`EMBEDDING_BASE_URL`

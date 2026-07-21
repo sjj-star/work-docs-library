@@ -154,19 +154,19 @@ class KnowledgeBaseService:
             self._reranker = LLMReranker()
         return self._reranker
 
-    _ALLOWED_RETRIEVERS: dict[str, str] = {
-        "semantic": "search_semantic",
-        "hybrid": "search_hybrid",
-        "reranked": "search_reranked",
-    }
-
     def _get_retriever(self, retriever: str) -> Callable[..., list[dict]]:
         """按名称返回检索方法 callable，并在不支持时尽早抛出清晰错误."""
-        method_name = self._ALLOWED_RETRIEVERS.get(retriever)
-        if method_name is None:
-            allowed = ", ".join(sorted(self._ALLOWED_RETRIEVERS))
+        from .evaluation import ALLOWED_RETRIEVERS
+
+        method_map = {
+            "semantic": "search_semantic",
+            "hybrid": "search_hybrid",
+            "reranked": "search_reranked",
+        }
+        if retriever not in ALLOWED_RETRIEVERS:
+            allowed = ", ".join(sorted(ALLOWED_RETRIEVERS))
             raise ValueError(f"Unsupported retriever: {retriever}. Allowed: {allowed}")
-        return getattr(self, method_name)
+        return getattr(self, method_map[retriever])
 
     def close(self) -> None:
         """关闭资源."""
@@ -242,7 +242,7 @@ class KnowledgeBaseService:
 
         Returns:
             {"total": int, "done": int, "embedded": int,
-             "skipped": int, "pending": int, "failed": int}
+             "pending": int, "failed": int}
         """
         with self.db._connect() as conn:
             block_count = conn.execute(
@@ -259,7 +259,6 @@ class KnowledgeBaseService:
                 "total": block_count,
                 "done": _block_count("done"),
                 "embedded": _block_count("embedded"),
-                "skipped": _block_count("skipped"),
                 "pending": _block_count("pending"),
                 "failed": _block_count("failed"),
             }
@@ -548,79 +547,6 @@ class KnowledgeBaseService:
 
         return results[:top_k]
 
-    def get_chunk_content(
-        self,
-        chunk_db_id: int | None = None,
-        doc_id: str | None = None,
-        chapter: str | None = None,
-    ) -> dict:
-        """获取 chunk 完整内容（基于 content_blocks + heading_maps）.
-
-        Args:
-            chunk_db_id: 直接按 block DB ID 查询
-            doc_id: 文档 ID（配合 chapter）
-            chapter: 章节标题
-
-        Returns:
-            {"query_type": str, "chunks": list[Chunk], "content": str}
-
-        Raises:
-            ValueError: 参数不合法或找不到内容
-        """
-        if chunk_db_id is not None:
-            block = self.db.get_block_by_db_id(int(chunk_db_id))
-            if not block:
-                raise ValueError(f"Block {chunk_db_id} not found")
-            chunk = Chunk(
-                id=block["id"],
-                doc_id=block["doc_id"],
-                chunk_id=block["block_id"],
-                content=block["content"],
-                chunk_type="text",
-                chapter_title=block["metadata"].get("section_title", ""),
-                metadata=block["metadata"],
-                status=block["status"],
-            )
-            return {
-                "query_type": "chunk",
-                "chunks": [chunk],
-                "content": chunk.content,
-            }
-
-        if not doc_id:
-            raise ValueError("Provide chunk_db_id, or doc_id with chapter")
-
-        if chapter is not None:
-            blocks = self.db.query_by_heading(doc_id, chapter)
-            chunks = []
-            for block in blocks:
-                chunks.append(
-                    Chunk(
-                        id=block["id"],
-                        doc_id=block["doc_id"],
-                        chunk_id=block["block_id"],
-                        content=block["content"],
-                        chunk_type="text",
-                        chapter_title=block["metadata"].get("section_title", ""),
-                        metadata=block["metadata"],
-                        status=block["status"],
-                    )
-                )
-            query_type = "chapter"
-        else:
-            raise ValueError("Provide chapter with doc_id")
-
-        if not chunks:
-            raise ValueError("No content found for the given query")
-
-        chunks.sort(key=lambda ck: (ck.id, ck.chunk_id))
-        full_content = "\n\n---\n\n".join(ck.content for ck in chunks)
-        return {
-            "query_type": query_type,
-            "chunks": chunks,
-            "content": full_content,
-        }
-
     # ------------------------------------------------------------------
     # 图谱查询
     # ------------------------------------------------------------------
@@ -708,10 +634,6 @@ class KnowledgeBaseService:
     ) -> SubGraphView:
         """获取以某实体为中心的子图."""
         return self.graph.get_subgraph(center_type, center_name, depth, rel_types)
-
-    def graph_stats(self) -> dict[str, int]:
-        """返回当前内存中图谱的统计信息."""
-        return self.graph.stats()
 
     # -- 跨粒度桥接原子操作（机制层，无策略参数）--
 

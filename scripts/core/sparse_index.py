@@ -38,31 +38,6 @@ class BM25SparseIndex:
         tokens.extend(re.findall(r"[^\s\w\u4e00-\u9fff]", text))
         return tokens
 
-    @classmethod
-    def from_blocks(cls, blocks: list[dict]) -> "BM25SparseIndex":
-        """Build a BM25 index from an existing list of block dicts."""
-        instance = cls.__new__(cls)
-        instance.db = None
-        tokenized: list[list[str]] = []
-        instance._corpus = []
-        for block in blocks:
-            if not isinstance(block, dict):
-                raise ValueError(f"Block must be a dict, got {type(block)}")
-            block_id = block.get("id")
-            content = block.get("content")
-            if block_id is None:
-                raise ValueError("Block is missing required field 'id'")
-            if not isinstance(content, str):
-                raise ValueError(f"Block {block_id} has invalid content type: {type(content)}")
-            tokens = cls._tokenize(content)
-            tokenized.append(tokens)
-            instance._corpus.append((block_id, content))
-        if tokenized:
-            instance._index = BM25Okapi(tokenized)
-        else:
-            instance._index = None
-        return instance
-
     def _build(self) -> None:
         """从所有文档的 content_blocks 构建 BM25 索引."""
         docs = self.db.list_documents()

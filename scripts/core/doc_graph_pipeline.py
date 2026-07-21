@@ -708,16 +708,8 @@ class EntityExtractor:
 
     def __init__(self):
         """初始化 EntityExtractor."""
-        self._system_prompt = self._load_prompt("entity_extraction_system")
-        self._user_template = self._load_prompt("entity_extraction_user")
-
-    @staticmethod
-    def _load_prompt(name):
-        path = Config.PROMPT_DIR / f"{name}.txt"
-        if path.exists():
-            return path.read_text(encoding="utf-8")
-        logger.warning(f"Prompt 文件不存在 | path={path}")
-        return ""
+        self._system_prompt = Config.load_prompt("entity_extraction_system")
+        self._user_template = Config.load_prompt("entity_extraction_user")
 
     @staticmethod
     def _compress_image_to_base64(img_path: Path) -> str:
@@ -932,7 +924,7 @@ class EntityExtractor:
             if not choices:
                 continue
             content = choices[0].get("message", {}).get("content", "")
-            data = self._safe_parse_json(content)
+            data = Config.parse_llm_json(content)
             if not data:
                 continue
 
@@ -966,27 +958,6 @@ class EntityExtractor:
 
         logger.info(f"文件解析完成 | entities={len(all_entities)} | relations={len(all_relations)}")
         return all_entities, all_relations, all_image_descriptions
-
-    def _safe_parse_json(self, raw):
-        if not raw:
-            return None
-        cleaned = raw.strip()
-        if cleaned.startswith("```"):
-            lines = cleaned.splitlines()
-            if lines and lines[0].startswith("```"):
-                lines = lines[1:]
-            if lines and lines[-1].startswith("```"):
-                lines = lines[:-1]
-            cleaned = "\n".join(lines).strip()
-        try:
-            return json.loads(cleaned)
-        except json.JSONDecodeError:
-            try:
-                cleaned = re.sub(r",(\s*[}\]])", r"\1", cleaned)
-                return json.loads(cleaned)
-            except json.JSONDecodeError:
-                logger.warning(f"JSON 解析失败 | raw={raw[:200]}...")
-                return None
 
 
 class DocGraphPipeline:
@@ -1671,7 +1642,7 @@ class DocGraphPipeline:
             + img_count * Config.LLM_TIMEOUT_PER_IMAGE
         )
         timeout = Config.LLM_TIMEOUT + int(extra)
-        return min(timeout, Config.LLM_TIMEOUT_MAX)
+        return max(1, min(timeout, Config.LLM_TIMEOUT_MAX))
 
     @staticmethod
     def _compute_chat_retry_delay(timeout: int, attempt: int, error_text: str) -> float:
@@ -1679,9 +1650,9 @@ class DocGraphPipeline:
         # 对读取超时错误使用更长退避，避免立即重试再次超时
         base = 5.0
         if "timed out" in error_text.lower() or "timeout" in error_text.lower():
-            base = min(60.0, timeout / 5.0)
+            base = min(60.0, max(1.0, timeout / 5.0))
         delay = base * (2**attempt)
-        return min(delay, Config.HTTP_RETRY_MAX_DELAY)
+        return max(0.1, min(delay, Config.HTTP_RETRY_MAX_DELAY))
 
     def stage4_ingest_results(
         self,
@@ -2155,13 +2126,6 @@ class DocGraphPipeline:
         """检查 Embedding API 是否已配置."""
         return Config.embedding_configured()
 
-    def _read_result_md_if_exists(self, doc_id: str) -> str:
-        """读取 result.md，不存在时返回空字符串."""
-        result_md_path = Config.DB_PATH.parent / Config.PARSE_OUTPUT_DIR / doc_id / "result.md"
-        if not result_md_path.exists():
-            return ""
-        return result_md_path.read_text(encoding="utf-8")
-
     def _process_one(
         self,
         file_path: str,
@@ -2175,6 +2139,10 @@ class DocGraphPipeline:
 
         file_hash = hashlib.md5(Path(file_path).read_bytes()).hexdigest()
         doc_id = file_hash[:16]
+
+        # force 时清除所有阶段状态，确保真正强制重跑
+        if force:
+            self.db.delete_pipeline_stages(doc_id)
 
         # 尽早持久化 documents 记录，避免阶段中断后 documents 表为空
         total_pages = 0
@@ -2198,6 +2166,28 @@ class DocGraphPipeline:
         )
 
         try:
+            # 数据一致性检查：stage1/stage2 已完成但关键产物缺失时重置
+            result_md_path = (
+                Config.DB_PATH.parent / Config.PARSE_OUTPUT_DIR / doc_id / "result.md"
+            )
+            if (
+                self._get_pipeline_stage_status(doc_id, "stage1") == "done"
+                and not result_md_path.exists()
+            ):
+                logger.warning(f"result.md 缺失，重置 stage1/stage2 | doc_id={doc_id}")
+                self.db.upsert_pipeline_stage(doc_id, "stage1", "pending")
+                self.db.upsert_pipeline_stage(doc_id, "stage2", "pending")
+
+            jsonl_path_check = Config.DB_PATH.parent / Config.BATCH_OUTPUT_DIR / f"{doc_id}.jsonl"
+            blocks_path_check = (
+                Config.DB_PATH.parent / Config.BATCH_OUTPUT_DIR / f"{doc_id}_blocks.json"
+            )
+            if self._get_pipeline_stage_status(doc_id, "stage2") == "done" and (
+                not jsonl_path_check.exists() or not blocks_path_check.exists()
+            ):
+                logger.warning(f"JSONL 或 blocks 缺失，重置 stage2 | doc_id={doc_id}")
+                self.db.upsert_pipeline_stage(doc_id, "stage2", "pending")
+
             # 阶段1: PDF → Markdown
             if self._should_run_stage(doc_id, "stage1"):
                 self._set_stage_running(doc_id, "stage1")
@@ -2240,20 +2230,28 @@ class DocGraphPipeline:
 
             # 阶段3: 提交 Batch API 并保存结果
             results_path: Path | None = None
+            # 数据一致性检查：stage3 已完成但 results.jsonl 缺失时重置
+            results_path_check = (
+                Config.DB_PATH.parent / Config.BATCH_OUTPUT_DIR / f"{doc_id}_results.jsonl"
+            )
+            if (
+                self._get_pipeline_stage_status(doc_id, "stage3") == "done"
+                and not results_path_check.exists()
+            ):
+                logger.warning(f"results.jsonl 缺失，重置 stage3 | doc_id={doc_id}")
+                self.db.upsert_pipeline_stage(doc_id, "stage3", "pending")
+
             stage3_was_done = self._get_pipeline_stage_status(doc_id, "stage3") == "done"
             if not self._should_run_stage(doc_id, "stage3"):
-                results_path = (
-                    Config.DB_PATH.parent / Config.BATCH_OUTPUT_DIR / f"{doc_id}_results.jsonl"
-                )
+                results_path = results_path_check
             elif not self._llm_configured():
                 reason = "LLM API key not configured"
                 logger.info(f"跳过阶段3 | doc_id={doc_id} | reason={reason}")
                 self._set_stage_skipped(doc_id, "stage3", reason)
-                # 写入空 results.jsonl，使 stage4 能解析为空结果并写入基础 blocks
-                results_path = (
-                    Config.DB_PATH.parent / Config.BATCH_OUTPUT_DIR / f"{doc_id}_results.jsonl"
-                )
-                results_path.write_text("", encoding="utf-8")
+                # 仅在文件不存在时写入空 results.jsonl，避免覆盖历史有效结果
+                results_path = results_path_check
+                if not results_path.exists():
+                    results_path.write_text("", encoding="utf-8")
             else:
                 self._set_stage_running(doc_id, "stage3")
                 try:
@@ -2268,8 +2266,11 @@ class DocGraphPipeline:
                     self._set_stage_failed(doc_id, "stage3", e)
                     raise
 
-            # 若 stage3 本次从非 done 变为 done，需要重跑 stage4 补充实体
-            if not stage3_was_done and self._get_pipeline_stage_status(doc_id, "stage3") == "done":
+            # 若 stage3 本次从非 done 变为 done，或本次 skipped，需要重跑 stage4
+            stage3_now = self._get_pipeline_stage_status(doc_id, "stage3")
+            if not stage3_was_done and stage3_now == "done":
+                self.db.upsert_pipeline_stage(doc_id, "stage4", "pending")
+            if stage3_now == "skipped":
                 self.db.upsert_pipeline_stage(doc_id, "stage4", "pending")
 
             # 数据一致性检查：stage4 已完成但 blocks 不存在时重跑
@@ -2318,7 +2319,9 @@ class DocGraphPipeline:
             if self._get_pipeline_stage_status(doc_id, "stage6") == "done":
                 blocks = self.db.query_blocks_by_doc(doc_id)
                 if any(b["status"] != "done" for b in blocks):
+                    self.db.upsert_pipeline_stage(doc_id, "stage5", "pending")
                     self.db.upsert_pipeline_stage(doc_id, "stage6", "pending")
+
 
             # 阶段6: 提交 Embedding Batch API 并解析入库
             if not self._should_run_stage(doc_id, "stage6"):
@@ -2359,16 +2362,29 @@ class DocGraphPipeline:
         """根据各阶段状态统一设置 documents.status."""
         stages = self.db.get_pipeline_stages(doc_id)
         required = ["stage1", "stage2", "stage3", "stage4", "stage5", "stage6"]
-        has_failed = any(stages.get(s, {}).get("status") == "failed" for s in required)
-        has_incomplete = any(
-            stages.get(s, {}).get("status") not in ("done", "skipped") for s in required
-        )
-        has_skipped = any(stages.get(s, {}).get("status") == "skipped" for s in required)
+
+        # 显式处理缺失记录：缺失视为未完成
+        stage_statuses: dict[str, str] = {}
+        for s in required:
+            record = stages.get(s)
+            stage_statuses[s] = record["status"] if record else "pending"
+
+        has_failed = any(stage_statuses[s] == "failed" for s in required)
+        has_incomplete = any(stage_statuses[s] not in ("done", "skipped") for s in required)
+        has_skipped = any(stage_statuses[s] == "skipped" for s in required)
+
+        skipped_reasons = [
+            f"{s}({stages[s].get('error_message', '')})"
+            for s in required
+            if stage_statuses[s] == "skipped"
+        ]
 
         if has_failed:
             status = DocumentStatus.FAILED
         elif has_incomplete or has_skipped:
             status = DocumentStatus.PROCESSING
+            if skipped_reasons:
+                logger.info(f"文档部分阶段跳过 | doc_id={doc_id} | skipped={skipped_reasons}")
         else:
             status = DocumentStatus.DONE
 

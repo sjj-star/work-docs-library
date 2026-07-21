@@ -55,7 +55,7 @@ class TestSensitiveMasking:
 
     def test_to_dict_ignores_mask_sensitive_false(self, monkeypatch):
         monkeypatch.setattr(Config, "LLM_API_KEY", "secret-llm")
-        result = Config.to_dict(mask_sensitive=False)
+        result = Config.to_dict()
         assert result["LLM_API_KEY"] == "***"
 
 

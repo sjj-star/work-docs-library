@@ -161,13 +161,13 @@ PYTHONPATH=scripts ./.venv/bin/python -m pytest scripts/tests/ -v
   2. 阻止 `load_dotenv` 重新加载 `.env` 文件
   3. 重定向 Config 默认路径到临时目录（DB、FAISS、Graph 均隔离）
 - **回归即修复**：任何导致测试失败的变更必须当场修复
-- **536 个测试用例必须全部通过**（0 skipped）
+- **496 个测试用例必须全部通过**（0 skipped）
 
 ### 测试文件清单
 
 > 完整的测试文件清单与分类见 `README.md`「开发与测试」（唯一权威详表），此处不再重复维护，避免双份漂移。
 
-**当前状态**：536 passed, 0 skipped, 0 failed。
+**当前状态**：496 passed, 0 skipped, 0 failed。
 
 ### Mock 方法
 使用 `monkeypatch.setattr` 替换客户端类方法：
@@ -220,10 +220,14 @@ monkeypatch.setattr(
 | `scripts/parsers/*.py` | ⚠️ 需批准 | 解析器影响数据输入质量 |
 | `kimi.plugin.json` | ⚠️ 需批准 | Kimi Code 新规范插件 Manifest |
 | `scripts/mcp_server.py` | ⚠️ 需批准 | MCP stdio server，协议层变更影响插件可用性 |
+| `scripts/plugin_router.py` | ⚠️ 需批准 | 工具函数库，影响 MCP 工具行为 |
+| `scripts/admin_tools.py` | ⚠️ 需批准 | 内部管理命令，涉及数据改写 |
 | `skills/using-workdocs/SKILL.md` | ⚠️ 需批准 | 入口 Skill，影响 Agent 使用行为 |
 | `skills/ingesting-workdocs/SKILL.md` | ⚠️ 需批准 | 入库工作流 Skill |
 | `skills/exploring-workdocs/SKILL.md` | ⚠️ 需批准 | 查询+图谱联合工作流 Skill |
-
+| `skills/agentic-search/SKILL.md` | ⚠️ 需批准 | 多跳检索工作流 Skill |
+| `skills/synthesizing-workdocs/SKILL.md` | ⚠️ 需批准 | 综合报告工作流 Skill |
+| `skills/fixing-workdocs/SKILL.md` | ⚠️ 需批准 | 错误修正工作流 Skill |
 | `README.md` / `AGENTS.md` / `DESIGN.md` | ✅ 可改 | 文档必须随代码同步更新 |
 | `knowledge_base/` | ❌ 禁止 | 运行时生成数据 |
 
@@ -312,7 +316,6 @@ monkeypatch.setattr(
 - ✅ 质量：`confidence`/`verified`/`feedback_score`、冲突日志、`usage_logs`/`block_activation` 使用跟踪、`fixing-workdocs` 修正闭环
 - ✅ API 错误处理：统一 `APIClient` + Provider + `RetryPolicy`，429/5xx 重试，401/402/403/配额类 429 快速失败；Embedding 超长拆分、单条失败隔离
 - ✅ Skill：`using-workdocs`、`ingesting-workdocs`、`exploring-workdocs`、`agentic-search`、`synthesizing-workdocs`、`fixing-workdocs`
-- ✅ 测试：529 passed, 0 skipped, 0 failed
 
 详细历史见 git log 与 `DESIGN.md` 各章节。
 

@@ -49,7 +49,7 @@ class StatusCollector:
             doc_id = doc.doc_id
             blocks = block_dist.get(
                 doc_id,
-                {"total": 0, "pending": 0, "embedded": 0, "done": 0, "skipped": 0, "failed": 0},
+                {"total": 0, "pending": 0, "embedded": 0, "done": 0, "failed": 0},
             )
             pipeline_stages = self.svc.db.get_pipeline_stages(doc_id)
             doc_list.append(
@@ -238,7 +238,7 @@ class StatusCollector:
 
     def collect_config_status(self) -> dict[str, Any]:
         """运行配置状态（脱敏）."""
-        cfg = Config.to_dict(mask_sensitive=True)
+        cfg = Config.to_dict()
         allowed_dirs = [
             str(Path.cwd()),
             str(Config.DB_PATH.parent),

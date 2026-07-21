@@ -202,16 +202,6 @@ class KnowledgeDB:
             status=row["status"],
         )
 
-    def search_documents_by_title(self, pattern: str) -> list[Document]:
-        """search_documents_by_title 函数."""
-        with self._connect() as conn:
-            rows = conn.execute(
-                "SELECT doc_id FROM documents WHERE title LIKE ? ORDER BY extracted_at DESC",
-                (f"%{pattern}%",),
-            ).fetchall()
-        docs = [self.get_document(r["doc_id"]) for r in rows if r["doc_id"]]
-        return [d for d in docs if d is not None]
-
     def get_document_by_path(self, path: str) -> Document | None:
         """get_document_by_path 函数."""
         with self._connect() as conn:
@@ -480,30 +470,6 @@ class KnowledgeDB:
                     (json.dumps(meta, ensure_ascii=False), block_db_id),
                 )
 
-    def get_pending_blocks(self, doc_id: str | None = None) -> list[tuple]:
-        """获取待处理的 content_blocks."""
-        sql = (
-            "SELECT id, doc_id, block_id, content, seq_index, metadata "
-            "FROM content_blocks WHERE status = 'pending'"
-        )
-        params: tuple = ()
-        if doc_id:
-            sql += " AND doc_id = ?"
-            params = (doc_id,)
-        with self._connect() as conn:
-            rows = conn.execute(sql, params).fetchall()
-        return [
-            (
-                r["id"],
-                r["doc_id"],
-                r["block_id"],
-                r["content"],
-                r["seq_index"],
-                json.loads(r["metadata"] or "{}"),
-            )
-            for r in rows
-        ]
-
     def get_block_by_db_id(self, db_id: int) -> dict | None:
         """按 ID 查询单个 content_block."""
         with self._connect() as conn:
@@ -723,7 +689,7 @@ class KnowledgeDB:
         sql += " GROUP BY status"
         with self._connect() as conn:
             rows = conn.execute(sql, params).fetchall()
-        result: dict[str, int] = {"pending": 0, "embedded": 0, "done": 0, "skipped": 0, "failed": 0}
+        result: dict[str, int] = {"pending": 0, "embedded": 0, "done": 0, "failed": 0}
         for row in rows:
             status = row["status"] or "pending"
             result[status] = row["c"]
@@ -743,7 +709,7 @@ class KnowledgeDB:
         from collections import defaultdict
 
         docs: dict[str, dict[str, int]] = defaultdict(
-            lambda: {"total": 0, "pending": 0, "embedded": 0, "done": 0, "skipped": 0, "failed": 0}
+            lambda: {"total": 0, "pending": 0, "embedded": 0, "done": 0, "failed": 0}
         )
         for row in rows:
             doc_id = row["doc_id"]
@@ -832,42 +798,6 @@ class KnowledgeDB:
 
     # -- 评估数据集 --
 
-    def save_eval_dataset(self, dataset: EvalDataset) -> None:
-        """保存评估数据集及其问题列表."""
-        created_at = dataset.created_at or datetime.now().isoformat()
-        with self._connect() as conn:
-            conn.execute(
-                """
-                INSERT OR REPLACE INTO eval_datasets (name, metadata, created_at)
-                VALUES (?, ?, ?)
-                """,
-                (
-                    dataset.name,
-                    json.dumps(dataset.metadata, ensure_ascii=False),
-                    created_at,
-                ),
-            )
-            conn.execute("DELETE FROM eval_questions WHERE dataset_name = ?", (dataset.name,))
-            for q in dataset.questions:
-                conn.execute(
-                    """
-                    INSERT INTO eval_questions (
-                        dataset_name, question, ground_truth_answer,
-                        ground_truth_context_ids, ground_truth_doc_ids, tags, metadata
-                    )
-                    VALUES (?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        dataset.name,
-                        q.question,
-                        q.ground_truth_answer,
-                        json.dumps(q.ground_truth_context_ids, ensure_ascii=False),
-                        json.dumps(q.ground_truth_doc_ids, ensure_ascii=False),
-                        json.dumps(q.tags, ensure_ascii=False),
-                        json.dumps(q.metadata, ensure_ascii=False),
-                    ),
-                )
-
     def load_eval_dataset(self, name: str) -> EvalDataset:
         """加载评估数据集及其问题列表."""
         with self._connect() as conn:
@@ -896,21 +826,6 @@ class KnowledgeDB:
             created_at=row["created_at"] or "",
             metadata=json.loads(row["metadata"] or "{}"),
         )
-
-    def list_eval_datasets(self) -> list[str]:
-        """列出所有评估数据集名称，按创建时间降序."""
-        with self._connect() as conn:
-            rows = conn.execute(
-                "SELECT name FROM eval_datasets ORDER BY created_at DESC"
-            ).fetchall()
-        return [r["name"] for r in rows]
-
-    def delete_eval_dataset(self, name: str) -> bool:
-        """删除评估数据集及其问题."""
-        with self._connect() as conn:
-            conn.execute("DELETE FROM eval_questions WHERE dataset_name = ?", (name,))
-            cur = conn.execute("DELETE FROM eval_datasets WHERE name = ?", (name,))
-            return cur.rowcount > 0
 
     # -- 使用日志与激活统计 --
 
@@ -1066,32 +981,3 @@ class KnowledgeDB:
                 )
                 deleted_by_size = cur2.rowcount
         return {"deleted_by_time": deleted_by_time, "deleted_by_size": deleted_by_size}
-
-    def add_usage_flag(
-        self,
-        log_id: int,
-        kind: str,
-        identifier: dict[str, Any],
-        reason: str,
-    ) -> bool:
-        """在指定日志上添加问题标记.
-
-        Args:
-            log_id: usage_logs 行 id
-            kind: entity / relation / block
-            identifier: 对象标识，例如 {"type": "Module", "name": "EPWM_TZ"}
-            reason: 问题描述
-        """
-        with self._connect() as conn:
-            row = conn.execute(
-                "SELECT flagged_items FROM usage_logs WHERE id = ?", (log_id,)
-            ).fetchone()
-            if not row:
-                return False
-            flags: list[dict[str, Any]] = json.loads(row["flagged_items"] or "[]")
-            flags.append({"kind": kind, "identifier": identifier, "reason": reason})
-            conn.execute(
-                "UPDATE usage_logs SET flagged_items = ? WHERE id = ?",
-                (json.dumps(flags, ensure_ascii=False), log_id),
-            )
-        return True

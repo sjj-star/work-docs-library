@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from core.config import Config
+from core.evaluation import ALLOWED_RETRIEVERS
 from core.graph_store import GraphEntity, GraphRelation
 from core.knowledge_base_service import KnowledgeBaseService
 from core.query_service import QueryService
@@ -39,11 +40,11 @@ if __name__ == "__main__":
 logger = logging.getLogger("plugin_router")
 
 
-#: 评估工具支持的检索器类型。
-_EVALUATION_RETRIEVERS: set[str] = {"semantic", "hybrid", "reranked"}
+#: 评估工具支持的检索器类型（唯一源头：core.evaluation.ALLOWED_RETRIEVERS）。
+_EVALUATION_RETRIEVERS: set[str] = ALLOWED_RETRIEVERS
 
 #: MCP 搜索工具支持的模式。
-_SEARCH_MODES: set[str] = {"semantic", "hybrid", "reranked"}
+_SEARCH_MODES: set[str] = _EVALUATION_RETRIEVERS
 
 #: MCP 探索工具支持的模式。
 _EXPLORE_MODES: set[str] = {
@@ -855,83 +856,6 @@ def tool_graph_feedback(params: dict) -> dict:
         return {"success": False, "error": "action must be 'submit' or 'query'"}
 
 
-def tool_graph_conflicts(params: dict) -> dict:
-    """查询知识图谱冲突日志（同名实体属性覆盖记录）.
-
-    参数:
-        entity_type: 实体类型过滤
-        name: 实体名称过滤
-        limit: 最大返回数量（默认 100）
-    """
-    svc = _get_service()
-    logs = svc.get_conflict_logs(
-        entity_type=params.get("entity_type"),
-        name=params.get("name"),
-        limit=params.get("limit", Config.PLUGIN_DEFAULT_LIMIT),
-    )
-    return {"success": True, "count": len(logs), "logs": logs}
-
-
-# ---------------------------------------------------------------------------
-# 维护与溯源工具
-# ---------------------------------------------------------------------------
-
-
-def tool_graph_provenance(params: dict) -> dict:
-    """查询知识图谱实体的来源溯源（实体 → 来源 block → 原始文档）.
-
-    参数:
-        entity_type: 实体类型（required）
-        name: 实体名称（required）
-        doc_id: 可选，限定只查某文档的来源
-    """
-    entity_type = params.get("entity_type")
-    name = params.get("name")
-    if not entity_type or not name:
-        return {"success": False, "error": "Missing entity_type or name"}
-
-    doc_id = params.get("doc_id")
-    svc = _get_service()
-    entity = svc.get_entity(entity_type, name)
-    if not entity:
-        return {"success": True, "count": 0, "sources": []}
-
-    sources: list[dict[str, Any]] = []
-    target_doc_ids = [doc_id] if doc_id else sorted(entity.source_doc_ids)
-
-    for src_doc_id in target_doc_ids:
-        doc = svc.get_document(src_doc_id)
-        doc_title = doc.title if doc else src_doc_id
-
-        # 通过桥接索引反向查找包含该实体的 blocks（O(1) 而非 O(N) 扫描）
-        chunks = svc.find_chunks_by_entity(entity_type, name, doc_id=src_doc_id)
-        for ck in chunks:
-            for me in ck.metadata.get("extracted_entities", []):
-                if me.get("type") == entity_type and me.get("name") == name:
-                    props_snapshot: dict[str, Any] = {}
-                    if entity.doc_properties and src_doc_id in entity.doc_properties:
-                        props_snapshot = dict(entity.doc_properties[src_doc_id])
-                    sources.append(
-                        {
-                            "doc_id": src_doc_id,
-                            "doc_title": doc_title,
-                            "chunk_db_id": ck.id,
-                            "chapter_title": ck.chapter_title,
-                            "confidence": me.get("confidence", entity.confidence),
-                            "properties_snapshot": props_snapshot,
-                        }
-                    )
-                    break
-
-    return {
-        "success": True,
-        "entity_type": entity_type,
-        "name": name,
-        "count": len(sources),
-        "sources": sources,
-    }
-
-
 def tool_rebuild_global_graph(params: dict) -> dict:
     """全量重建全局知识图谱（清空后从所有子图重新加载，用于修复不一致）."""
     svc = _get_service()
@@ -948,7 +872,7 @@ def tool_config(params: dict) -> dict:
     from core.config import Config
 
     # Always mask sensitive keys regardless of caller request (defense in depth).
-    config_dict = Config.to_dict(mask_sensitive=True)
+    config_dict = Config.to_dict()
 
     groups: dict[str, dict[str, Any]] = {
         "LLM 配置": {},
@@ -1029,7 +953,6 @@ def tool_config(params: dict) -> dict:
         "PLUGIN_HYBRID_RRF_K": "Plugin 配置",
         "USAGE_LOG_MAX_DAYS": "Plugin 配置",
         "USAGE_LOG_MAX_ROWS": "Plugin 配置",
-        "RERANK_CROSS_ENCODER_MODEL": "Plugin 配置",
         "GRAPH_MAX_PATH_DEPTH": "Pipeline 配置",
         "BLOCK_MAX_CHARS": "Pipeline 配置",
         "DB_PATH": "路径配置",
@@ -1111,8 +1034,6 @@ TOOL_MAP = {
     "graph_upsert_relation": tool_graph_upsert_relation,
     "graph_delete_relation": tool_graph_delete_relation,
     "graph_feedback": tool_graph_feedback,
-    "graph_conflicts": tool_graph_conflicts,
-    "graph_provenance": tool_graph_provenance,
     "rebuild_global_graph": tool_rebuild_global_graph,
     "usage_report": tool_usage_report,
     "usage_clean": tool_usage_clean,

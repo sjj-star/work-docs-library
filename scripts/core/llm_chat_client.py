@@ -126,11 +126,3 @@ class BaseLLMClient:
     def close(self) -> None:
         """关闭底层 HTTP 客户端."""
         self._client.close()
-
-    @staticmethod
-    def _load_prompt(name: str) -> str:
-        """从 prompts/ 目录加载提示词文件，若不存在则返回内置默认值."""
-        path = Config.PROMPT_DIR / f"{name}.txt"
-        if path.exists():
-            return path.read_text(encoding="utf-8")
-        return ""
